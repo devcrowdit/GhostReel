@@ -19,6 +19,11 @@ on:
         description: "Release tag to publish under (e.g. v0.1.1). Created if it doesn't exist."
         required: true
         default: "v0.0.0-dev"
+      runner:
+        description: "Where to build. github: free for public repos, 4 cores. blacksmith: 16 cores, spends Blacksmith credits (a 16-vCPU minute costs 8 free minutes; Windows more)."
+        type: choice
+        options: [github, blacksmith]
+        default: github
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -58,17 +63,16 @@ jobs:
               draft: true, prerelease: false,
             });
             return data.id;
-  # Runner choice keeps the build free: Blacksmith's free tier (3,000 2-vCPU-Linux-equivalent
-  # minutes/month) pays for the small Linux job, while Windows — the long one, and billed at a
-  # higher rate — runs on GitHub's runners, which are free for public repos.
+  # Default to GitHub's runners: unlimited and free on a public repo. The CUDA helpers are cached,
+  # so a release is ~20 min there; pick the blacksmith runner only when a helper rebuild needs speed.
   linux-x64:
     name: linux-x64
     needs: create-release
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    runs-on: ${{ github.event.inputs.runner == 'blacksmith' && 'blacksmith-16vcpu-ubuntu-2204' || 'ubuntu-22.04' }}
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ github.event.inputs.runner == 'blacksmith' && '16' || '4' }}
       GHOSTREEL_GPU: cuda
     steps:
       - name: Free disk space
@@ -147,7 +151,7 @@ jobs:
         if: steps.helpers.outputs.cache-hit != 'true'
         run: scripts/build-helpers.sh asr llm
         env:
-          JOBS: "4"
+          JOBS: ${{ github.event.inputs.runner == 'blacksmith' && '16' || '4' }}
 
       - name: Save CUDA helpers
         if: steps.helpers.outputs.cache-hit != 'true'
@@ -224,11 +228,11 @@ jobs:
   windows-x64:
     name: windows-x64
     needs: create-release
-    runs-on: windows-2022
+    runs-on: ${{ github.event.inputs.runner == 'blacksmith' && 'blacksmith-16vcpu-windows-2025' || 'windows-2022' }}
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ github.event.inputs.runner == 'blacksmith' && '16' || '4' }}
       GHOSTREEL_GPU: cuda
     steps:
       - name: Checkout repository
@@ -290,12 +294,12 @@ jobs:
       - name: Build helper ghostreel-asr
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 4 --release -p ghostreel-asr --features cuda
+        run: cargo build -j ${{ github.event.inputs.runner == 'blacksmith' && '16' || '4' }} --release -p ghostreel-asr --features cuda
 
       - name: Build helper ghostreel-llm
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 4 --release -p ghostreel-llm --features cuda
+        run: cargo build -j ${{ github.event.inputs.runner == 'blacksmith' && '16' || '4' }} --release -p ghostreel-llm --features cuda
 
       - name: Save CUDA helpers
         if: steps.helpers.outputs.cache-hit != 'true'
