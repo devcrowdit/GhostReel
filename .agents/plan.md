@@ -232,7 +232,7 @@ meta(key, value)                     -- schema_version, embed_model, embed_dim, 
 chat_sessions(id, project_id, title, created_at, updated_at)
 chat_messages(id, session_id, role, content, tool_calls_json, created_at)
 scripts(id, project_id, session_id, title, version, script_json, created_at)  -- versioned drafts
-exports(id, script_id, format, path, created_at)      -- 'otio' | 'fcp_xml'
+exports(id, script_id, format, path, created_at)      -- 'otio' | 'fcp_xml' | 'preview_mp4'
 ```
 Schema v1 (M0) has no projects; **v2 (M1)** adds `projects` + `project_folders` (migrations are
 append-only). Video/chunk queries join through `project_folders → folders → videos` for scoping.
@@ -271,7 +271,8 @@ project's indexed footage, produces an editable **script with real clips**, and 
 5. **Validate** — before saving/export: every clip references an existing video in the project,
    `0 ≤ in < out ≤ duration`, in/out snapped to transcript-segment or frame boundaries (no cut
    mid-word), total duration vs target reported.
-6. **Export** — `.otio` + FCP7 `.xml` (+ optional narration `.txt`/`.srt`); open in Premiere via
+6. **Preview** — watch the timeline inside GhostReel before exporting (see *Timeline preview*).
+7. **Export** — `.otio` + FCP7 `.xml` (+ optional narration `.txt`/`.srt`); open in Premiere via
    *File → Import*.
 
 ### Script schema (v1)
@@ -305,6 +306,28 @@ project's indexed footage, produces an editable **script with real clips**, and 
 Times are `RationalTime` at the **source clip rate** for `source_range` and the **sequence rate**
 (project fps) for the timeline; 29.97/23.976 handled as rational (30000/1001). Paths are absolute
 `file://` URLs; Windows paths converted properly (`file:///C:/…`).
+
+### Timeline preview
+The preview is rendered **from the same OTIO timeline that gets exported** (Script → OTIO →
+preview), so what you watch is exactly what Premiere will import.
+
+- **Segment proxies (cache):** for every V1 clip, ffmpeg cuts `in..out` from the source into a
+  small proxy (540p, constant frame rate = sequence fps, 48 kHz stereo AAC, keyframe at start).
+  NVENC (`h264_nvenc`) when available, else `libx264 -preset veryfast`. Cached in
+  `<data>/proxies/<content_hash>_<in>_<out>_<fps>.mp4`, so reordering or trimming one beat only
+  re-cuts the changed clips.
+- **Instant in-app playback:** a timeline player in the app plays the proxies back-to-back
+  (preloading the next `<video>` element to avoid gaps), with a playhead over the mini timeline,
+  the current beat highlighted, `on_screen_text` drawn as an HTML overlay and `narration` shown as
+  captions. Clicking a clip seeks there; editing the script re-plays from the edited beat.
+- **Rendered preview file:** "Render preview" concatenates the cached proxies (`concat` demuxer,
+  stream copy — seconds, no re-encode) into `preview.mp4`, optionally burning in titles
+  (`drawtext`) and narration subtitles (`subtitles=narration.srt`). Shareable, and a fallback when
+  the webview can't play a codec (Linux WebKitGTK without `gst-libav` → proxies re-encoded to
+  VP9/WebM, which base GStreamer plays).
+- `ghostreel script preview <script-id> [-o preview.mp4] [--burn-titles] [--burn-narration]`.
+- Gaps (`Gap` items, muted clips) render as black/silence of the right length so timing matches
+  the export.
 
 ### `ghostreel-otio` sidecar (D14)
 - Tiny Python CLI: `ghostreel-otio convert in.otio out.xml --adapter fcp_xml` and
@@ -370,6 +393,7 @@ ghostreel show <video> [--transcript] [--frames] [--json]
 ghostreel ask "<question>"                                 # RAG answer w/ citations
 ghostreel script chat --project <name> [--session <id>]         # interactive script chat (M8)
 ghostreel script show <script-id> [--json]
+ghostreel script preview <script-id> [-o preview.mp4] [--burn-titles] [--burn-narration]
 ghostreel script export <script-id> --format fcp_xml|otio -o edit.xml   # Premiere: File → Import
 ghostreel reindex --embeddings                             # after embed-model change
 ghostreel doctor                                           # ffmpeg, whisper model, AI backend chosen, GPU
@@ -447,7 +471,7 @@ licenses (Bonsai, embeddinggemma = Gemma terms) shown in the download step.
 | M5 | Chunking, embeddings, FTS5 + sqlite-vec, hybrid search in CLI | `ghostreel search` returns right moments on eval queries |
 | M6 | Tauri UI: library, search, player w/ seek, settings, progress | Usable end-to-end in the app |
 | M7 | First-run wizard, watcher, summaries, `ask`, packaging: NSIS (Windows) + AppImage/deb/rpm/CLI tarball (Linux) + CI | Fresh Windows PC **and** fresh Linux install (no CUDA toolkit, no highllama/GhostPen): install → wizard → search works |
-| M8 | **Script chat + OTIO/FCP XML export** (§4a): project-scoped tools, constrained agent loop (local) / OpenAI tools (server), versioned scripts, script editor + mini timeline, Script→`.otio` writer, `ghostreel-otio` sidecar (`fcp_xml`), packaging of the sidecar | Chat produces a grounded 60–90 s script from real project footage; exported XML imports into **Premiere Pro** on the Windows PC with correct clips, in/out and markers |
+| M8 | **Script chat + OTIO/FCP XML export** (§4a): project-scoped tools, constrained agent loop (local) / OpenAI tools (server), versioned scripts, script editor + mini timeline, Script→`.otio` writer, **timeline preview** (cached segment proxies, in-app playback, rendered `preview.mp4`), `ghostreel-otio` sidecar (`fcp_xml`), packaging of the sidecar | Chat produces a grounded 60–90 s script from real project footage; in-app preview plays the cut with titles/narration overlays and `preview.mp4` renders in seconds from cache; exported XML imports into **Premiere Pro** on the Windows PC with correct clips, in/out and markers |
 | Backlog | MCP server, CLIP image similarity, video-clip input to the VLM, macOS Metal, voice-over TTS track | — |
 
 Keep a small **eval set** (10 videos, ~30 queries with expected video+timestamp) from M5 to

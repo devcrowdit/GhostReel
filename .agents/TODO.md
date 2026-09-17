@@ -20,7 +20,7 @@
 ## Later milestones
 See plan §9: M2 transcripts (ghostreel-asr + GhostPen client), M3 frames, M4 model manager +
 vision, M5 chunk/embed/search, M6 UI, M7 packaging (NSIS, AppImage/deb/rpm/CLI tarball) + CI,
-**M8 (last): per-project script chat → OpenTimelineIO → FCP XML for Premiere Pro** (plan §4a).
+**M8 (last): per-project script chat → timeline preview → OpenTimelineIO → FCP XML for Premiere Pro** (plan §4a).
 
 ## Open
 - [ ] S0 on Windows (3070): MSVC CUDA build, bundled cuBLAS, CPU fallback, VRAM with desktop
