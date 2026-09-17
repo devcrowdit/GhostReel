@@ -183,6 +183,7 @@ export const PHASE_LABELS: Record<string, string> = {
   hash: "Reading new files",
   probe: "Reading video details",
   download: "Downloading speech model",
+  download_model: "Downloading model",
   transcribe_server: "Transcribing (GhostPen)",
   transcribe_local: "Transcribing",
   frames: "Picking keyframes",
@@ -217,7 +218,8 @@ export type TaskKind =
   | { type: "index"; project_id: number }
   | { type: "chat"; project_id: number; session_id: number }
   | { type: "render_preview"; script_id: number; burn_titles: boolean; burn_narration: boolean }
-  | { type: "export"; script_id: number; format: string; path: string };
+  | { type: "export"; script_id: number; format: string; path: string }
+  | { type: "download_model"; model_id: string };
 
 export interface Task {
   id: number;
@@ -448,3 +450,45 @@ export const getScript = (scriptId: number) =>
 
 export const saveScript = (projectId: number, script: Script, sessionId: number | null) =>
   invoke<SaveScriptView>("save_script", { projectId, script, sessionId });
+
+// ---- models management -------------------------------------------------------------------
+
+export type ModelKind = "whisper" | "vision" | "vision_projector" | "embedding";
+
+export interface CatalogEntry {
+  id: string;
+  kind: ModelKind;
+  file_name: string;
+  url: string;
+  size_bytes: number;
+  speed: number;
+  accuracy: number;
+  note: string;
+  languages: string;
+}
+
+export interface ModelStatus {
+  entry: CatalogEntry;
+  installed_path: string | null;
+  in_own_dir: boolean;
+  partial_bytes: number | null;
+}
+
+export interface ModelsStatusView {
+  dir: string;
+  models: ModelStatus[];
+  current_whisper_model?: string;
+}
+
+export const modelsStatus = () => invoke<ModelsStatusView>("models_status");
+export const enqueueModelDownload = (modelId: string) =>
+  invoke<number>("enqueue_model_download", { modelId });
+export const removeModel = (modelId: string) =>
+  invoke<void>("remove_model", { modelId });
+export const setWhisperModel = (modelId: string) =>
+  invoke<void>("set_whisper_model", { modelId });
+export const openModelsDir = () => invoke<void>("open_models_dir");
+
+/** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
+export const scoreMeter = (n: number) =>
+  "▰".repeat(Math.min(5, Math.max(0, n))) + "▱".repeat(Math.max(0, 5 - n));

@@ -112,6 +112,33 @@ enum Command {
         #[command(subcommand)]
         action: ScriptAction,
     },
+    /// Manage AI models (whisper, vision, embeddings).
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// List available models and installation status.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download a model by id.
+    Download {
+        /// Model id (e.g. tiny, large-v3-turbo, bonsai-27b, embeddinggemma-300M-Q8_0).
+        id: String,
+    },
+    /// Remove a model from GhostReel's models directory.
+    Remove {
+        /// Model id.
+        id: String,
+    },
+    /// Print the effective models directory.
+    Dir,
 }
 
 #[derive(Subcommand)]
@@ -289,6 +316,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Script { action } => script_cmd(&paths, action).await,
+        Command::Models { action } => models_cmd(&paths, action).await,
         Command::Config { action } => {
             match action {
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
@@ -305,6 +333,91 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     }
                 }
             }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn score_meter(n: u8) -> String {
+    let filled = n.min(5) as usize;
+    let empty = 5 - filled;
+    "▰".repeat(filled) + &"▱".repeat(empty)
+}
+
+fn print_models_table(models: &[ghostreel_core::models::ModelStatus]) {
+    println!("{:<26} {:<17} {:<9} {:<7} {:<9} STATUS", "ID", "KIND", "SIZE", "SPEED", "ACCURACY");
+    for m in models {
+        let size_str = human_size(m.entry.size_bytes as i64);
+        let speed_str = score_meter(m.entry.speed);
+        let acc_str = score_meter(m.entry.accuracy);
+        let kind_str = m.entry.kind.to_string();
+        let status_str = if let Some(path) = &m.installed_path {
+            if m.in_own_dir {
+                format!("✓ installed ({})", path.display())
+            } else {
+                format!("✓ found in {}", path.display())
+            }
+        } else if let Some(part) = m.partial_bytes {
+            format!("– partial ({})", human_size(part as i64))
+        } else {
+            "– not installed".to_string()
+        };
+
+        println!("{:<26} {:<17} {:<9} {:<7} {:<9} {}", m.entry.id, kind_str, size_str, speed_str, acc_str, status_str);
+    }
+}
+
+async fn models_cmd(paths: &Paths, action: ModelsAction) -> anyhow::Result<ExitCode> {
+    let config = Config::load(&paths.config_file).unwrap_or_default();
+    let models_dir = ghostreel_core::models::effective_models_dir(paths, &config);
+    match action {
+        ModelsAction::Dir => {
+            println!("{}", models_dir.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        ModelsAction::List { json } => {
+            let list = ghostreel_core::models::status(&models_dir, &config.models.search_paths);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            print_models_table(&list);
+            Ok(ExitCode::SUCCESS)
+        }
+        ModelsAction::Download { id } => {
+            let spec = match ghostreel_core::models::find_entry(&id) {
+                Some(entry) => entry.spec(),
+                None => ghostreel_core::models::whisper(&id).map_err(|e| anyhow::anyhow!("{e}"))?,
+            };
+            let is_tty = std::io::stdout().is_terminal();
+            let mut last_pct = 0;
+            let dest = ghostreel_core::models::download(&spec, &models_dir, |done, total| {
+                if let Some(total) = total {
+                    let pct = (done * 100).checked_div(total).unwrap_or(0);
+                    let done_h = human_size(done as i64);
+                    let total_h = human_size(total as i64);
+                    if is_tty {
+                        print!("\rDownloading {}: {} / {} ({}%)   ", spec.file_name, done_h, total_h, pct);
+                        let _ = std::io::stdout().flush();
+                    } else if pct >= last_pct + 10 || done == total {
+                        last_pct = pct;
+                        println!("Downloading {}: {} / {} ({}%)", spec.file_name, done_h, total_h, pct);
+                    }
+                } else if is_tty {
+                    print!("\rDownloading {}: {}   ", spec.file_name, human_size(done as i64));
+                    let _ = std::io::stdout().flush();
+                }
+            })
+            .await?;
+            if is_tty {
+                println!();
+            }
+            println!("Downloaded {} to {}", spec.file_name, dest.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        ModelsAction::Remove { id } => {
+            let dest = ghostreel_core::models::remove(&models_dir, &id).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Removed {}", dest.display());
             Ok(ExitCode::SUCCESS)
         }
     }

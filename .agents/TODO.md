@@ -45,6 +45,7 @@
       Tauri commands (`enqueue_preview`, `enqueue_export`, `preview_plan`), queue integration with live progress
       forwarding and cancel support, media server scope allowance for `/previews` and `/proxies`, and TypeScript
       client API bindings (`enqueuePreview`, `enqueueExport`, `previewPlan`).
+- [x] Model manager & Models page: core catalog (whisper tiny/base/small/medium/large-v3-turbo variants, Bonsai-27B vision + mmproj projector, embeddinggemma) with HTTP HEAD-verified byte sizes; status, remove, effective_models_dir helper; CLI `ghostreel models list|download|remove|dir`; Tauri background queue `DownloadModel` task with progress, ETA, and stream cancel; `ModelsPage` with live queue progress, whisper model radio selection bound to `stt.model`, and directory opening.
 
 ## M8b timeline preview
 - [x] Proxy segment caching (`<data_dir>/proxies/<hash>_<in_ms>_<out_ms>_<fps>_<w>x<h>.mp4`, 540p even width, 1s GOP, stereo AAC)

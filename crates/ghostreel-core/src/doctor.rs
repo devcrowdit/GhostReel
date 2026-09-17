@@ -121,7 +121,8 @@ pub async fn run(paths: &Paths) -> Report {
     let (ffmpeg, ffprobe, gpu, vp, ep, sp) =
         tokio::join!(tool("ffmpeg"), tool("ffprobe"), nvidia_gpus(), vision_probe, embed_probe, stt_probe);
 
-    let mut search: Vec<PathBuf> = vec![paths.models_dir()];
+    let models_dir = crate::models::effective_models_dir(paths, &config);
+    let mut search: Vec<PathBuf> = vec![models_dir];
     search.extend(config.models.search_paths.iter().cloned());
     let models = MODEL_FILES
         .iter()

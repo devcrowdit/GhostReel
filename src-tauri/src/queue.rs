@@ -30,6 +30,7 @@ pub enum TaskKind {
     RenderPreview { script_id: i64, burn_titles: bool, burn_narration: bool },
     Export { script_id: i64, format: String, path: String },
     Chat { project_id: i64, session_id: i64 },
+    DownloadModel { model_id: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -207,6 +208,7 @@ enum TaskOutcome {
     Preview { path: String },
     Export { path: String },
     Chat,
+    DownloadModel { path: String },
     Cancelled,
 }
 
@@ -244,6 +246,7 @@ pub async fn worker(app: AppHandle) {
                     None => Err("chat request missing".into()),
                 }
             }
+            TaskKind::DownloadModel { model_id } => run_download_model(&app, id, &model_id, cancel.clone()).await,
         };
         let queue = app.state::<Queue>();
         queue
@@ -264,6 +267,10 @@ pub async fn worker(app: AppHandle) {
                     }
                     Ok(TaskOutcome::Chat) => {
                         t.state = TaskState::Done;
+                    }
+                    Ok(TaskOutcome::DownloadModel { path }) => {
+                        t.state = TaskState::Done;
+                        t.output = Some(path);
                     }
                     Ok(TaskOutcome::Cancelled) => {
                         t.state = TaskState::Cancelled;
@@ -516,4 +523,94 @@ async fn run_chat(
         script_id: turn_res.script_id,
         issues: turn_res.issues,
     })
+}
+
+fn format_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 { format!("{:.1} GB", b / 1e9) } else { format!("{:.0} MB", b / 1e6) }
+}
+
+async fn run_download_model(
+    app: &AppHandle,
+    task_id: u64,
+    model_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<TaskOutcome, String> {
+    let p = Paths::resolve().map_err(|e| e.to_string())?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    let models_dir = ghostreel_core::models::effective_models_dir(&p, &config);
+
+    let (spec, size_bytes) = if let Some(e) = ghostreel_core::models::find_entry(model_id) {
+        (e.spec(), e.size_bytes)
+    } else if let Ok(s) = ghostreel_core::models::whisper(model_id) {
+        (s, 0)
+    } else {
+        return Err(format!("unknown model '{model_id}'"));
+    };
+
+    let size_str = if size_bytes > 0 { format!(" ({})", format_size(size_bytes)) } else { String::new() };
+    let note = format!("Downloading {}{size_str}", spec.file_name);
+
+    app.state::<Queue>()
+        .update(app, task_id, |t| {
+            t.note = Some(note);
+        })
+        .await;
+
+    let app_clone = app.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
+    let file_name = spec.file_name.clone();
+
+    let forward = tauri::async_runtime::spawn(async move {
+        let t0 = std::time::Instant::now();
+        let mut last_emit = std::time::Instant::now();
+        while let Some((done, total_opt)) = rx.recv().await {
+            let total = total_opt.unwrap_or(size_bytes).max(1);
+            let is_final = done >= total;
+            if !is_final && last_emit.elapsed() < std::time::Duration::from_millis(200) {
+                continue;
+            }
+            last_emit = std::time::Instant::now();
+            let frac = (done as f64 / total as f64).clamp(0.0, 1.0);
+            let elapsed = t0.elapsed().as_secs_f64();
+            let eta_secs = if frac > 0.01 && elapsed > 0.5 { Some((elapsed / frac) * (1.0 - frac)) } else { None };
+            let queue = app_clone.state::<Queue>();
+            queue
+                .update(&app_clone, task_id, |t| {
+                    t.progress = Some(Progress {
+                        phase: "download_model".to_string(),
+                        phase_done: done,
+                        phase_total: total,
+                        fraction: frac,
+                        eta_secs,
+                        elapsed_secs: elapsed,
+                        current: Some(std::path::PathBuf::from(&file_name)),
+                    });
+                })
+                .await;
+        }
+    });
+
+    let download_fut = ghostreel_core::models::download(&spec, &models_dir, move |done, total| {
+        let _ = tx.send((done, total));
+    });
+
+    let cancel_fut = async {
+        while !cancel.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    };
+
+    let outcome = tokio::select! {
+        res = download_fut => {
+            let path = res.map_err(|e| e.to_string())?;
+            Ok(TaskOutcome::DownloadModel { path: path.to_string_lossy().to_string() })
+        }
+        _ = cancel_fut => {
+            Ok(TaskOutcome::Cancelled)
+        }
+    };
+
+    let _ = forward.await;
+    outcome
 }

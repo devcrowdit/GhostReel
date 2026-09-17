@@ -182,9 +182,10 @@ pub async fn resolve_embed(paths: &Paths, config: &Config) -> EmbedSetup {
     let Some(helper) = locate_helper("ghostreel-llm") else {
         return EmbedSetup::Unavailable("local model helper ghostreel-llm not found".into());
     };
+    let models_dir = models::effective_models_dir(paths, config);
     let spec = models::embeddinggemma();
-    let found = models::find(&models::search_roots(&paths.models_dir(), &config.models.search_paths), &spec.file_name);
-    EmbedSetup::Local { helper, models_dir: paths.models_dir(), spec, found }
+    let found = models::find(&models::search_roots(&models_dir, &config.models.search_paths), &spec.file_name);
+    EmbedSetup::Local { helper, models_dir, spec, found }
 }
 
 pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
@@ -206,10 +207,11 @@ pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
     let Some(helper) = locate_helper("ghostreel-llm") else {
         return VisionSetup::Unavailable("local model helper ghostreel-llm not found".into());
     };
+    let models_dir = models::effective_models_dir(paths, config);
     let (model, mmproj) = models::bonsai_vision();
-    let roots = models::search_roots(&paths.models_dir(), &config.models.search_paths);
+    let roots = models::search_roots(&models_dir, &config.models.search_paths);
     let found = [&model, &mmproj].iter().filter_map(|s| models::find(&roots, &s.file_name)).collect();
-    VisionSetup::Local { helper, models_dir: paths.models_dir(), model, mmproj, found }
+    VisionSetup::Local { helper, models_dir, model, mmproj, found }
 }
 
 async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {
@@ -229,7 +231,8 @@ async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {
     } else {
         cfg.model.clone()
     };
-    local_stt(&paths.models_dir(), &config.models.search_paths, &model)
+    let models_dir = models::effective_models_dir(paths, config);
+    local_stt(&models_dir, &config.models.search_paths, &model)
 }
 
 /// large-v3-turbo (1.6 GB, ~2 GB VRAM) is far more accurate — names, accents, Spanish — but on CPU

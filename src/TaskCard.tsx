@@ -19,6 +19,8 @@ function taskLabel(task: Task): string {
       return `Rendering preview (script #${task.kind.script_id})`;
     case "export":
       return `Exporting (${task.kind.format})`;
+    case "download_model":
+      return `Downloading model (${task.kind.model_id})`;
   }
 }
 

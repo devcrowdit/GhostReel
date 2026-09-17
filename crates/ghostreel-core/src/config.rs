@@ -92,6 +92,8 @@ impl Default for SttConfig {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
+    /// Custom directory for downloaded model files. If unset, defaults to `Paths::models_dir()`.
+    pub dir: Option<PathBuf>,
     /// Extra directories searched for model files before downloading
     /// (e.g. `~/.lmstudio/models`), so an existing copy is reused.
     pub search_paths: Vec<PathBuf>,
@@ -165,5 +167,15 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[vision]\nbackend = \"cloud\"\n").unwrap();
         assert!(matches!(Config::load(&path), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn models_dir_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[models]\ndir = \"/custom/models\"\nsearch_paths = [\"/extra/path\"]\n").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.models.dir, Some(PathBuf::from("/custom/models")));
+        assert_eq!(cfg.models.search_paths, vec![PathBuf::from("/extra/path")]);
     }
 }

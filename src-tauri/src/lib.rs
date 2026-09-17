@@ -250,6 +250,64 @@ async fn clear_finished_tasks(app: AppHandle, queue: State<'_, queue::Queue>) ->
     Ok(())
 }
 
+#[derive(Serialize)]
+struct ModelsStatusView {
+    dir: PathBuf,
+    models: Vec<ghostreel_core::models::ModelStatus>,
+    current_whisper_model: String,
+}
+
+#[tauri::command]
+fn models_status() -> CmdResult<ModelsStatusView> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    let dir = ghostreel_core::models::effective_models_dir(&p, &config);
+    let models = ghostreel_core::models::status(&dir, &config.models.search_paths);
+    let current_whisper_model = config.stt.model;
+    Ok(ModelsStatusView { dir, models, current_whisper_model })
+}
+
+#[tauri::command]
+async fn enqueue_model_download(app: AppHandle, queue: State<'_, queue::Queue>, model_id: String) -> CmdResult<u64> {
+    let file_name = if let Some(e) = ghostreel_core::models::find_entry(&model_id) {
+        e.file_name
+    } else if let Ok(s) = ghostreel_core::models::whisper(&model_id) {
+        s.file_name
+    } else {
+        return Err(format!("unknown model '{model_id}'"));
+    };
+    let label = format!("Download {file_name}");
+    Ok(queue.enqueue(&app, queue::TaskKind::DownloadModel { model_id }, label).await)
+}
+
+#[tauri::command]
+fn remove_model(model_id: String) -> CmdResult<()> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    let dir = ghostreel_core::models::effective_models_dir(&p, &config);
+    ghostreel_core::models::remove(&dir, &model_id).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_whisper_model(model_id: String) -> CmdResult<()> {
+    let p = paths()?;
+    let mut config = Config::load(&p.config_file).unwrap_or_default();
+    config.stt.model = model_id;
+    config.save(&p.config_file).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_models_dir(app: AppHandle) -> CmdResult<()> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    let dir = ghostreel_core::models::effective_models_dir(&p, &config);
+    let _ = std::fs::create_dir_all(&dir);
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(err)
+}
+
 #[tauri::command]
 fn video_transcript(video_id: i64) -> CmdResult<Vec<TranscriptSegment>> {
     index::transcript(&open_db()?, video_id).map_err(err)
@@ -409,6 +467,11 @@ pub fn run() {
             list_scripts,
             get_script,
             save_script,
+            models_status,
+            enqueue_model_download,
+            remove_model,
+            set_whisper_model,
+            open_models_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

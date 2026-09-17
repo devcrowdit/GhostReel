@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { createProject, FPS_PRESETS, listProjects, type ProjectSummary } from "./api";
 import ActivityPage from "./ActivityPage";
+import ModelsPage from "./ModelsPage";
 import ProjectPage from "./ProjectPage";
 import StatusPage from "./StatusPage";
 import { isActive, useQueue } from "./useQueue";
 
-type Page = { kind: "status" } | { kind: "activity" } | { kind: "project"; id: number };
+type Page = { kind: "status" } | { kind: "models" } | { kind: "activity" } | { kind: "project"; id: number };
 
 function NewProject({ onCreated, onCancel }: { onCreated: (id: number) => void; onCancel: () => void }) {
   const [name, setName] = useState("");
@@ -122,6 +123,12 @@ export default function App() {
           )}
         </button>
         <button
+          className={`nav-item ${page.kind === "models" ? "active" : ""}`}
+          onClick={() => setPage({ kind: "models" })}
+        >
+          Models
+        </button>
+        <button
           className={`nav-item ${page.kind === "status" ? "active" : ""}`}
           onClick={() => setPage({ kind: "status" })}
         >
@@ -131,6 +138,8 @@ export default function App() {
       <div className="content">
         {page.kind === "status" ? (
           <StatusPage />
+        ) : page.kind === "models" ? (
+          <ModelsPage />
         ) : page.kind === "activity" ? (
           <ActivityPage />
         ) : (
