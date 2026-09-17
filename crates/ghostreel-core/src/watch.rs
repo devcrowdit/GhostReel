@@ -63,7 +63,7 @@ fn in_ignored_dir(path: &std::path::Path, roots: &[PathBuf]) -> bool {
     let Some(rel) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else { return false };
     let mut parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
     let file = parts.pop();
-    parts.iter().any(|d| crate::media::is_ignored_dir(d)) || file.is_some_and(|f| f.starts_with('.'))
+    parts.iter().any(|d| crate::media::is_ignored_dir(d)) || file.is_some_and(|f| crate::media::is_ignored_file(&f))
 }
 
 #[cfg(test)]

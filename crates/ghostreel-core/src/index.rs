@@ -331,7 +331,7 @@ async fn walk_folder(
                     || if e.file_type().is_dir() {
                         !media::is_ignored_dir(&e.file_name().to_string_lossy())
                     } else {
-                        !e.file_name().to_string_lossy().starts_with('.')
+                        !media::is_ignored_file(&e.file_name().to_string_lossy())
                     }
             })
             .filter_map(Result::ok)

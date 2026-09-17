@@ -37,7 +37,22 @@ const IGNORED_DIRS: &[&str] = &[
     "transcoded media",
     "proxy media",
     "analysis files",
+    // Premiere Pro's ingest proxies (Project Settings → Ingest → Create Proxies).
+    "proxies",
+    "proxy",
 ];
+
+/// Proxy files editors write next to the footage: low-resolution duplicates of a clip that is
+/// already indexed, so describing or transcribing them again is wasted work.
+fn is_proxy_name(file_name: &str) -> bool {
+    let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name).to_lowercase();
+    ["_proxy", "-proxy", ".proxy", "_prx", " proxy"].iter().any(|s| stem.ends_with(s))
+}
+
+/// Whether a file should be skipped: a hidden file, or an editor proxy.
+pub fn is_ignored_file(file_name: &str) -> bool {
+    file_name.starts_with('.') || is_proxy_name(file_name)
+}
 
 /// Whether a folder holds app-generated renders or caches that shouldn't be listed or indexed.
 /// Hidden folders count too. Premiere names its render folders `<sequence>.PRV`.
@@ -176,6 +191,19 @@ pub async fn ffprobe(ffprobe_bin: &Path, file: &Path) -> Result<MediaInfo, Error
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn skips_editor_renders_caches_and_proxies() {
+        use super::{is_ignored_dir, is_ignored_file};
+        assert!(is_ignored_dir("Adobe Premiere Pro Video Previews"));
+        assert!(is_ignored_dir("Seq 01.PRV") && is_ignored_dir("seq 01.prv"));
+        assert!(is_ignored_dir("Proxies") && is_ignored_dir("Media Cache Files"));
+        assert!(!is_ignored_dir("Greet Mag 9-9-26 NW Hills Video"));
+        assert!(is_ignored_file("DJI_0065_D_Proxy.mov"));
+        assert!(is_ignored_file("clip-proxy.mp4") && is_ignored_file(".DS_Store"));
+        assert!(!is_ignored_file("DJI_0065_D.MP4"), "real footage is kept");
+        assert!(!is_ignored_file("proxy-war-documentary.mp4"), "only the suffix counts");
+    }
+
     use super::*;
 
     #[test]
