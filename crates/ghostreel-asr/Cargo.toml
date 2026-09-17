@@ -1,0 +1,16 @@
+[package]
+name = "ghostreel-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1.0.151"
+whisper-rs = "=0.16.0"
+
+[features]
+default = []
+# GPU backends for whisper.cpp (pick one per build).
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+metal = ["whisper-rs/metal"]

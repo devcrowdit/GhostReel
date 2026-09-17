@@ -8,9 +8,12 @@ pub mod db;
 pub mod doctor;
 pub mod index;
 pub mod media;
+pub mod models;
 pub mod paths;
 pub mod probe;
 pub mod progress;
+pub mod runtime;
+pub mod stt;
 pub mod projects;
 pub mod watch;
 
@@ -34,6 +37,10 @@ pub enum Error {
     NotFound(String),
     #[error("ffprobe: {0}")]
     Probe(String),
+    #[error("download failed: {0}")]
+    Download(String),
+    #[error("transcription: {0}")]
+    Stt(String),
     #[error("another GhostReel process is already indexing ({0})")]
     Busy(String),
     #[error("cannot determine the user's {0} directory")]

@@ -15,6 +15,7 @@ use ghostreel_core::paths::Paths;
 use ghostreel_core::probe::{Resolution, Target};
 use ghostreel_core::progress::{Progress, eta_text};
 use ghostreel_core::projects::NewProject;
+use ghostreel_core::runtime;
 use ghostreel_core::watch::FolderWatcher;
 
 #[derive(Parser)]
@@ -58,6 +59,16 @@ enum Command {
         /// Also retry jobs that already failed the maximum number of times.
         #[arg(long)]
         retry_failed: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a video's transcript.
+    Transcript {
+        /// Video id (see `ghostreel status --videos`).
+        video_id: i64,
+        /// SubRip subtitles instead of plain text.
+        #[arg(long)]
+        srt: bool,
         #[arg(long)]
         json: bool,
     },
@@ -161,6 +172,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             index_cmd(&paths, project.as_deref(), watch, retry_failed, json).await
         }
         Command::Status { project, videos, json } => status_cmd(&paths, project.as_deref(), videos, json),
+        Command::Transcript { video_id, srt, json } => transcript_cmd(&paths, video_id, srt, json),
         Command::Config { action } => {
             match action {
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
@@ -290,7 +302,7 @@ fn folder_cmd(paths: &Paths, action: FolderAction) -> anyhow::Result<ExitCode> {
 async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_failed: bool, json: bool) -> anyhow::Result<ExitCode> {
     let mut db = open_db(paths)?;
     let pid = project_id(&db, project)?;
-    let ffprobe = doctor::locate("ffprobe").context("ffprobe not found (run: ghostreel doctor)")?;
+    let config = Config::load(&paths.config_file)?;
     let opts = index::Options { project_id: pid, retry_failed, settle_secs: if watch { 10 } else { 0 } };
 
     // On a terminal: one live progress line (per-video successes are implied by it).
@@ -314,6 +326,9 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
                 println!("  {new} new, {changed} changed, {unchanged} unchanged, {removed} removed")
             }
             Event::JobStarted { .. } => {}
+            Event::StageBackend { stage, backend } => println!("{stage}: {backend}"),
+            Event::StageUnavailable { stage, reason } => println!("  ! {stage} postponed: {reason}"),
+            Event::DownloadingModel { file } => println!("downloading {file}…"),
             Event::JobDone { video_id, stage } => {
                 if !tty {
                     println!("  ✓ {stage} #{video_id}")
@@ -347,7 +362,9 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
             }
             Err(e) => return Err(e.into()),
         };
-        let s = index::run(&mut db, &ffprobe, &opts, &mut print).await?;
+        // Re-resolved every run: GhostPen/highllama may have started or stopped meanwhile.
+        let rt = runtime::resolve(paths, &config).await?;
+        let s = index::run(&mut db, &rt, &opts, &mut print).await?;
         drop(lock);
         if tty {
             eprint!("\r\x1b[2K");
@@ -392,6 +409,8 @@ fn progress_line(p: &Progress) -> String {
     let phase = match p.phase.as_str() {
         "hash" => "reading files",
         "probe" => "video details",
+        "download" => "downloading model",
+        "transcribe_server" | "transcribe_local" => "transcribing",
         other => other,
     };
     format!(
@@ -437,8 +456,36 @@ fn print_status(st: &index::Status) {
     println!("  {} videos, {}, {} of footage{}", st.videos, human_size(st.total_size), human_duration(st.total_duration_s),
         if st.vfr_videos > 0 { format!(", {} variable-frame-rate", st.vfr_videos) } else { String::new() });
     for c in &st.stages {
-        println!("  {:<10} {} done, {} pending, {} running, {} failed", c.stage, c.done, c.pending, c.running, c.failed);
+        let skipped = if c.skipped > 0 { format!(", {} skipped", c.skipped) } else { String::new() };
+        println!(
+            "  {:<10} {} done, {} pending, {} running, {} failed{skipped}",
+            c.stage, c.done, c.pending, c.running, c.failed
+        );
     }
+}
+
+fn srt_time(s: f64) -> String {
+    let ms = (s.max(0.0) * 1000.0).round() as u64;
+    format!("{:02}:{:02}:{:02},{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+}
+
+fn transcript_cmd(paths: &Paths, video_id: i64, srt: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let db = open_db(paths)?;
+    let segments = index::transcript(&db, video_id)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&segments)?);
+    } else if srt {
+        for (i, s) in segments.iter().enumerate() {
+            println!("{}\n{} --> {}\n{}\n", i + 1, srt_time(s.start), srt_time(s.end), s.text);
+        }
+    } else if segments.is_empty() {
+        println!("no transcript for video #{video_id} (not transcribed yet, or no speech)");
+    } else {
+        for s in segments {
+            println!("[{}] {}", human_duration(s.start), s.text);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn status_cmd(paths: &Paths, project: Option<&str>, videos: bool, json: bool) -> anyhow::Result<ExitCode> {
@@ -456,7 +503,8 @@ fn status_cmd(paths: &Paths, project: Option<&str>, videos: bool, json: bool) ->
         let dims = match (v.width, v.height) { (Some(w), Some(h)) => format!("{w}x{h}"), _ => "-".into() };
         let fps = v.fps.map(|f| format!("{f:.2}fps")).unwrap_or_default();
         let dur = v.duration_s.map(human_duration).unwrap_or_else(|| "-".into());
-        let flags = format!("{}{}{}", if v.vfr { " VFR" } else { "" }, if v.has_audio == Some(false) { " no-audio" } else { "" },
+        let flags = format!("{}{}{}{}", if v.vfr { " VFR" } else { "" }, if v.has_audio == Some(false) { " no-audio" } else { "" },
+            if v.segments > 0 { format!(" 📝{}{}", v.segments, v.language.as_deref().map(|l| format!(" {l}")).unwrap_or_default()) } else { String::new() },
             if v.copies > 1 { format!(" ×{}", v.copies) } else { String::new() });
         println!("  #{:<4} {:<8} {:>7} {:>9} {:<9}{} {}", v.id, v.status, dur, dims, fps, flags, v.path.display());
         if let Some(e) = v.error {

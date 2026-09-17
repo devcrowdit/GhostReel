@@ -87,7 +87,8 @@ impl Default for EmbedConfig {
 pub struct SttConfig {
     pub backend: Backend,
     pub url: String,
-    /// Whisper model for the local backend (`large-v3-turbo`, `small`, …).
+    /// Whisper model for the local backend: `auto` (large-v3-turbo on an NVIDIA GPU with ≥ 6 GB,
+    /// else `small`), or a name like `large-v3-turbo`, `small`, `base`.
     pub model: String,
 }
 
@@ -96,7 +97,7 @@ impl Default for SttConfig {
         Self {
             backend: Backend::Auto,
             url: DEFAULT_STT_URL.into(),
-            model: "large-v3-turbo".into(),
+            model: "auto".into(),
         }
     }
 }

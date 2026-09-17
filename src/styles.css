@@ -389,3 +389,39 @@ td.name {
 .meter > div {
   transition: width 0.25s ease-out;
 }
+
+tr.clickable {
+  cursor: pointer;
+}
+
+tr.clickable:hover td {
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+}
+
+tr.selected td {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.card.transcript {
+  margin-top: 12px;
+}
+
+.segments {
+  max-height: 360px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.segment {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 8px;
+  line-height: 1.45;
+}
+
+.segment .time {
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}

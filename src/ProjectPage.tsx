@@ -13,7 +13,10 @@ import {
   removeFolder,
   removeProject,
   startIndex,
+  videoTranscript,
   type IndexEvent,
+  type TranscriptSegment,
+  type VideoRow,
   type IndexFinished,
   type Progress,
   type ProjectView,
@@ -21,12 +24,82 @@ import {
 
 const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
+const clock = (s: number) => {
+  const t = Math.floor(s);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = String(t % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+};
+
+function TranscriptCell({ v }: { v: VideoRow }) {
+  if (v.segments > 0) return <span className="good-text">{v.language ? v.language.toUpperCase() : "✓"}</span>;
+  switch (v.transcribe) {
+    case "skipped":
+      return <span className="muted">no audio</span>;
+    case "failed":
+      return <span className="bad-text">failed</span>;
+    case "running":
+      return <span>…</span>;
+    case "done":
+      return <span className="muted">no speech</span>;
+    default:
+      return <span className="muted">waiting</span>;
+  }
+}
+
+function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => void }) {
+  const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    setSegments(null);
+    videoTranscript(video.id).then(setSegments).catch(() => setSegments([]));
+  }, [video.id, video.segments]);
+  const q = filter.trim().toLowerCase();
+  const shown = (segments ?? []).filter((s) => !q || s.text.toLowerCase().includes(q));
+  return (
+    <section className="card transcript">
+      <div className="card-head">
+        <span className="label">
+          {fileName(video.path)}
+          {video.language && <span className="tag">{video.language.toUpperCase()}</span>}
+        </span>
+        <button className="ghost small" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      {segments && segments.length > 0 && (
+        <input placeholder="Find in transcript…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      )}
+      {segments === null ? (
+        <div className="muted">Loading…</div>
+      ) : segments.length === 0 ? (
+        <div className="muted">
+          {video.transcribe === "skipped" ? "This video has no audio." : "No transcript yet — press “Index now”."}
+        </div>
+      ) : (
+        <div className="segments">
+          {shown.map((s, i) => (
+            <div key={i} className="segment">
+              <span className="time">{clock(s.start)}</span>
+              <span>{s.text}</span>
+            </div>
+          ))}
+          {shown.length === 0 && <div className="muted">No match.</div>}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function ProjectPage({ projectId, onChanged }: { projectId: number; onChanged: () => void }) {
   const [view, setView] = useState<ProjectView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [progress, setProgress] = useState<string>("");
   const [bar, setBar] = useState<Progress | null>(null);
+  const [notice, setNotice] = useState<string>("");
+  const [selected, setSelected] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -41,6 +114,8 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     setView(null);
     setProgress("");
     setBar(null);
+    setNotice("");
+    setSelected(null);
     refresh();
     isIndexing().then(setIndexing);
   }, [refresh]);
@@ -68,6 +143,15 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
             break;
           case "job_failed":
             failed += 1;
+            break;
+          case "stage_backend":
+            setNotice(`${e.stage === "transcribe" ? "Transcription" : e.stage}: ${e.backend}`);
+            break;
+          case "stage_unavailable":
+            setNotice(`${e.stage === "transcribe" ? "Transcription" : e.stage} postponed: ${e.reason}`);
+            break;
+          case "downloading_model":
+            setNotice(`Downloading ${e.file} (once)…`);
             break;
           case "progress": {
             const { event: _event, ...p } = e;
@@ -142,6 +226,8 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
 
   const { project: p, status: st } = view;
   const probe = st.stages.find((s) => s.stage === "probe");
+  const transcribe = st.stages.find((s) => s.stage === "transcribe");
+  const selectedVideo = view.videos.find((v) => v.id === selected) ?? null;
 
   return (
     <main>
@@ -180,9 +266,15 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
             <div style={{ width: `${Math.max(2, bar.fraction * 100)}%` }} />
           </div>
           <div className="muted small path">{bar.current ? fileName(bar.current) : progress}</div>
+          {notice && <div className="muted small">{notice}</div>}
         </div>
       ) : (
-        progress && <div className="banner info">{progress}</div>
+        (progress || notice) && (
+          <div className="banner info">
+            {progress}
+            {notice && <div className="muted small">{notice}</div>}
+          </div>
+        )
       )}
 
       <h2>Folders</h2>
@@ -214,6 +306,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
             {" "}
             · {probe.done} ready{probe.pending ? ` · ${probe.pending} waiting` : ""}
             {probe.failed ? ` · ${probe.failed} failed` : ""}
+            {transcribe && transcribe.done ? ` · ${transcribe.done} transcribed` : ""}
             {st.vfr_videos ? ` · ${st.vfr_videos} variable frame rate` : ""}
           </span>
         )}
@@ -229,12 +322,18 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                 <th>Length</th>
                 <th>Size</th>
                 <th>Format</th>
+                <th>Speech</th>
                 <th>State</th>
               </tr>
             </thead>
             <tbody>
               {view.videos.map((v) => (
-                <tr key={v.id} title={v.path}>
+                <tr
+                  key={v.id}
+                  title={v.path}
+                  className={`clickable ${v.id === selected ? "selected" : ""}`}
+                  onClick={() => setSelected(v.id === selected ? null : v.id)}
+                >
                   <td className="name">
                     {fileName(v.path)}
                     {v.copies > 1 && <span className="tag">×{v.copies}</span>}
@@ -253,6 +352,9 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                     {v.vcodec ? ` · ${v.vcodec}` : ""}
                   </td>
                   <td>
+                    <TranscriptCell v={v} />
+                  </td>
+                  <td>
                     {v.status === "error" ? (
                       <span className="bad-text" title={v.error ?? ""}>
                         error
@@ -269,6 +371,8 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
           </table>
         )}
       </section>
+
+      {selectedVideo && <TranscriptPanel video={selectedVideo} onClose={() => setSelected(null)} />}
 
       <p className="danger-zone">
         <button className="ghost small danger" onClick={onDelete}>

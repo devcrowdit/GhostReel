@@ -87,7 +87,8 @@ const MODEL_FILES: &[(&str, &str)] = &[
     ("vision (local)", "Bonsai-27B-Q1_0.gguf"),
     ("vision projector (local)", "Bonsai-27B-mmproj-Q8_0.gguf"),
     ("embeddings (local)", "embeddinggemma-300M-Q8_0.gguf"),
-    ("whisper (local)", "ggml-large-v3-turbo.bin"),
+    ("whisper (local, GPU)", "ggml-large-v3-turbo.bin"),
+    ("whisper (local, CPU)", "ggml-small.bin"),
 ];
 
 pub async fn run(paths: &Paths) -> Report {
@@ -200,7 +201,7 @@ async fn tool(name: &str) -> Tool {
     Tool { name: name.into(), path, version }
 }
 
-async fn nvidia_gpus() -> Vec<Gpu> {
+pub async fn nvidia_gpus() -> Vec<Gpu> {
     let Some(smi) = locate("nvidia-smi") else { return Vec::new() };
     let Some(csv) = output(
         &smi,

@@ -85,6 +85,7 @@ export interface StageCounts {
   running: number;
   done: number;
   failed: number;
+  skipped: number;
 }
 
 export interface Status {
@@ -123,7 +124,18 @@ export interface VideoRow {
   has_audio: boolean | null;
   status: string;
   error: string | null;
+  language: string | null;
+  segments: number;
+  transcribe: string | null;
 }
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export const videoTranscript = (videoId: number) => invoke<TranscriptSegment[]>("video_transcript", { videoId });
 
 export interface ProjectView {
   project: Project;
@@ -139,6 +151,9 @@ export type IndexEvent =
   | { event: "job_started"; video_id: number; stage: string; path: string }
   | { event: "job_done"; video_id: number; stage: string }
   | { event: "job_failed"; video_id: number; stage: string; error: string }
+  | { event: "stage_backend"; stage: string; backend: string }
+  | { event: "stage_unavailable"; stage: string; reason: string }
+  | { event: "downloading_model"; file: string }
   | ({ event: "progress" } & Progress);
 
 export interface Progress {
@@ -154,6 +169,9 @@ export interface Progress {
 export const PHASE_LABELS: Record<string, string> = {
   hash: "Reading new files",
   probe: "Reading video details",
+  download: "Downloading speech model",
+  transcribe_server: "Transcribing (GhostPen)",
+  transcribe_local: "Transcribing",
 };
 
 /** "a few seconds", "42 s", "about 2 min", "about 1 h 20 min" — same wording as the CLI. */

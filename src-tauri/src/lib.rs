@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ghostreel_core::db::Db;
 use ghostreel_core::doctor::{self, Report};
-use ghostreel_core::index::{self, IndexLock, Status, VideoRow};
+use ghostreel_core::config::Config;
+use ghostreel_core::index::{self, IndexLock, Status, TranscriptSegment, VideoRow};
+use ghostreel_core::runtime;
 use ghostreel_core::paths::Paths;
 use ghostreel_core::projects::{Folder, NewProject, Project};
 use serde::Serialize;
@@ -128,13 +130,13 @@ fn start_index(app: AppHandle, state: State<'_, Indexing>, project_id: i64) -> C
     if state.0.swap(true, Ordering::SeqCst) {
         return Err("indexing is already running".into());
     }
-    let started = (|| -> CmdResult<(Db, PathBuf, IndexLock)> {
+    let started = (|| -> CmdResult<(Db, Paths, Config, IndexLock)> {
         let p = paths()?;
-        let ffprobe = doctor::locate("ffprobe").ok_or("ffprobe not found — see Status")?;
+        let config = Config::load(&p.config_file).map_err(err)?;
         let lock = IndexLock::acquire(&p.data_dir).map_err(err)?;
-        Ok((Db::open(&p.db_file()).map_err(err)?, ffprobe, lock))
+        Ok((Db::open(&p.db_file()).map_err(err)?, p, config, lock))
     })();
-    let (mut db, ffprobe, lock) = match started {
+    let (mut db, p, config, lock) = match started {
         Ok(v) => v,
         Err(e) => {
             state.0.store(false, Ordering::SeqCst);
@@ -144,10 +146,15 @@ fn start_index(app: AppHandle, state: State<'_, Indexing>, project_id: i64) -> C
     tauri::async_runtime::spawn(async move {
         let opts = index::Options { project_id: Some(project_id), ..Default::default() };
         let events = app.clone();
-        let result = index::run(&mut db, &ffprobe, &opts, move |e| {
-            let _ = events.emit("index-event", e);
-        })
-        .await;
+        let result = match runtime::resolve(&p, &config).await {
+            Ok(rt) => {
+                index::run(&mut db, &rt, &opts, move |e| {
+                    let _ = events.emit("index-event", e);
+                })
+                .await
+            }
+            Err(e) => Err(e),
+        };
         drop(lock);
         let finished = match result {
             Ok(summary) => IndexFinished { project_id, summary: Some(summary), error: None },
@@ -158,6 +165,11 @@ fn start_index(app: AppHandle, state: State<'_, Indexing>, project_id: i64) -> C
         app.state::<Indexing>().0.store(false, Ordering::SeqCst);
     });
     Ok(())
+}
+
+#[tauri::command]
+fn video_transcript(video_id: i64) -> CmdResult<Vec<TranscriptSegment>> {
+    index::transcript(&open_db()?, video_id).map_err(err)
 }
 
 #[tauri::command]
@@ -195,6 +207,7 @@ pub fn run() {
             remove_folder,
             start_index,
             is_indexing,
+            video_transcript,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");
