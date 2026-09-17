@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -10,12 +11,14 @@ use clap::{Parser, Subcommand};
 use ghostreel_core::config::Config;
 use ghostreel_core::db::Db;
 use ghostreel_core::doctor::{self, Report};
+use ghostreel_core::export::ExportFormat;
 use ghostreel_core::index::{self, Event, IndexLock};
 use ghostreel_core::paths::Paths;
 use ghostreel_core::probe::{Resolution, Target};
 use ghostreel_core::progress::{Progress, eta_text};
 use ghostreel_core::projects::NewProject;
 use ghostreel_core::runtime;
+use ghostreel_core::script::{Audio, IssueSeverity, Script};
 use ghostreel_core::watch::FolderWatcher;
 
 #[derive(Parser)]
@@ -103,6 +106,45 @@ enum Command {
         videos: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Manage and export video editing scripts.
+    Script {
+        #[command(subcommand)]
+        action: ScriptAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScriptAction {
+    /// Import a script JSON file into a project.
+    Import {
+        file: PathBuf,
+        #[arg(long, short)]
+        project: String,
+        /// Save even if validation reported errors.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List scripts in a project.
+    List {
+        #[arg(long, short)]
+        project: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Display a script draft.
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a script as an OpenTimelineIO (.otio) or Final Cut Pro 7 XML (.xml) timeline.
+    Export {
+        id: i64,
+        #[arg(long, default_value = "fcp_xml")]
+        format: String,
+        #[arg(long, short = 'o', alias = "output")]
+        out: PathBuf,
     },
 }
 
@@ -223,6 +265,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Script { action } => script_cmd(&paths, action),
         Command::Config { action } => {
             match action {
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
@@ -363,6 +406,113 @@ fn folder_cmd(paths: &Paths, action: FolderAction) -> anyhow::Result<ExitCode> {
             let p = db.require_project(&project)?;
             db.remove_folder(p.id, &path)?;
             println!("'{}' no longer watches {}", p.name, path.display());
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitCode> {
+    let db = open_db(paths)?;
+    match action {
+        ScriptAction::Import { file, project, force } => {
+            let p = db.require_project(&project)?;
+            let content = std::fs::read_to_string(&file)
+                .with_context(|| format!("cannot read script file '{}'", file.display()))?;
+            let mut script = Script::parse_for_project(&content, &p).with_context(|| "failed to parse script JSON")?;
+            let snapped = ghostreel_core::script::snap_to_segments(&db, &mut script)?;
+            if snapped > 0 {
+                println!("snapped {snapped} clip boundary(ies) to speech segments");
+            }
+            let issues = ghostreel_core::script::validate(&db, p.id, &script)?;
+            for issue in &issues {
+                let tag = match issue.severity {
+                    IssueSeverity::Error => "error",
+                    IssueSeverity::Warning => "warning",
+                    IssueSeverity::Info => "info",
+                };
+                if let Some(beat) = &issue.beat_id {
+                    if let Some(clip) = issue.clip_index {
+                        println!("  [{tag}] beat {beat} clip {}: {}", clip + 1, issue.message);
+                    } else {
+                        println!("  [{tag}] beat {beat}: {}", issue.message);
+                    }
+                } else {
+                    println!("  [{tag}] {}", issue.message);
+                }
+            }
+            let has_errors = issues.iter().any(|i| i.severity == IssueSeverity::Error);
+            if has_errors && !force {
+                bail!("script validation failed with errors; use --force to save anyway");
+            }
+            let id = ghostreel_core::script::save_version(&db, p.id, &script, None)?;
+            let stored = ghostreel_core::script::load(&db, id)?;
+            println!("saved script #{} \"{}\" v{}", stored.id, stored.title, stored.version);
+        }
+        ScriptAction::List { project, json } => {
+            let p = db.require_project(&project)?;
+            let list = ghostreel_core::script::list(&db, p.id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+            } else if list.is_empty() {
+                println!("no scripts in project '{}'", p.name);
+            } else {
+                for s in list {
+                    println!(
+                        "#{:<4} {:<24} v{:<3} {:>2} beats {:>2} clips {:>6.1}s",
+                        s.id, s.title, s.version, s.beats, s.clips, s.duration_s
+                    );
+                }
+            }
+        }
+        ScriptAction::Show { id, json } => {
+            let stored = ghostreel_core::script::load(&db, id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stored)?);
+            } else {
+                println!(
+                    "script #{} \"{}\" v{} ({} beats, {:.1}s)",
+                    stored.id,
+                    stored.title,
+                    stored.version,
+                    stored.script.beats.len(),
+                    stored.script.total_duration_s()
+                );
+                for beat in &stored.script.beats {
+                    println!("\nbeat [{}] {}:", beat.id, beat.purpose);
+                    if let Some(narr) = &beat.narration {
+                        println!("  narration: \"{narr}\"");
+                    }
+                    if let Some(text) = &beat.on_screen_text {
+                        println!("  on-screen: \"{text}\"");
+                    }
+                    if let Some(notes) = &beat.notes {
+                        println!("  notes: {notes}");
+                    }
+                    for clip in &beat.clips {
+                        let dur = (clip.out_s - clip.in_s).max(0.0);
+                        let audio = match clip.audio {
+                            Audio::Source => "source",
+                            Audio::Mute => "mute",
+                        };
+                        let why = clip.why.as_deref().map(|w| format!(" {w}")).unwrap_or_default();
+                        println!(
+                            "    #{} {:.2}-{:.2} ({:.2}s) {}{}",
+                            clip.video_id, clip.in_s, clip.out_s, dur, audio, why
+                        );
+                    }
+                }
+            }
+        }
+        ScriptAction::Export { id, format, out } => {
+            let export_fmt = ExportFormat::from_str(&format)?;
+            let res = ghostreel_core::export::export_script(&db, &paths.data_dir, id, export_fmt, &out)?;
+            println!("{}", res.path.display());
+            if ghostreel_core::export::locate_sidecar().is_some() {
+                match ghostreel_core::export::validate_export(&res.path) {
+                    Ok(v) => println!("{}", serde_json::to_string(&v)?),
+                    Err(e) => eprintln!("warning: validation failed: {e}"),
+                }
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -1,0 +1,68 @@
+{
+  "title": "CM5 teaser",
+  "target_duration_s": 30.0,
+  "beats": [
+    {
+      "id": "b1",
+      "purpose": "hook",
+      "narration": "Meet the new Compute Module 5.",
+      "on_screen_text": "Compute Module 5",
+      "clips": [
+        {
+          "video_id": 4,
+          "in_s": 0.0,
+          "out_s": 2.44,
+          "audio": "source",
+          "why": "intro welcome"
+        },
+        {
+          "video_id": 4,
+          "in_s": 2.74,
+          "out_s": 9.78,
+          "audio": "source",
+          "why": "board overview"
+        }
+      ],
+      "notes": "dynamic intro"
+    },
+    {
+      "id": "b2",
+      "purpose": "demo",
+      "narration": "Fast setup and container deployment.",
+      "on_screen_text": "Deploy in Minutes",
+      "clips": [
+        {
+          "video_id": 2,
+          "in_s": 31.0,
+          "out_s": 45.0,
+          "audio": "source",
+          "why": "connecting usb cable"
+        },
+        {
+          "video_id": 5,
+          "in_s": 0.0,
+          "out_s": 5.0,
+          "audio": "mute",
+          "why": "silent b-roll scenes"
+        }
+      ],
+      "notes": "hardware setup demo"
+    },
+    {
+      "id": "b3",
+      "purpose": "outro",
+      "narration": "Ready for production.",
+      "on_screen_text": "Get Started",
+      "clips": [
+        {
+          "video_id": 3,
+          "in_s": 0.0,
+          "out_s": 8.74,
+          "audio": "source",
+          "why": "final wifi config"
+        }
+      ],
+      "notes": "call to action"
+    }
+  ]
+}

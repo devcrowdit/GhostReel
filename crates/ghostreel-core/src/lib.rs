@@ -8,15 +8,18 @@ pub mod config;
 pub mod db;
 pub mod doctor;
 pub mod embed;
+pub mod export;
 pub mod frames;
 pub mod index;
 pub mod media;
 pub mod models;
+pub mod otio;
 pub mod paths;
 pub mod probe;
 pub mod progress;
 pub mod projects;
 pub mod runtime;
+pub mod script;
 pub mod search;
 pub mod stt;
 pub mod vision;
@@ -52,6 +55,8 @@ pub enum Error {
     Frames(String),
     #[error("transcription: {0}")]
     Stt(String),
+    #[error("export: {0}")]
+    Export(String),
     #[error("another GhostReel process is already indexing ({0})")]
     Busy(String),
     #[error("cannot determine the user's {0} directory")]

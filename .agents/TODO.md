@@ -33,6 +33,11 @@
       highllama :8091 or local helper (CPU), `embed` stage (re-queued when transcript/descriptions change;
       keyword-only chunks when no embedder), hybrid search (FTS5 w/ stopwords + sqlite-vec kNN, RRF,
       project scope, moments ≤ 60 s), `ghostreel search`
+- [x] M8a: schema v3 (`chat_sessions`, `chat_messages`, `scripts`, `exports`), `script` module (schema v1,
+      validation against project footage, transcript segment boundary snapping, versioned drafts), `otio`
+      module (OpenTimelineIO .otio timeline builder with V1/A1/V2 tracks, markers, rational timebases),
+      `ghostreel-otio` sidecar (OpenTimelineIO + otio-fcp-adapter FCP7 XML converter and validator), `export`
+      module, and CLI `ghostreel script import|list|show|export`
 
 ## Next
 - [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel

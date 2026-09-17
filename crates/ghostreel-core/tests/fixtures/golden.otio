@@ -1,0 +1,453 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "global_start_time": {
+    "OTIO_SCHEMA": "RationalTime.1",
+    "rate": 25.0,
+    "value": 0.0
+  },
+  "metadata": {
+    "ghostreel": {
+      "fps": {
+        "den": 1,
+        "num": 25
+      },
+      "height": 1080,
+      "schema": 1,
+      "width": 1920
+    }
+  },
+  "name": "Golden Timeline",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [
+              {
+                "OTIO_SCHEMA": "Marker.2",
+                "color": "RED",
+                "comment": "Welcome to GhostReel",
+                "marked_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 150.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 25.0
+                  }
+                },
+                "metadata": {},
+                "name": "b1: intro"
+              }
+            ],
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "available_image_bounds": null,
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 250.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "",
+                "target_url": "file:///media/intro.mp4"
+              }
+            },
+            "metadata": {
+              "ghostreel": {
+                "beat_id": "b1",
+                "notes": "first beat",
+                "purpose": "intro",
+                "video_id": 1,
+                "why": "hook intro"
+              }
+            },
+            "name": "intro.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 25.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "available_image_bounds": null,
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 29.97002997002997,
+                    "value": 150.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 29.97002997002997,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "",
+                "target_url": "file:///media/broll.mp4"
+              }
+            },
+            "metadata": {
+              "ghostreel": {
+                "beat_id": "b1",
+                "notes": "first beat",
+                "purpose": "intro",
+                "video_id": 2,
+                "why": "b-roll"
+              }
+            },
+            "name": "broll.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 29.97002997002997,
+                "value": 90.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 29.97002997002997,
+                "value": 0.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [
+              {
+                "OTIO_SCHEMA": "Marker.2",
+                "color": "RED",
+                "comment": "See you next time",
+                "marked_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 75.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 125.0
+                  }
+                },
+                "metadata": {},
+                "name": "b2: outro"
+              }
+            ],
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "available_image_bounds": null,
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 250.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "",
+                "target_url": "file:///media/intro.mp4"
+              }
+            },
+            "metadata": {
+              "ghostreel": {
+                "beat_id": "b2",
+                "notes": null,
+                "purpose": "outro",
+                "video_id": 1,
+                "why": "conclusion"
+              }
+            },
+            "name": "intro.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 125.0
+              }
+            }
+          }
+        ],
+        "color": null,
+        "effects": [],
+        "enabled": true,
+        "kind": "Video",
+        "markers": [],
+        "metadata": {},
+        "name": "V1",
+        "source_range": null
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "available_image_bounds": null,
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 250.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "",
+                "target_url": "file:///media/intro.mp4"
+              }
+            },
+            "metadata": {},
+            "name": "intro.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 25.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "metadata": {},
+            "name": "",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 0.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.2",
+            "active_media_reference_key": "DEFAULT_MEDIA",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_references": {
+              "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "available_image_bounds": null,
+                "available_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 250.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "",
+                "target_url": "file:///media/intro.mp4"
+              }
+            },
+            "metadata": {},
+            "name": "intro.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 125.0
+              }
+            }
+          }
+        ],
+        "color": null,
+        "effects": [],
+        "enabled": true,
+        "kind": "Audio",
+        "markers": [],
+        "metadata": {},
+        "name": "A1",
+        "source_range": null
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [
+              {
+                "OTIO_SCHEMA": "Marker.2",
+                "color": "GREEN",
+                "comment": "GhostReel",
+                "marked_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "duration": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 150.0
+                  },
+                  "start_time": {
+                    "OTIO_SCHEMA": "RationalTime.1",
+                    "rate": 25.0,
+                    "value": 0.0
+                  }
+                },
+                "metadata": {},
+                "name": "GhostReel"
+              }
+            ],
+            "metadata": {
+              "ghostreel": {
+                "title": "GhostReel"
+              }
+            },
+            "name": "",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 150.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 0.0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "color": null,
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "metadata": {},
+            "name": "",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 75.0
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 25.0,
+                "value": 0.0
+              }
+            }
+          }
+        ],
+        "color": null,
+        "effects": [],
+        "enabled": true,
+        "kind": "Video",
+        "markers": [],
+        "metadata": {},
+        "name": "V2",
+        "source_range": null
+      }
+    ],
+    "color": null,
+    "effects": [],
+    "enabled": true,
+    "markers": [],
+    "metadata": {},
+    "name": "tracks",
+    "source_range": null
+  }
+}

@@ -170,6 +170,49 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX video_files_path ON video_files(path);
     CREATE INDEX jobs_state ON jobs(stage, state);
     "#,
+    // v3 — script chat & timeline export (plan §4, §4a, M8).
+    r#"
+    CREATE TABLE chat_sessions (
+        id INTEGER PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX chat_sessions_project ON chat_sessions(project_id);
+
+    CREATE TABLE chat_messages (
+        id INTEGER PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        tool_calls_json TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX chat_messages_session ON chat_messages(session_id);
+
+    CREATE TABLE scripts (
+        id INTEGER PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        session_id INTEGER REFERENCES chat_sessions(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        script_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (project_id, title, version)
+    );
+    CREATE INDEX scripts_project ON scripts(project_id);
+    CREATE INDEX scripts_session ON scripts(session_id);
+
+    CREATE TABLE exports (
+        id INTEGER PRIMARY KEY,
+        script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+        format TEXT NOT NULL CHECK (format IN ('otio', 'fcp_xml', 'preview_mp4')),
+        path TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX exports_script ON exports(script_id);
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -311,6 +354,61 @@ mod tests {
         assert_eq!(file, "/media/a.mp4");
         let segs: i64 = db.conn.query_row("SELECT count(*) FROM transcript_segments", [], |r| r.get(0)).unwrap();
         assert_eq!(segs, 1, "rebuilding videos must not cascade-delete children");
+        let fk: bool = db.conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
+        assert!(fk);
+    }
+
+    #[test]
+    fn v2_to_v3_adds_chat_and_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        register_sqlite_vec();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            for sql in &MIGRATIONS[0..2] {
+                tx.execute_batch(sql).unwrap();
+            }
+            tx.pragma_update(None, "user_version", 2).unwrap();
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES (1, 'TestProject', 100);
+                 INSERT INTO folders(id, path, added_at) VALUES (1, '/media', 0);
+                 INSERT INTO project_folders(project_id, folder_id) VALUES (1, 1);
+                 INSERT INTO videos(id, content_hash, size, duration_s) VALUES (42, 'hash42', 1024, 15.5);
+                 INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen)
+                     VALUES (42, 1, '/media/clip.mp4', 1024, 10, 0);",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as u32);
+
+        let (pname, pcreated): (String, i64) = db
+            .conn
+            .query_row("SELECT name, created_at FROM projects WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((pname.as_str(), pcreated), ("TestProject", 100));
+
+        let (hash, dur): (String, f64) = db
+            .conn
+            .query_row("SELECT content_hash, duration_s FROM videos WHERE id = 42", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((hash.as_str(), dur), ("hash42", 15.5));
+
+        let chat_sessions_count: i64 =
+            db.conn.query_row("SELECT count(*) FROM chat_sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(chat_sessions_count, 0);
+        let chat_messages_count: i64 =
+            db.conn.query_row("SELECT count(*) FROM chat_messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(chat_messages_count, 0);
+        let scripts_count: i64 = db.conn.query_row("SELECT count(*) FROM scripts", [], |r| r.get(0)).unwrap();
+        assert_eq!(scripts_count, 0);
+        let exports_count: i64 = db.conn.query_row("SELECT count(*) FROM exports", [], |r| r.get(0)).unwrap();
+        assert_eq!(exports_count, 0);
+
         let fk: bool = db.conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
         assert!(fk);
     }
