@@ -7,6 +7,10 @@ dist/
 *.log
 # Tauri generated
 src-tauri/gen/
+# Packaging (scripts/fetch-sidecars.mjs, scripts/stage-helpers.mjs)
+src-tauri/binaries/
+src-tauri/lib/
+src-tauri/tauri.bundle.json
 # Editors / OS
 .idea/
 .vscode/*

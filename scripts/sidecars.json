@@ -1,0 +1,26 @@
+{
+  "_comment": "Month-end BtbN autobuilds are kept long-term, \"latest\" rotates and must never be pinned.",
+  "ffmpeg": {
+    "version": "n8.1.2-50-g1a748fe2cd (BtbN autobuild-2026-08-31-13-27, LGPL)",
+    "targets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-lgpl-8.1.tar.xz",
+        "sha256": "7d6d93e9c39e0e461feb13c118e91e4eec2515e4da3a01d4ad6790996731bbee",
+        "archive": "tar.xz",
+        "bins": {
+          "ffmpeg": "bin/ffmpeg",
+          "ffprobe": "bin/ffprobe"
+        }
+      },
+      "x86_64-pc-windows-msvc": {
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-win64-lgpl-8.1.zip",
+        "sha256": "f6274bbd9c247f9e90c1bbed066b03ed4a3907cece2fb91be6dd352393936365",
+        "archive": "zip",
+        "bins": {
+          "ffmpeg": "bin/ffmpeg.exe",
+          "ffprobe": "bin/ffprobe.exe"
+        }
+      }
+    }
+  }
+}

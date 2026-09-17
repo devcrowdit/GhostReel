@@ -49,7 +49,23 @@ See plan §9: M2 transcripts (ghostreel-asr + GhostPen client), M3 frames, M4 mo
 vision, M5 chunk/embed/search, M6 UI, M7 packaging (NSIS, AppImage/deb/rpm/CLI tarball) + CI,
 **M8 (last): per-project script chat → timeline preview → OpenTimelineIO → FCP XML for Premiere Pro** (plan §4a).
 
+## M7 packaging
+- [x] `scripts/fetch-sidecars.mjs` + `scripts/sidecars.json`: pinned BtbN LGPL ffmpeg n8.1.2 (sha256-verified)
+- [x] `scripts/stage-helpers.mjs`: helpers → `src-tauri/binaries/<name>-<triple>`, CUDA libs (ldd) → `src-tauri/lib/`,
+      patchelf fallback, generates `src-tauri/tauri.bundle.json` overlay (externalBin + resources)
+- [x] Helper RUNPATH `$ORIGIN/lib:$ORIGIN/../lib/GhostReel/lib` via `build.rs` (asr, llm)
+- [x] tauri.conf.json: deb/rpm/appimage sections, NSIS `currentUser` + embedded WebView2 bootstrapper
+- [x] `npm run bundle:linux|bundle:windows|bundle:cli`, `scripts/package-cli.sh` (CLI tarball)
+- [x] CI: `.github/workflows/check.yml` (fmt, clippy, core tests, frontend, scripts), `release.yml` (linux-x64, windows-x64)
+- [x] Local AppImage build with sidecars + CUDA libs (Linux)
+- [ ] First CI run of `release.yml` (never executed); Windows job entirely untested
+- [ ] Windows: CUDA DLLs via `resources {"lib/": "./"}` next to exe — verify in the NSIS install
+- [ ] deb/rpm install to /usr (Tauri default), not /opt/ghostreel as plan §8 says; `/usr/bin/ghostreel` CLI symlink missing
+- [ ] CLI inside AppImage (`GhostReel.AppImage cli …` argv dispatch) not done
+- [ ] Fresh-machine smoke test (no CUDA toolkit): `ghostreel doctor` CPU fallback, wizard → search
+- [ ] Code signing (Windows)
+
 ## Open
 - [ ] S0 on Windows (3070): MSVC CUDA build, bundled cuBLAS, CPU fallback, VRAM with desktop
-- [ ] Linux packaging checks: `$ORIGIN/lib` CUDA libs, glibc 2.35 container, no /opt/cuda
+- [ ] Linux packaging checks: glibc 2.35 build (CI runner), no /opt/cuda on target machine
 - [ ] Embedding fingerprint: confirm highllama llama.cpp and llama-cpp-2 vectors agree (≥ 0.999)

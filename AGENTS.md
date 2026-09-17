@@ -20,6 +20,7 @@ S0 findings §11). Progress: [`.agents/TODO.md`](.agents/TODO.md).
 | `crates/ghostreel-cli` | `ghostreel` binary (`doctor`, `config`, `project`, `folder`, `index [--watch]`, `status`) |
 | `src-tauri` | desktop app (package `ghostreel-app` → `target/*/ghostreel-app`, bundled as `GhostReel`; lib `ghostreel_lib`). Never name it `ghostreel`: it would overwrite the CLI binary in `target/` |
 | `src/` | React + TS frontend (Vite) |
+| `scripts/` | helper build, sidecar fetch/stage, CLI tarball (see Packaging) |
 | `spikes/s0-local` | throwaway S0 spike (separate workspace, CUDA builds) |
 
 ## Build & run
@@ -31,6 +32,29 @@ npm install && npx tauri dev      # desktop app
 npx tauri build --no-bundle       # release app binary (embedded frontend)
 ```
 `GHOSTREEL_CONFIG=<file>` / `GHOSTREEL_DATA=<dir>` override config/data locations (tests, demos).
+
+## Packaging (plan §8, M7)
+
+```bash
+scripts/build-helpers.sh                       # ghostreel-asr + ghostreel-llm (CUDA if toolkit present)
+node scripts/fetch-sidecars.mjs                # pinned BtbN LGPL ffmpeg/ffprobe (scripts/sidecars.json, sha256)
+node scripts/stage-helpers.mjs [--cuda]        # helpers → src-tauri/binaries/<name>-<triple>, CUDA libs → src-tauri/lib/
+                                               # also writes src-tauri/tauri.bundle.json (externalBin + resources)
+NO_STRIP=true npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb
+scripts/fix-appimage.sh                        # AppImage only: drop host driver libcuda, dedupe CUDA libs, repack
+scripts/package-cli.sh                         # target/dist/ghostreel-cli-linux-x64.tar.gz
+```
+`npm run bundle:linux` / `bundle:windows` chain these. CI: `.github/workflows/{check,release}.yml`.
+- `externalBin`/`resources` live only in the generated overlay, never in `tauri.conf.json`:
+  tauri-build fails when a sidecar file is missing, which would break `tauri dev` and clippy.
+- Tauri strips the triple and puts sidecars next to the app exe (`usr/bin/` on Linux), where
+  `doctor::locate` already looks. Resources land in `usr/lib/GhostReel/` (Linux) / install dir (Windows).
+- Helpers are linked with RUNPATH `$ORIGIN/lib:$ORIGIN/../lib/GhostReel/lib` (their `build.rs`;
+  CLI tarball / deb+AppImage layouts). Never bundle `libcuda.so`/`libnvidia-*` (host driver).
+  Staging patchelfs binaries built before the build.rs existed. Inside the AppImage, Tauri's
+  linuxdeploy rewrites RUNPATH to `$ORIGIN/../lib` and copies libs into `usr/lib` (incl. the host's
+  `libcuda.so.1`) — hence `fix-appimage.sh`; always run it after an AppImage build.
+- ffmpeg pins must be month-end BtbN `autobuild-YYYY-MM-DD-*` tags (kept long-term), never `latest`.
 
 ## Critical rules
 
