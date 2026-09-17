@@ -119,15 +119,19 @@ pub struct ChatContext {
 
 /// Slack around grounded ranges (search moments are approximate).
 const GROUNDING_SLACK_S: f64 = 5.0;
-/// Clips longer than this are pacing mistakes (the model pasted a whole tool range).
-const MAX_CLIP_S: f64 = 12.0;
+/// Clips longer than this are pacing mistakes (the model pasted a whole tool range). Generous, so
+/// people talking can stay on screen for whole sentences.
+const MAX_CLIP_S: f64 = 30.0;
 /// Over-long clips are trimmed to this length (keeping their start).
-const TRIMMED_CLIP_S: f64 = 8.0;
+const TRIMMED_CLIP_S: f64 = 20.0;
+/// Shorter clips flash by before viewers can see or read them.
+const MIN_CLIP_S: f64 = 3.0;
 /// Total duration further than this fraction from the target triggers one redraft.
 const TARGET_TOLERANCE: f64 = TARGET_OVERSHOOT - 1.0;
 
-/// Pacing problems the model can fix in a redraft: over-long clips and total far from target.
-pub fn pacing_issues(script: &Script) -> Vec<Issue> {
+/// Pacing problems the model can fix in a redraft: clips too long or too short, and (when
+/// `enforce_target`) a total far from the target.
+pub fn pacing_issues(script: &Script, enforce_target: bool) -> Vec<Issue> {
     let mut issues = Vec::new();
     for beat in &script.beats {
         for (i, c) in beat.clips.iter().enumerate() {
@@ -138,14 +142,24 @@ pub fn pacing_issues(script: &Script) -> Vec<Issue> {
                     beat_id: Some(beat.id.clone()),
                     clip_index: Some(i),
                     message: format!(
-                        "clip is {len:.1} s long (video #{} {:.1}–{:.1}); use a 2–8 s excerpt",
+                        "clip is {len:.1} s long (video #{} {:.1}–{:.1}); use a shorter excerpt",
+                        c.video_id, c.in_s, c.out_s
+                    ),
+                });
+            } else if len < MIN_CLIP_S {
+                issues.push(Issue {
+                    severity: IssueSeverity::Warning,
+                    beat_id: Some(beat.id.clone()),
+                    clip_index: Some(i),
+                    message: format!(
+                        "clip is only {len:.1} s (video #{} {:.1}–{:.1}); hold each shot at least {MIN_CLIP_S:.0} s so viewers can see and read it",
                         c.video_id, c.in_s, c.out_s
                     ),
                 });
             }
         }
     }
-    if let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) {
+    if let Some(target) = script.target_duration_s.filter(|t| *t > 0.0 && enforce_target) {
         let total = script.total_duration_s();
         if (total - target).abs() > target * TARGET_TOLERANCE {
             issues.push(Issue {
@@ -159,8 +173,16 @@ pub fn pacing_issues(script: &Script) -> Vec<Issue> {
     issues
 }
 
-/// Drop ungrounded/foreign clips and trim over-long ones. Returns the issues describing the changes.
-fn enforce_grounding_and_pacing(db: &Db, project_id: i64, s: &mut Script, grounding: &Grounding) -> Vec<Issue> {
+/// Drop ungrounded/foreign clips and trim over-long ones; with `enforce_target`, also squeeze the
+/// total toward the target. Revisions don't enforce it: the user's feedback ("slower", "longer")
+/// must be able to change the length. Returns the issues describing the changes.
+fn enforce_grounding_and_pacing(
+    db: &Db,
+    project_id: i64,
+    s: &mut Script,
+    grounding: &Grounding,
+    enforce_target: bool,
+) -> Vec<Issue> {
     let mut issues = Vec::new();
     for beat in &mut s.beats {
         let mut kept = Vec::with_capacity(beat.clips.len());
@@ -199,7 +221,7 @@ fn enforce_grounding_and_pacing(db: &Db, project_id: i64, s: &mut Script, ground
     }
     s.beats.retain(|b| !b.clips.is_empty());
     let before = s.total_duration_s();
-    if trim_to_target(s) {
+    if enforce_target && trim_to_target(s) {
         issues.push(Issue {
             severity: IssueSeverity::Info,
             beat_id: None,
@@ -818,11 +840,17 @@ pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>) 
          1. Only use video_id and footage ranges that you have personally inspected and verified with tools.\n\
          2. All clip in_s and out_s ranges MUST fall inside ranges returned by your tool calls.\n\
          3. Ranges returned by search_moments and get_transcript are search windows, not clips: pick a \
-         2-8 second sub-range of a window for each clip (never copy a whole 30-60 s window).\n\
-         4. The sum of all clip lengths (out_s - in_s) must be close to the requested target duration; set \
-         target_duration_s to it.\n\
-         5. Structure the script into story beats, each with an id, clear purpose, clips, and optional narration or on-screen text.\n\
-         6. Always reply in the user's language.\n",
+         sub-range of a window for each clip (never copy a whole 30-60 s window).\n\
+         4. Pacing: hold every shot at least 3 s so viewers can see it; 4-8 s for scenery and b-roll, longer \
+         for shots with on-screen text; when someone is speaking, keep the clip until they finish their \
+         sentence (up to ~25 s), using get_transcript to find where the sentence ends. Prefer fewer, longer \
+         clips over many quick cuts.\n\
+         5. The sum of all clip lengths (out_s - in_s) should match the length the user asked for; set \
+         target_duration_s to it. If the user gave no length, choose one that suits the material.\n\
+         6. The user's feedback overrides these defaults. When asked for slower pacing or more time, \
+         lengthen or drop clips and raise target_duration_s as needed; never return the previous draft unchanged.\n\
+         7. Structure the script into story beats, each with an id, clear purpose, clips, and optional narration or on-screen text.\n\
+         8. Always reply in the user's language.\n",
         project.name, project.fps_num, project.fps_den, project.width, project.height
     );
 
@@ -988,6 +1016,8 @@ pub async fn run_turn(
     }
 
     let sys_prompt = build_system_prompt(&project, latest_script_json.as_deref());
+    // Only a first draft is squeezed to its target; revisions follow the user's feedback.
+    let enforce_target = latest_script_json.is_none();
 
     let mut tool_records = Vec::new();
     let mut raw_reply = String::new();
@@ -1111,9 +1141,10 @@ pub async fn run_turn(
 
             req_messages.push(json!({
                 "role": "user",
-                "content": "Now produce the final complete Script JSON using only the footage returned by the tools. \
-                            Each clip is a 2-8 s sub-range of a tool result, and the clip lengths add up to the \
-                            target duration."
+                "content": format!(
+                    "Now produce the final complete Script JSON using only the footage returned by the tools. \
+                     Follow the pacing rules, and apply this request from the user: {message}"
+                )
             }));
 
             let mut final_body = json!({
@@ -1153,7 +1184,7 @@ pub async fn run_turn(
             let redraft_reasons = match &script_res {
                 Ok(s) => {
                     let mut i = check_grounding(&ctx.db, project_id, s, &grounding);
-                    i.extend(pacing_issues(s));
+                    i.extend(pacing_issues(s, enforce_target));
                     i
                 }
                 Err(_) => Vec::new(),
@@ -1168,8 +1199,8 @@ pub async fn run_turn(
                     "role": "user",
                     "content": format!(
                         "Fix these problems and return the complete corrected Script JSON:\n{}\n\
-                         Every clip must be a short excerpt (2-8 s) lying inside a range returned by the tools, \
-                         and the sum of clip durations must be close to the target duration.",
+                         Every clip must lie inside a range returned by the tools and follow the pacing rules. \
+                         Keep applying the user's request: {message}",
                         issue_text.join("\n")
                     )
                 }));
@@ -1191,7 +1222,7 @@ pub async fn run_turn(
             }
 
             if let Ok(mut s) = script_res {
-                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, &mut s, &grounding);
+                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, &mut s, &grounding, enforce_target);
                 parsed_script = Some(s);
             }
 
@@ -1267,7 +1298,7 @@ pub async fn run_turn(
 
             on_event(ChatEvent::Validating);
             if let Some(s) = &mut parsed_script {
-                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding);
+                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
             }
         }
     }
@@ -1408,7 +1439,7 @@ mod tests {
         let clip = |in_s: f64, out_s: f64| ScriptClip { video_id: 1, in_s, out_s, audio: Audio::Source, why: None };
         let mut s = Script {
             title: "t".into(),
-            target_duration_s: Some(45.0),
+            target_duration_s: Some(20.0),
             fps: None,
             width: None,
             height: None,
@@ -1421,9 +1452,10 @@ mod tests {
                 notes: None,
             }],
         };
-        let issues = pacing_issues(&s);
+        let issues = pacing_issues(&s, true);
         // two over-long clips + total far from target
         assert_eq!(issues.len(), 3);
+        assert_eq!(pacing_issues(&s, false).len(), 2, "revisions don't enforce the target");
 
         let mut db = Db::open_in_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -1440,10 +1472,13 @@ mod tests {
             .unwrap();
         let mut g = Grounding::default();
         g.add(1, 0.0, 400.0);
-        let applied = enforce_grounding_and_pacing(&db, p.id, &mut s, &g);
+        let mut revision = s.clone();
+        enforce_grounding_and_pacing(&db, p.id, &mut revision, &g, false);
+        assert!(revision.total_duration_s() > 20.0 * TARGET_OVERSHOOT, "revision keeps its length");
+        let applied = enforce_grounding_and_pacing(&db, p.id, &mut s, &g, true);
         assert!(!applied.is_empty());
         assert!(s.beats[0].clips.iter().all(|c| c.out_s - c.in_s <= TRIMMED_CLIP_S + 1e-9));
-        assert!(s.total_duration_s() <= 45.0 * TARGET_OVERSHOOT);
+        assert!(s.total_duration_s() <= 20.0 * TARGET_OVERSHOOT);
     }
 
     #[tokio::test]
