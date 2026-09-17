@@ -19,6 +19,33 @@ pub fn is_video_path(path: &Path) -> bool {
         .is_some_and(|e| VIDEO_EXTENSIONS.iter().any(|v| v.eq_ignore_ascii_case(e)))
 }
 
+/// Folders editing apps fill with their own renders and caches (not footage): Premiere Pro preview
+/// renders and auto-saves, Adobe media cache, DaVinci Resolve and Final Cut Pro caches and proxies.
+const IGNORED_DIRS: &[&str] = &[
+    "adobe premiere pro preview files",
+    "adobe premiere pro video previews",
+    "adobe premiere pro audio previews",
+    "adobe premiere pro auto-save",
+    "adobe after effects auto-save",
+    "media cache files",
+    "media cache",
+    "peak files",
+    "cacheclip",
+    "proxymedia",
+    "optimizedmedia",
+    "render files",
+    "transcoded media",
+    "proxy media",
+    "analysis files",
+];
+
+/// Whether a folder holds app-generated renders or caches that shouldn't be listed or indexed.
+/// Hidden folders count too. Premiere names its render folders `<sequence>.PRV`.
+pub fn is_ignored_dir(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with('.') || lower.ends_with(".prv") || IGNORED_DIRS.contains(&lower.as_str())
+}
+
 const EDGE: u64 = 4 * 1024 * 1024;
 
 /// Identity of a video's content, cheap even for huge files: BLAKE3 over the size plus the

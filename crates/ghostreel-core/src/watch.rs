@@ -18,10 +18,14 @@ impl FolderWatcher {
     /// Watch `folders` (recursive flag per folder). Missing folders are skipped.
     pub fn new(folders: &[(PathBuf, bool)]) -> Result<Self, Error> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let roots: Vec<PathBuf> = folders.iter().map(|(p, _)| p.clone()).collect();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
-                // Access events (reads) never change the library.
-                if !matches!(ev.kind, notify::EventKind::Access(_)) {
+                // Access events (reads) never change the library, and neither do Premiere renders,
+                // caches or hidden files, which editing apps rewrite constantly.
+                if !matches!(ev.kind, notify::EventKind::Access(_))
+                    && !(!ev.paths.is_empty() && ev.paths.iter().all(|p| in_ignored_dir(p, &roots)))
+                {
                     let _ = tx.send(());
                 }
             }
@@ -54,9 +58,28 @@ impl FolderWatcher {
     }
 }
 
+/// Whether `path` lies in a folder the scan skips (below the watched root it belongs to).
+fn in_ignored_dir(path: &std::path::Path, roots: &[PathBuf]) -> bool {
+    let Some(rel) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else { return false };
+    let mut parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    let file = parts.pop();
+    parts.iter().any(|d| crate::media::is_ignored_dir(d)) || file.is_some_and(|f| f.starts_with('.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_editor_renders_below_the_root_only() {
+        let roots = vec![PathBuf::from("/home/me/.shoots/Greet")];
+        let r = |p: &str| in_ignored_dir(std::path::Path::new(p), &roots);
+        assert!(!r("/home/me/.shoots/Greet/DJI_0065.MP4"), "a hidden folder above the root doesn't count");
+        assert!(r("/home/me/.shoots/Greet/Adobe Premiere Pro Video Previews/Seq.PRV/a.mov"));
+        assert!(r("/home/me/.shoots/Greet/edit/Media Cache Files/x.mpeg"));
+        assert!(r("/home/me/.shoots/Greet/.DS_Store"));
+        assert!(!r("/home/me/.shoots/Greet/Premiere exports/final.mp4"));
+    }
 
     #[tokio::test]
     async fn debounces_a_burst_into_one_signal() {

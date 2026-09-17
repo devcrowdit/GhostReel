@@ -326,7 +326,14 @@ async fn walk_folder(
         let walker = walkdir::WalkDir::new(&root_owned).max_depth(if recursive { usize::MAX } else { 1 });
         walker
             .into_iter()
-            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+            .filter_entry(|e| {
+                e.depth() == 0
+                    || if e.file_type().is_dir() {
+                        !media::is_ignored_dir(&e.file_name().to_string_lossy())
+                    } else {
+                        !e.file_name().to_string_lossy().starts_with('.')
+                    }
+            })
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file() && media::is_video_path(e.path()))
             .filter_map(|e| {
@@ -1488,6 +1495,9 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         write(&media.join("broken.mkv"), b"junk");
         write(&media.join("notes.txt"), b"not a video");
         write(&media.join(".hidden/c.mp4"), b"video-c");
+        write(&media.join("Adobe Premiere Pro Video Previews/Seq 01.PRV/render.mov"), b"render");
+        write(&media.join("proj/Adobe Premiere Pro Auto-Save/x.mp4"), b"autosave");
+        write(&media.join("proj/Media Cache Files/cache.mpeg"), b"cache");
         let bin = fake_ffprobe(tmp.path());
 
         let mut db = Db::open_in_memory().unwrap();
@@ -1497,7 +1507,11 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
 
         let mut events = Vec::new();
         let s = run(&mut db, &rt(&bin), &opts, |e| events.push(e)).await.unwrap();
-        assert_eq!((s.new, s.unchanged, s.removed), (4, 0, 0), "4 files, hidden dir and .txt skipped");
+        assert_eq!(
+            (s.new, s.unchanged, s.removed),
+            (4, 0, 0),
+            "4 files; hidden dir, Premiere renders/caches and .txt skipped"
+        );
         assert_eq!((s.jobs_done, s.jobs_failed), (2, 1), "a/copy-of-a share content; broken fails");
 
         let st = status(&db, Some(p.id)).unwrap();
