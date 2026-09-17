@@ -3,7 +3,9 @@
 Local-first video asset search. Point GhostReel at folders of video; it transcribes speech
 (whisper), samples keyframes, has a local vision model describe each frame (incl. on-screen
 text), embeds everything, and gives you hybrid semantic + keyword search that jumps to the
-exact timestamp. Ships as a **Tauri v2 desktop app** and a **headless CLI** sharing one core
+exact timestamp. Work is organised in **projects** (each with its own video folders), and the
+final feature is a per-project **script chat** that assembles an edit from the indexed footage and
+exports it through **OpenTimelineIO** as FCP XML for Premiere Pro. Ships as a **Tauri v2 desktop app** and a **headless CLI** sharing one core
 crate. Targets Linux, macOS, Windows.
 
 **Hard requirement: fully standalone on Windows AND Linux.** Installs and runs on a normal
@@ -32,6 +34,8 @@ captions module, GPU feature flags, `scripts/tauri.mjs`).
 | D9 | Models & hardware | **First-run wizard** reads GPU name/VRAM (from ggml's CUDA device list) and downloads models from Hugging Face with progress/resume/sha256 into `%LOCALAPPDATA%\GhostReel\models`: Bonsai-27B-Q1_0 + mmproj (~4 GB), embeddinggemma (~0.3 GB), whisper large-v3-turbo (~1.6 GB). Target GPUs: **RTX 4070 12 GB** (dev) and **RTX 3070 8 GB** (her PC) — design budget is the 3070. If VRAM < ~6 GB free, offload some layers to CPU (`n_gpu_layers`). | Models too big for the installer; one default that fits both machines. |
 | D10 | ggml link conflict — **CONFIRMED in S0** | `whisper-rs` and `llama-cpp-2` each statically vendor ggml → `ld.lld: error: duplicate symbol: gguf_type_size(gguf_type)`. **Decision:** transcription runs in **`ghostreel-asr(.exe)`**, a small Rust helper binary (whisper-rs only, ~56 MB with CUDA) that the app/CLI spawns per video and reads JSON-lines segments from stdout. Main binary links only `llama-cpp-2`. | A shared-ggml single binary would need patching whisper-rs-sys to build against llama.cpp's newer ggml — fragile across upgrades. A process boundary also frees whisper's VRAM for sure before the VLM loads. |
 | D12 | Transcription backends | Mirror of D11 for speech: **`LocalWhisper`** (spawns bundled `ghostreel-asr`, whisper-rs CUDA) or **`GhostPenServer`** (`POST http://127.0.0.1:8771/v1/audio/transcriptions`, GhostPen's resident whisper). `stt.backend = auto | local | server`; `auto` probes `GET /health` + a capability check (see §2b). | On the dev box GhostPen already holds a whisper model in VRAM (~0.6 GB); GhostReel must not load a second copy. |
+| D13 | Projects | **One database, many projects.** `projects` own folders (`project_folders`); a video is indexed once (by content hash) and can belong to several projects via its folders. Search, chat and exports are scoped to a project. | Re-using an indexed clip in a second project costs nothing; per-project DB files would duplicate transcripts, frames and vectors. |
+| D14 | Timeline export | GhostReel builds an **OpenTimelineIO** timeline (native `.otio` JSON written from Rust) and converts it with the official **`otio-fcp-adapter`** (`fcp_xml` = Final Cut Pro 7 XML / xmeml, which Premiere Pro imports via *File → Import*) running in a bundled **`ghostreel-otio` sidecar** (Python + `opentimelineio` + `otio-fcp-adapter`, frozen per OS with PyInstaller). A native Rust xmeml writer is the fallback if the sidecar proves problematic. | There is no usable Rust OTIO (crates.io `opentimelineio` is a 2020 placeholder) and OTIO adapters are Python. The sidecar keeps the standalone promise (no Python on the user's PC). Note: Premiere imports **FCP7 XML**, not FCP X `.fcpxml`. |
 
 ### Rust options for running local models in-process
 
@@ -211,6 +215,8 @@ GPU-bound stages (transcribe, describe) are serialized by a GPU semaphore; CPU s
 ## 4. Data model (SQLite)
 
 ```sql
+projects(id, name, description, fps_num, fps_den, width, height, created_at)   -- sequence defaults
+project_folders(project_id, folder_id)                -- a folder can serve several projects
 folders(id, path, recursive, enabled, added_at)
 videos(id, content_hash UNIQUE, path, folder_id, size, mtime, duration_s, width, height,
        fps, vcodec, acodec, has_audio, language, summary, status, error, indexed_at)
@@ -222,7 +228,14 @@ chunks(id, video_id, kind,           -- 'moment' | 'transcript' | 'frame' | 'sum
 chunks_fts USING fts5(text, content='chunks', content_rowid='id', tokenize='unicode61')
 chunks_vec USING vec0(embedding float[DIM])  -- rowid = chunks.id
 meta(key, value)                     -- schema_version, embed_model, embed_dim, ...
+-- script chat (M8)
+chat_sessions(id, project_id, title, created_at, updated_at)
+chat_messages(id, session_id, role, content, tool_calls_json, created_at)
+scripts(id, project_id, session_id, title, version, script_json, created_at)  -- versioned drafts
+exports(id, script_id, format, path, created_at)      -- 'otio' | 'fcp_xml'
 ```
+Schema v1 (M0) has no projects; **v2 (M1)** adds `projects` + `project_folders` (migrations are
+append-only). Video/chunk queries join through `project_folders → folders → videos` for scoping.
 
 **Chunk kinds** (the important retrieval unit is the *moment*):
 - `moment` — frame description + visible text + transcript window around that frame.
@@ -231,6 +244,92 @@ meta(key, value)                     -- schema_version, embed_model, embed_dim, 
 - `summary` — whole-video summary / chapters.
 
 Migrations: `rusqlite_migration` or hand-rolled `schema_version`.
+
+## 4a. Script chat & timeline export (final feature, M8)
+
+Per project, the user chats with the LLM to write a video; GhostReel grounds every claim in the
+project's indexed footage, produces an editable **script with real clips**, and exports it as an
+**OpenTimelineIO** timeline → **FCP XML** for Premiere Pro.
+
+### Flow
+1. **Brief** — user describes the video ("90 s product teaser for the CM5 board, energetic,
+   16:9, end on the logo"); optional target duration, tone, audience, must-use clips.
+2. **Research (tool use)** — the model calls GhostReel tools, scoped to the project:
+   | tool | returns |
+   |---|---|
+   | `search_moments(query, kind?, limit)` | hybrid-search hits: video, start/end, snippet, frame description, thumbnail id |
+   | `get_transcript(video_id, start_s, end_s)` | timestamped segments |
+   | `get_video(video_id)` | duration, fps, resolution, summary, chapters |
+   | `list_videos()` | project inventory with summaries |
+   Tool calls use OpenAI `tools` on the server backend (llama.cpp `--jinja`); on the local
+   backend each agent step is a **JSON-schema-constrained action** (`{"tool":…,"args":…}` or
+   `{"final": script}`) — same grammar trick proven in S0, no tool-call parser needed.
+3. **Draft** — model returns a `Script` (JSON schema below); the app renders it next to the chat.
+4. **Iterate** — chat edits ("shorter intro", "swap clip 3 for something outdoors") produce a new
+   script **version**; the user can also edit directly (reorder beats, trim in/out on a mini
+   timeline with the player, replace a clip from search results, edit narration).
+5. **Validate** — before saving/export: every clip references an existing video in the project,
+   `0 ≤ in < out ≤ duration`, in/out snapped to transcript-segment or frame boundaries (no cut
+   mid-word), total duration vs target reported.
+6. **Export** — `.otio` + FCP7 `.xml` (+ optional narration `.txt`/`.srt`); open in Premiere via
+   *File → Import*.
+
+### Script schema (v1)
+```json
+{
+  "title": "CM5 teaser", "target_duration_s": 90, "fps": 25, "width": 1920, "height": 1080,
+  "beats": [
+    {
+      "id": "b1", "purpose": "hook",
+      "narration": "What if your next board updated itself?",   // voice-over text, optional
+      "on_screen_text": "Meet CM5",                              // title/lower-third, optional
+      "clips": [
+        { "video_id": 42, "in_s": 12.4, "out_s": 16.0, "audio": "source|mute",
+          "why": "close-up of the board unboxing" }
+      ],
+      "notes": "fast cut"
+    }
+  ]
+}
+```
+
+### Script → OTIO mapping
+| Script | OTIO |
+|---|---|
+| script | `Timeline(name=title, global_start_time=0 @ fps)` |
+| clips in beat order | `Track V1 (Video)`: `Clip(media_reference=ExternalReference(target_url=file:///abs/path, available_range=0..duration @ source fps), source_range=in..out)` |
+| clip audio (`audio=source`) | `Track A1 (Audio)` mirroring V1 clips (muted clips → `Gap`) |
+| `on_screen_text` | `Track V2`: `Gap`-backed clips with `metadata.ghostreel.title` + a **marker** (Premiere shows markers; real titles are added by the editor) |
+| `narration` | **markers** on the V1 clip spanning the beat (`name` = beat id/purpose, `comment` = narration) + optional `narration.srt` sidecar file |
+| `why`/`notes` | clip `metadata.ghostreel` + marker comments |
+Times are `RationalTime` at the **source clip rate** for `source_range` and the **sequence rate**
+(project fps) for the timeline; 29.97/23.976 handled as rational (30000/1001). Paths are absolute
+`file://` URLs; Windows paths converted properly (`file:///C:/…`).
+
+### `ghostreel-otio` sidecar (D14)
+- Tiny Python CLI: `ghostreel-otio convert in.otio out.xml --adapter fcp_xml` and
+  `ghostreel-otio validate in.xml` (reads it back to catch adapter errors).
+- Pinned `opentimelineio` + `otio-fcp-adapter`; frozen with PyInstaller in CI for windows-x64 and
+  linux-x64 (~30–40 MB); shipped next to `ffmpeg` in the installers. Dev box may use a venv.
+- Rust writes `.otio` JSON via serde (OTIO schema `Timeline.1`, `Stack.1`, `Track.1`, `Clip.2`,
+  `ExternalReference.1`, `Gap.1`, `Marker.2`, `TimeRange.1`, `RationalTime.1`) — covered by golden
+  tests and by round-tripping through `otio.adapters.read_from_file` in CI.
+
+### Acceptance
+- Golden tests: Script fixtures → `.otio` JSON snapshots; `.otio` → `fcp_xml` → read back → same
+  clip count, ranges and paths.
+- **Manual acceptance on Premiere Pro (Windows PC):** import the XML → sequence at project fps
+  and resolution, clips link to media without relinking, in/out points match, markers carry the
+  narration. Also verify import in DaVinci Resolve (`.otio` native) as a bonus.
+
+### Risks
+- **Local-model tool use quality** (Bonsai 27B at 1-bit): mitigate with constrained actions,
+  small tool results (top-k snippets, not full transcripts), and a "grounded only" rule —
+  the validator rejects clips that weren't returned by a tool in the session.
+- **Context size**: long chats + tool results; keep the script as the state and summarise old
+  turns; ~16–32 k context on the 3070 budget (KV q4_0).
+- **FCP XML quirks** in Premiere (frame-rate mismatches, variable-frame-rate phone footage,
+  audio channel layout): detect VFR in ffprobe (M1) and warn; test with real footage early.
 
 ## 5. Search
 
@@ -262,12 +361,16 @@ Migrations: `rusqlite_migration` or hand-rolled `schema_version`.
 ## 7. CLI (`ghostreel`)
 
 ```
-ghostreel folder add <path> [--no-recursive] | list | remove <path>
+ghostreel project create <name> [--fps 25] | list | show <name> | remove <name>
+ghostreel folder add <path> --project <name> [--no-recursive] | list [--project] | remove <path>
 ghostreel index [--watch] [--only <stage>] [--force]      # run pipeline
 ghostreel status [--json]
-ghostreel search "<query>" [--limit 20] [--kind moment] [--json]
+ghostreel search "<query>" --project <name> [--limit 20] [--kind moment] [--json]
 ghostreel show <video> [--transcript] [--frames] [--json]
 ghostreel ask "<question>"                                 # RAG answer w/ citations
+ghostreel script chat --project <name> [--session <id>]         # interactive script chat (M8)
+ghostreel script show <script-id> [--json]
+ghostreel script export <script-id> --format fcp_xml|otio -o edit.xml   # Premiere: File → Import
 ghostreel reindex --embeddings                             # after embed-model change
 ghostreel doctor                                           # ffmpeg, whisper model, AI backend chosen, GPU
 ghostreel index --backend server --server http://127.0.0.1:8089   # per-run override
@@ -337,14 +440,15 @@ licenses (Bonsai, embeddinggemma = Gemma terms) shown in the download step.
 |---|---|---|
 | S0 | **Spike (Linux first, then Windows PC)**: describe one JPEG via `OpenAiServer` against running highllama (baseline quality/speed, no extra VRAM); then with highllama stopped, tiny Rust bin with `llama-cpp-2` `cuda`+`mtmd` loads Bonsai-27B-Q1_0 + mmproj, describes a JPEG; same binary also links `whisper-rs` `cuda` and transcribes a WAV (tests D10); build on Windows with CUDA, run on her PC (3070 8 GB); measure s/frame and peak VRAM on both GPUs; test missing-GPU fallback | Go/no-go on single binary vs `ghostreel-asr.exe`; perf numbers |
 | M0 | Workspace scaffold (core/cli/tauri[/asr]), config, SQLite + migrations, `doctor` (GPU, VRAM, driver, models, ffmpeg) | `ghostreel doctor` green on Windows + Linux |
-| M1 | Folders, discovery, hashing, ffprobe, jobs table, `index`/`status` | Library listed with metadata, resumable |
+| M1 | **Projects** (schema v2) + folders per project, discovery, hashing, ffprobe (incl. VFR detection), jobs table, `index`/`status` | Two projects sharing a folder list the same videos once; indexing resumable |
 | M2 | Audio → transcripts: `ghostreel-asr` helper (port GhostPen captions) **and** `GhostPenServer` client (chunked, verbose_json); GhostPen PR adding `verbose_json` segments | Same test video gives equivalent timestamped transcripts via both backends |
 | M3 | Frame sampling + pHash dedupe + thumbnails | Sensible frame count per video |
 | M4 | Model manager (HF download/verify) + VLM frame descriptions via `LlamaCppLocal` **and** `OpenAiServer` (highllama), `auto` probing, load/unload lifecycle | JSON descriptions stored, retry/lenient parse |
 | M5 | Chunking, embeddings, FTS5 + sqlite-vec, hybrid search in CLI | `ghostreel search` returns right moments on eval queries |
 | M6 | Tauri UI: library, search, player w/ seek, settings, progress | Usable end-to-end in the app |
 | M7 | First-run wizard, watcher, summaries, `ask`, packaging: NSIS (Windows) + AppImage/deb/rpm/CLI tarball (Linux) + CI | Fresh Windows PC **and** fresh Linux install (no CUDA toolkit, no highllama/GhostPen): install → wizard → search works |
-| M8 | Later: MCP server, CLIP image similarity, video-clip input to the VLM, macOS Metal | — |
+| M8 | **Script chat + OTIO/FCP XML export** (§4a): project-scoped tools, constrained agent loop (local) / OpenAI tools (server), versioned scripts, script editor + mini timeline, Script→`.otio` writer, `ghostreel-otio` sidecar (`fcp_xml`), packaging of the sidecar | Chat produces a grounded 60–90 s script from real project footage; exported XML imports into **Premiere Pro** on the Windows PC with correct clips, in/out and markers |
+| Backlog | MCP server, CLIP image similarity, video-clip input to the VLM, macOS Metal, voice-over TTS track | — |
 
 Keep a small **eval set** (10 videos, ~30 queries with expected video+timestamp) from M5 to
 tune sampling threshold, chunk sizes, and prompts.

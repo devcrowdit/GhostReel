@@ -2,7 +2,8 @@
 
 Search inside your videos — locally. GhostReel watches folders of video, transcribes the speech,
 describes keyframes with a local vision model, and lets you search by what was said, shown or
-written on screen, jumping straight to the moment.
+written on screen, jumping straight to the moment. Organise footage in projects, then chat with the model to
+script a video from your clips and export it (OpenTimelineIO → FCP XML) to Premiere Pro.
 
 Runs fully standalone (models in-process, CUDA) on Windows and Linux, or reuses servers you
 already run: highllama for vision + embeddings, GhostPen for transcription.
