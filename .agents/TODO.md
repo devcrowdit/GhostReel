@@ -8,14 +8,19 @@
 - [x] M0: workspace (core / cli / tauri), config + paths, SQLite v1 schema with FTS5 + sqlite-vec,
       server probes with capability checks, `ghostreel doctor` (CLI + app status screen), icon
 
-## Next — M1 (projects + library)
-- [ ] schema v2: `projects`, `project_folders`; `ghostreel project create|list|show|remove`
-- [ ] `ghostreel folder add --project|list|remove`
-- [ ] discovery walk + extension filter, content hash (blake3 of size + first/last 4 MB)
-- [ ] ffprobe metadata → `videos` (flag variable-frame-rate footage for the M8 export)
-- [ ] persisted `jobs` state machine + `index` / `status` commands, resumable
-- [ ] `notify` watcher (`index --watch`)
-- [ ] app: project switcher + Library view (folders, per-video status)
+- [x] M1: schema v2 (`projects`, `project_folders`, `video_files` per folder), project/folder
+      management (shared + overlap-safe folders), discovery + content hash (BLAKE3 size+edges,
+      moves/renames/copies don't re-index), ffprobe metadata (rotation, VFR heuristic, audio),
+      persisted resumable jobs with retries, indexer lock, watcher with settle delay,
+      CLI `project|folder|index [--watch]|status`, app project sidebar + Library view with live
+      indexing progress
+
+## Next — M2 (transcripts)
+- [ ] `ghostreel-asr` helper binary (whisper-rs CUDA, JSON-lines segments on stdout)
+- [ ] GhostPen client: chunked audio (~5 min Opus), `verbose_json`, offset + seam de-dup
+- [ ] `transcribe` stage after `probe` (skip videos without audio), `auto|local|server` resolution
+- [ ] whisper model download (`large-v3-turbo`) reusing GhostPen's model files when present
+- [ ] app: transcript panel per video
 
 ## Later milestones
 See plan §9: M2 transcripts (ghostreel-asr + GhostPen client), M3 frames, M4 model manager +

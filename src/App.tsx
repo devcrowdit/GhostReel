@@ -1,148 +1,123 @@
 import { useCallback, useEffect, useState } from "react";
-import { doctor, type DoctorView, type Resolution } from "./api";
+import { createProject, FPS_PRESETS, listProjects, type ProjectSummary } from "./api";
+import ProjectPage from "./ProjectPage";
+import StatusPage from "./StatusPage";
 
-const CAPABILITIES: { key: "vision" | "embeddings" | "stt"; label: string; hint: string }[] = [
-  { key: "vision", label: "Frame descriptions", hint: "vision model" },
-  { key: "embeddings", label: "Search embeddings", hint: "embeddinggemma" },
-  { key: "stt", label: "Transcription", hint: "whisper" },
-];
+type Page = { kind: "status" } | { kind: "project"; id: number };
 
-function BackendCard({ label, hint, r }: { label: string; hint: string; r: Resolution }) {
-  const where =
-    r.target === "server" && r.probe
-      ? `${r.probe.model ?? "server"} · ${r.probe.url.replace(/^https?:\/\//, "")}`
-      : r.target === "local"
-        ? "runs on this computer"
-        : "not available";
+function NewProject({ onCreated, onCancel }: { onCreated: (id: number) => void; onCancel: () => void }) {
+  const [name, setName] = useState("");
+  const [fps, setFps] = useState("25");
+  const [res, setRes] = useState("1920x1080");
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const preset = FPS_PRESETS.find((p) => p.label === fps)!;
+    const [w, h] = res.split("x").map(Number);
+    try {
+      const p = await createProject(name, preset.num, preset.den, w, h);
+      onCreated(p.id);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   return (
-    <div className={`card backend ${r.target}`}>
-      <div className="card-head">
-        <span className="label">{label}</span>
-        <span className={`pill ${r.target}`}>{r.target}</span>
+    <form className="new-project" onSubmit={submit}>
+      <input autoFocus placeholder="Project name" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="inline">
+        <select value={fps} onChange={(e) => setFps(e.target.value)} title="Sequence frame rate">
+          {FPS_PRESETS.map((p) => (
+            <option key={p.label}>{p.label}</option>
+          ))}
+        </select>
+        <select value={res} onChange={(e) => setRes(e.target.value)} title="Sequence resolution">
+          <option value="1920x1080">1080p</option>
+          <option value="3840x2160">4K</option>
+          <option value="1080x1920">9:16</option>
+          <option value="1080x1080">1:1</option>
+        </select>
       </div>
-      <div className="where">{where}</div>
-      <div className="muted small">
-        {hint} · backend = {r.backend} · {r.reason}
+      {error && <div className="bad-text small">{error}</div>}
+      <div className="inline">
+        <button type="submit" disabled={!name.trim()}>
+          Create
+        </button>
+        <button type="button" className="ghost" onClick={onCancel}>
+          Cancel
+        </button>
       </div>
-    </div>
+    </form>
   );
 }
 
 export default function App() {
-  const [view, setView] = useState<DoctorView | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [page, setPage] = useState<Page>({ kind: "status" });
+  const [creating, setCreating] = useState(false);
 
   const refresh = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      setView(await doctor());
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    const list = await listProjects().catch(() => []);
+    setProjects(list);
+    setPage((p) => (p.kind === "project" && !list.some((x) => x.project.id === p.id) ? { kind: "status" } : p));
   }, []);
 
   useEffect(() => {
-    refresh();
+    refresh().then(() =>
+      listProjects()
+        .then((l) => l.length > 0 && setPage({ kind: "project", id: l[0].project.id }))
+        .catch(() => {}),
+    );
   }, [refresh]);
 
-  const r = view?.report;
-
   return (
-    <main>
-      <header>
-        <img src="/icon.png" alt="" width={36} height={36} />
-        <div>
-          <h1>GhostReel</h1>
-          <p className="muted">Search inside your videos — locally{r ? ` · v${r.version}` : ""}</p>
+    <div className="shell">
+      <nav>
+        <div className="brand">
+          <img src="/icon.png" alt="" width={28} height={28} />
+          <span>GhostReel</span>
         </div>
-        <button onClick={refresh} disabled={busy}>
-          {busy ? "Checking…" : "Check again"}
+        <div className="nav-title">Projects</div>
+        {projects.map(({ project, status }) => (
+          <button
+            key={project.id}
+            className={`nav-item ${page.kind === "project" && page.id === project.id ? "active" : ""}`}
+            onClick={() => setPage({ kind: "project", id: project.id })}
+          >
+            <span>{project.name}</span>
+            <span className="count">{status.videos}</span>
+          </button>
+        ))}
+        {creating ? (
+          <NewProject
+            onCancel={() => setCreating(false)}
+            onCreated={async (id) => {
+              setCreating(false);
+              await refresh();
+              setPage({ kind: "project", id });
+            }}
+          />
+        ) : (
+          <button className="nav-item add" onClick={() => setCreating(true)}>
+            + New project
+          </button>
+        )}
+        <div className="spacer" />
+        <button
+          className={`nav-item ${page.kind === "status" ? "active" : ""}`}
+          onClick={() => setPage({ kind: "status" })}
+        >
+          Status
         </button>
-      </header>
-
-      {error && <div className="banner bad">{error}</div>}
-
-      {view && r && (
-        <>
-          {view.blockers.length === 0 ? (
-            <div className="banner good">Ready to index.</div>
-          ) : (
-            <div className="banner bad">
-              <strong>Needs attention</strong>
-              <ul>
-                {view.blockers.map((b) => (
-                  <li key={b}>{b}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <h2>AI</h2>
-          <section className="grid">
-            {CAPABILITIES.map((c) => (
-              <BackendCard key={c.key} label={c.label} hint={c.hint} r={r[c.key]} />
-            ))}
-          </section>
-
-          <h2>This computer</h2>
-          <section className="grid">
-            <div className="card">
-              <div className="label">GPU</div>
-              {r.gpu.length === 0 ? (
-                <div className="muted">No NVIDIA GPU — local models run on the CPU (slow).</div>
-              ) : (
-                r.gpu.map((g) => (
-                  <div key={g.name}>
-                    <div className="where">{g.name}</div>
-                    <div className="meter">
-                      <div style={{ width: `${(100 * g.vram_used_mib) / Math.max(g.vram_total_mib, 1)}%` }} />
-                    </div>
-                    <div className="muted small">
-                      {(g.vram_used_mib / 1024).toFixed(1)} / {(g.vram_total_mib / 1024).toFixed(1)} GB used ·
-                      driver {g.driver}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <div className="card">
-              <div className="label">Video tools</div>
-              {[r.ffmpeg, r.ffprobe].map((t) => (
-                <div key={t.name} className={t.path ? "" : "bad-text"}>
-                  {t.path ? "✓" : "✗"} {t.name} <span className="muted small">{t.version ?? "not found"}</span>
-                </div>
-              ))}
-            </div>
-            <div className="card">
-              <div className="label">Library database</div>
-              <div className={r.db.ok ? "" : "bad-text"}>
-                {r.db.ok ? `✓ schema v${r.db.schema_version} · sqlite-vec ${r.db.sqlite_vec}` : `✗ ${r.db.error}`}
-              </div>
-              <div className="muted small path">{r.db.path}</div>
-            </div>
-          </section>
-
-          <h2>Local model files</h2>
-          <section className="card list">
-            {r.models.map((m) => (
-              <div key={m.pattern} className="row">
-                <span>{m.found ? "✓" : "–"}</span>
-                <span className="role">{m.role}</span>
-                <span className="muted small path">{m.found ?? `${m.pattern} (not downloaded)`}</span>
-              </div>
-            ))}
-          </section>
-
-          <p className="muted small path">
-            Config: {r.config_file}
-            {r.config_error ? ` — ${r.config_error}` : ""}
-          </p>
-        </>
-      )}
-    </main>
+      </nav>
+      <div className="content">
+        {page.kind === "status" ? (
+          <StatusPage />
+        ) : (
+          <ProjectPage key={page.id} projectId={page.id} onChanged={refresh} />
+        )}
+      </div>
+    </div>
   );
 }

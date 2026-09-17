@@ -102,6 +102,74 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[768]);
     "#,
+    // v2 — projects (D13) and file locations separate from video identity. A video is its
+    // content (hash); `video_files` are the paths where that content was found, each inside a
+    // watched folder. Projects see videos through project_folders → folders → video_files.
+    r#"
+    CREATE TABLE projects (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        fps_num INTEGER NOT NULL DEFAULT 25,
+        fps_den INTEGER NOT NULL DEFAULT 1,
+        width INTEGER NOT NULL DEFAULT 1920,
+        height INTEGER NOT NULL DEFAULT 1080,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE project_folders (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        PRIMARY KEY (project_id, folder_id)
+    );
+
+    CREATE TABLE videos_v2 (
+        id INTEGER PRIMARY KEY,
+        content_hash TEXT NOT NULL UNIQUE,
+        size INTEGER NOT NULL,
+        duration_s REAL,
+        width INTEGER,
+        height INTEGER,
+        rotation INTEGER,
+        fps REAL,
+        avg_fps REAL,
+        vfr INTEGER,
+        vcodec TEXT,
+        acodec TEXT,
+        has_audio INTEGER,
+        created_time TEXT,
+        language TEXT,
+        summary TEXT,
+        status TEXT NOT NULL DEFAULT 'new',
+        error TEXT,
+        indexed_at INTEGER
+    );
+    INSERT INTO videos_v2 (id, content_hash, size, duration_s, width, height, fps, vcodec, acodec,
+                           has_audio, language, summary, status, error, indexed_at)
+        SELECT id, content_hash, size, duration_s, width, height, fps, vcodec, acodec,
+               has_audio, language, summary, status, error, indexed_at FROM videos;
+
+    CREATE TABLE video_files (
+        id INTEGER PRIMARY KEY,
+        video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        mtime INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL,
+        -- Per folder: overlapping folders of different projects each track the file.
+        UNIQUE (folder_id, path)
+    );
+    INSERT INTO video_files (video_id, folder_id, path, size, mtime, last_seen)
+        SELECT id, folder_id, path, size, mtime, 0 FROM videos WHERE folder_id IS NOT NULL;
+
+    DROP INDEX videos_path;
+    DROP TABLE videos;
+    ALTER TABLE videos_v2 RENAME TO videos;
+    CREATE INDEX video_files_video ON video_files(video_id);
+    CREATE INDEX video_files_path ON video_files(path);
+    CREATE INDEX jobs_state ON jobs(stage, state);
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -160,6 +228,18 @@ impl Db {
         if current > MIGRATIONS.len() {
             return Err(Error::SchemaTooNew { found: current as u32, supported: MIGRATIONS.len() as u32 });
         }
+        if current == MIGRATIONS.len() {
+            return Ok(());
+        }
+        // Table rebuilds (v2) drop tables other tables reference; with enforcement on, that would
+        // cascade-delete their rows. Enforcement can only change outside a transaction.
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = self.apply_migrations(current);
+        self.conn.pragma_update(None, "foreign_keys", "ON")?;
+        result
+    }
+
+    fn apply_migrations(&mut self, current: usize) -> Result<(), Error> {
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
             let tx = self.conn.transaction()?;
             tx.execute_batch(sql)?;
@@ -169,6 +249,11 @@ impl Db {
                     "INSERT INTO meta(key, value) VALUES ('embed_model', ?1), ('embed_dim', ?2)",
                     params![EMBED_MODEL, EMBED_DIM.to_string()],
                 )?;
+            }
+            let violations: i64 =
+                tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+            if violations > 0 {
+                return Err(Error::Migration(format!("v{} left {violations} foreign key violations", i + 1)));
             }
             tx.commit()?;
         }
@@ -202,6 +287,41 @@ mod tests {
     }
 
     #[test]
+    fn v1_to_v2_keeps_videos_and_their_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        register_sqlite_vec();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(MIGRATIONS[0]).unwrap();
+            tx.pragma_update(None, "user_version", 1).unwrap();
+            tx.execute_batch(
+                "INSERT INTO folders(id, path, added_at) VALUES (1, '/media', 0);
+                 INSERT INTO videos(id, content_hash, path, folder_id, size, mtime, duration_s)
+                     VALUES (7, 'abc', '/media/a.mp4', 1, 10, 5, 12.5);
+                 INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (7, 0, 1, 'hi');",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        let (hash, dur): (String, f64) = db
+            .conn
+            .query_row("SELECT content_hash, duration_s FROM videos WHERE id = 7", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((hash.as_str(), dur), ("abc", 12.5));
+        let file: String =
+            db.conn.query_row("SELECT path FROM video_files WHERE video_id = 7", [], |r| r.get(0)).unwrap();
+        assert_eq!(file, "/media/a.mp4");
+        let segs: i64 = db.conn.query_row("SELECT count(*) FROM transcript_segments", [], |r| r.get(0)).unwrap();
+        assert_eq!(segs, 1, "rebuilding videos must not cascade-delete children");
+        let fk: bool = db.conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
+        assert!(fk);
+    }
+
+    #[test]
     fn reopen_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ghostreel.db");
@@ -215,7 +335,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let c = &db.conn;
         c.execute(
-            "INSERT INTO videos(content_hash, path, size, mtime) VALUES ('h', '/v.mp4', 1, 0)",
+            "INSERT INTO videos(content_hash, size) VALUES ('h', 1)",
             [],
         )
         .unwrap();

@@ -16,8 +16,8 @@ S0 findings §11). Progress: [`.agents/TODO.md`](.agents/TODO.md).
 
 | path | what |
 |---|---|
-| `crates/ghostreel-core` | config, paths, SQLite+FTS5+sqlite-vec DB, server probing, doctor |
-| `crates/ghostreel-cli` | `ghostreel` binary (`doctor`, `config`) |
+| `crates/ghostreel-core` | config, paths, SQLite+FTS5+sqlite-vec DB, server probing, doctor, projects, media (hash/ffprobe), index (scan + jobs), watch |
+| `crates/ghostreel-cli` | `ghostreel` binary (`doctor`, `config`, `project`, `folder`, `index [--watch]`, `status`) |
 | `src-tauri` | desktop app (`ghostreel` app binary, lib `ghostreel_lib`) |
 | `src/` | React + TS frontend (Vite) |
 | `spikes/s0-local` | throwaway S0 spike (separate workspace, CUDA builds) |
@@ -49,5 +49,8 @@ npx tauri build --no-bundle       # release app binary (embedded frontend)
    GhostPen's whisper segfaults when VRAM runs out.
 6. CUDA builds: `CMAKE_BUILD_PARALLEL_LEVEL=4` — full parallel llama.cpp+whisper.cpp CUDA builds OOM.
 7. Wayland: keep `apply_wayland_webkit_workaround()` (WebKit DMABUF "Error 71").
-8. Migrations in `db.rs` are append-only.
+8. Migrations in `db.rs` are append-only once committed. Table rebuilds run with foreign keys off
+   (see `Db::migrate`) — otherwise dropping `videos` cascades into jobs/transcripts.
+10. Video identity = content hash; `video_files` are locations, unique per *(folder, path)* so
+    overlapping folders of different projects don't fight over a file.
 9. Don't create branches in `~/Code/ghostpen` or `~/Code/highllama`; work on main there.
