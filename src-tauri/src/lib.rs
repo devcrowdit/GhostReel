@@ -261,6 +261,82 @@ fn video_frames(video_id: i64) -> CmdResult<Vec<FrameRow>> {
     index::frames(&Db::open(&p.db_file()).map_err(err)?, &p.data_dir, video_id).map_err(err)
 }
 
+#[derive(Serialize)]
+struct ScriptView {
+    stored: ghostreel_core::script::StoredScript,
+    issues: Vec<ghostreel_core::script::Issue>,
+}
+
+#[derive(Serialize)]
+struct SaveScriptView {
+    script_id: i64,
+    issues: Vec<ghostreel_core::script::Issue>,
+}
+
+#[tauri::command]
+async fn chat_turn(
+    app: AppHandle,
+    queue: State<'_, queue::Queue>,
+    project_id: i64,
+    session_id: Option<i64>,
+    message: String,
+) -> CmdResult<queue::ChatTurnView> {
+    let session_id = match session_id {
+        Some(id) => id,
+        None => {
+            let title: String = message.chars().take(60).collect();
+            let db = open_db()?;
+            ghostreel_core::chat::create_session(&db, project_id, &title).map_err(err)?
+        }
+    };
+    let label = format!("Script chat: {}", message.chars().take(40).collect::<String>());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    queue.enqueue_chat(&app, project_id, session_id, message, label, tx).await;
+    match rx.await {
+        Ok(res) => res,
+        Err(_) => Err("chat task cancelled or failed".into()),
+    }
+}
+
+#[tauri::command]
+fn chat_sessions(project_id: i64) -> CmdResult<Vec<ghostreel_core::chat::ChatSession>> {
+    let db = open_db()?;
+    ghostreel_core::chat::sessions(&db, project_id).map_err(err)
+}
+
+#[tauri::command]
+fn chat_messages(session_id: i64) -> CmdResult<Vec<ghostreel_core::chat::ChatMessage>> {
+    let db = open_db()?;
+    ghostreel_core::chat::messages(&db, session_id).map_err(err)
+}
+
+#[tauri::command]
+fn list_scripts(project_id: i64) -> CmdResult<Vec<ghostreel_core::script::ScriptSummary>> {
+    let db = open_db()?;
+    ghostreel_core::script::list(&db, project_id).map_err(err)
+}
+
+#[tauri::command]
+fn get_script(script_id: i64) -> CmdResult<ScriptView> {
+    let db = open_db()?;
+    let stored = ghostreel_core::script::load(&db, script_id).map_err(err)?;
+    let issues = ghostreel_core::script::validate(&db, stored.project_id, &stored.script).map_err(err)?;
+    Ok(ScriptView { stored, issues })
+}
+
+#[tauri::command]
+fn save_script(
+    project_id: i64,
+    mut script: ghostreel_core::script::Script,
+    session_id: Option<i64>,
+) -> CmdResult<SaveScriptView> {
+    let db = open_db()?;
+    let _ = ghostreel_core::script::snap_to_segments(&db, &mut script).map_err(err)?;
+    let issues = ghostreel_core::script::validate(&db, project_id, &script).map_err(err)?;
+    let script_id = ghostreel_core::script::save_version(&db, project_id, &script, session_id).map_err(err)?;
+    Ok(SaveScriptView { script_id, issues })
+}
+
 /// WebKitGTK's DMABUF renderer dies with "Error 71 (Protocol error) dispatching to Wayland
 /// display" on wlroots compositors (Hyprland, Sway) — same workaround as GhostPen. Only on
 /// Wayland, and only if the user hasn't chosen a value themselves.
@@ -327,6 +403,12 @@ pub fn run() {
             search,
             open_external,
             media_base,
+            chat_turn,
+            chat_sessions,
+            chat_messages,
+            list_scripts,
+            get_script,
+            save_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

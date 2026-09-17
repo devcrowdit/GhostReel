@@ -8,6 +8,20 @@ const STATE_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
+function taskLabel(task: Task): string {
+  if (task.label) return task.label;
+  switch (task.kind.type) {
+    case "index":
+      return "Indexing";
+    case "chat":
+      return "Script chat";
+    case "render_preview":
+      return `Rendering preview (script #${task.kind.script_id})`;
+    case "export":
+      return `Exporting (${task.kind.format})`;
+  }
+}
+
 export default function TaskCard({ task, compact = false }: { task: Task; compact?: boolean }) {
   const p = task.progress;
   const running = task.state === "running";
@@ -16,7 +30,7 @@ export default function TaskCard({ task, compact = false }: { task: Task; compac
   return (
     <div className={`card task ${task.state}`}>
       <div className="progress-head">
-        <span className="label">{task.label}</span>
+        <span className="label">{taskLabel(task)}</span>
         <span className="muted small">
           {running && p ? (
             <>
@@ -46,6 +60,11 @@ export default function TaskCard({ task, compact = false }: { task: Task; compac
         <div className="muted small">
           {s.new} new · {s.changed} changed · {s.removed} removed · {s.jobs_done} steps done
           {s.jobs_failed ? ` · ${s.jobs_failed} failed` : ""}
+        </div>
+      )}
+      {task.state === "done" && task.output && (
+        <div className="muted small path">
+          Output: {task.output}
         </div>
       )}
       {task.error && <div className="bad-text small">{task.error}</div>}

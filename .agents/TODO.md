@@ -63,6 +63,17 @@
 - [ ] Proxy cache key has no encoder: proxies from nvenc and libx264 runs could be mixed in one `-c copy` concat
 - [ ] Every render inserts a new `exports` row (no dedupe); Tauri Preview/Export tasks not exercised in the running app yet
 - [ ] Audio of a proxy can end ~30 ms before its video (AAC framing); concat offsets by container duration so it doesn't accumulate
+- [x] M8c: script chat — core `chat` module (tools `search_moments`/`get_transcript`/`get_video`/`list_videos`,
+      results ≤ 1500 chars; server backend = OpenAI tools loop ≤ 8 rounds + json_schema final Script; local backend =
+      schema-constrained action loop over new `ghostreel-llm` `complete` command), grounding (clips must lie inside
+      tool-returned ranges), pacing guard (one redraft for > 12 s clips / total off target, then trim), snap + validate +
+      versioned save, chat_sessions/messages persistence; CLI `script chat|sessions`; Tauri `chat_turn` (queue task
+      `chat`, `chat-progress` events), `chat_sessions`, `chat_messages`, `list_scripts`, `get_script`, `save_script`;
+      app Scripts tab (sessions/versions, chat with tool chips, script editor with search replace, preview player +
+      timeline bar, FCP XML/.otio export via M8b commands)
+  - [ ] Local chat backend never run (needs a CUDA helper rebuild with `complete`)
+  - [ ] Scripts tab not clicked through in the running app; preview/export depend on M8b merge
+  - [ ] Chat quality with Bonsai Q1: tends to pick one video and skip narration
 
 ## Next
 - [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel

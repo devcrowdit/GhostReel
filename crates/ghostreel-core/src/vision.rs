@@ -289,6 +289,19 @@ impl LocalLlm {
         let v = self.request(json!({ "cmd": "embed", "texts": texts })).await?;
         serde_json::from_value(v["embeddings"].clone()).map_err(|e| Error::Vision(format!("bad embeddings: {e}")))
     }
+
+    pub async fn complete(&mut self, prompt: &str, schema: Option<Value>) -> Result<String, Error> {
+        let mut req = json!({
+            "cmd": "complete",
+            "prompt": prompt,
+            "max_tokens": 2048,
+        });
+        if let Some(s) = schema {
+            req["schema"] = s;
+        }
+        let v = self.request(req).await?;
+        Ok(v["content"].as_str().unwrap_or_default().to_string())
+    }
 }
 
 pub enum Describer {

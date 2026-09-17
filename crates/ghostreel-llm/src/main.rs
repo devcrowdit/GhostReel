@@ -108,36 +108,20 @@ struct Vision<'a> {
 }
 
 impl Vision<'_> {
-    fn describe(
+    fn sample(
         &mut self,
-        image: &str,
-        prompt: &str,
+        prompt_tokens: usize,
+        n_past: i32,
         schema: Option<&Value>,
         max_tokens: usize,
+        t0: Instant,
     ) -> Result<Value, String> {
-        let t0 = Instant::now();
-        self.ctx.clear_kv_cache();
-        let marker = llama_cpp_2::mtmd::mtmd_default_marker();
-        // ChatML with thinking disabled (Qwen-style template used by Bonsai; same as the server's
-        // jinja output with enable_thinking=false).
-        let text =
-            format!("<|im_start|>user\n{marker}{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
-        let bitmap = MtmdBitmap::from_file(&self.mtmd, image, false).map_err(|e| format!("image {image}: {e:?}"))?;
-        let chunks = self
-            .mtmd
-            .tokenize(MtmdInputText { text, add_special: true, parse_special: true }, &[&bitmap])
-            .map_err(|e| format!("tokenize: {e:?}"))?;
-        let prompt_tokens = chunks.total_tokens();
-        let n_past = chunks
-            .eval_chunks(&self.mtmd, &self.ctx, 0, 0, self.n_batch as i32, true)
-            .map_err(|e| format!("prompt eval: {e:?}"))?;
-
         let mut grammar = match schema {
-            Some(s) => {
+            Some(s) if !s.is_null() => {
                 let g = llama_cpp_2::json_schema_to_grammar(&s.to_string()).map_err(|e| format!("schema: {e:?}"))?;
                 Some(LlamaSampler::grammar(self.model, &g, "root").map_err(|e| format!("grammar: {e:?}"))?)
             }
-            None => None,
+            _ => None,
         };
         let mut chain = LlamaSampler::chain_simple([
             LlamaSampler::penalties(self.model.n_vocab(), 64, 1.1, 0.0, 0.0),
@@ -149,9 +133,8 @@ impl Vision<'_> {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut out = String::new();
         let mut batch = LlamaBatch::new(1, 1);
-        let mut pos = n_past;
         let mut gen_tokens = 0usize;
-        for _ in 0..max_tokens {
+        for pos in (n_past..).take(max_tokens) {
             let mut cur = self.ctx.token_data_array();
             cur.apply_sampler(&chain);
             let mut tok = cur.selected_token().ok_or("sampler selected no token")?;
@@ -177,7 +160,6 @@ impl Vision<'_> {
             gen_tokens += 1;
             batch.clear();
             batch.add(tok, pos, &[0], true).map_err(|e| e.to_string())?;
-            pos += 1;
             self.ctx.decode(&mut batch).map_err(|e| format!("decode: {e}"))?;
         }
         Ok(json!({
@@ -187,6 +169,57 @@ impl Vision<'_> {
             "truncated": gen_tokens >= max_tokens,
             "secs": t0.elapsed().as_secs_f64(),
         }))
+    }
+
+    fn describe(
+        &mut self,
+        image: &str,
+        prompt: &str,
+        schema: Option<&Value>,
+        max_tokens: usize,
+    ) -> Result<Value, String> {
+        let t0 = Instant::now();
+        self.ctx.clear_kv_cache();
+        let marker = llama_cpp_2::mtmd::mtmd_default_marker();
+        // ChatML with thinking disabled (Qwen-style template used by Bonsai; same as the server's
+        // jinja output with enable_thinking=false).
+        let text =
+            format!("<|im_start|>user\n{marker}{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        let bitmap = MtmdBitmap::from_file(&self.mtmd, image, false).map_err(|e| format!("image {image}: {e:?}"))?;
+        let chunks = self
+            .mtmd
+            .tokenize(MtmdInputText { text, add_special: true, parse_special: true }, &[&bitmap])
+            .map_err(|e| format!("tokenize: {e:?}"))?;
+        let prompt_tokens = chunks.total_tokens();
+        let n_past = chunks
+            .eval_chunks(&self.mtmd, &self.ctx, 0, 0, self.n_batch as i32, true)
+            .map_err(|e| format!("prompt eval: {e:?}"))?;
+
+        self.sample(prompt_tokens, n_past, schema, max_tokens, t0)
+    }
+
+    fn complete(&mut self, prompt: &str, schema: Option<&Value>, max_tokens: usize) -> Result<Value, String> {
+        let t0 = Instant::now();
+        self.ctx.clear_kv_cache();
+        let text = if prompt.starts_with("<|im_start|>") {
+            if prompt.ends_with("<think>\n\n</think>\n\n") {
+                prompt.to_string()
+            } else {
+                format!("{prompt}\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            }
+        } else {
+            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        };
+        let chunks = self
+            .mtmd
+            .tokenize(MtmdInputText { text, add_special: true, parse_special: true }, &[])
+            .map_err(|e| format!("tokenize: {e:?}"))?;
+        let prompt_tokens = chunks.total_tokens();
+        let n_past = chunks
+            .eval_chunks(&self.mtmd, &self.ctx, 0, 0, self.n_batch as i32, true)
+            .map_err(|e| format!("prompt eval: {e:?}"))?;
+
+        self.sample(prompt_tokens, n_past, schema, max_tokens, t0)
     }
 }
 
@@ -314,6 +347,11 @@ fn run() -> Result<(), String> {
                 ),
                 (None, _) => Err("vision model not loaded".into()),
                 (_, None) => Err("describe needs image".into()),
+            },
+            "complete" => match (&mut vision, &req.prompt) {
+                (Some(v), Some(prompt)) => v.complete(prompt, req.schema.as_ref(), req.max_tokens.unwrap_or(2048)),
+                (None, _) => Err("vision/llm model not loaded".into()),
+                (_, None) => Err("complete needs prompt".into()),
             },
             "embed" => match (&mut embedder, &req.texts) {
                 (Some(e), Some(texts)) => e.embed(texts),

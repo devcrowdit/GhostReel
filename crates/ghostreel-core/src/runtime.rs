@@ -187,7 +187,7 @@ pub async fn resolve_embed(paths: &Paths, config: &Config) -> EmbedSetup {
     EmbedSetup::Local { helper, models_dir: paths.models_dir(), spec, found }
 }
 
-async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
+pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
     let cfg = &config.vision;
     let probe = match cfg.backend {
         Backend::Local => None,

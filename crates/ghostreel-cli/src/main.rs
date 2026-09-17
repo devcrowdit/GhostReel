@@ -156,6 +156,19 @@ enum ScriptAction {
         #[arg(long)]
         burn_narration: bool,
     },
+    /// Chat with the editing agent to draft or refine a script.
+    Chat {
+        #[arg(long, short)]
+        project: String,
+        #[arg(long)]
+        session: Option<i64>,
+        message: String,
+    },
+    /// List chat sessions in a project.
+    Sessions {
+        #[arg(long, short)]
+        project: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -550,6 +563,105 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 res.encoder,
                 t0.elapsed().as_secs_f64()
             );
+        }
+        ScriptAction::Chat { project, session, message } => {
+            let p = db.require_project(&project)?;
+            let config = Config::load(&paths.config_file)?;
+            let vision_setup = runtime::resolve_vision(paths, &config).await;
+            eprintln!("Chat model: {}", vision_setup.describe());
+            let backend = ghostreel_core::chat::ChatBackend::from_vision_setup(&vision_setup).await?;
+
+            let mut embedder = None;
+            let embed_setup = runtime::resolve_embed(paths, &config).await;
+            match runtime::start_embedder(&embed_setup, |_, _| {}).await {
+                Ok(e) => embedder = Some(e),
+                Err(why) => eprintln!("(meaning search unavailable: {why}; using keywords only)"),
+            }
+
+            let mut ctx = ghostreel_core::chat::ChatContext { db, data_dir: paths.data_dir.clone(), backend, embedder };
+
+            let t0 = std::time::Instant::now();
+            let mut on_event = |event: ghostreel_core::chat::ChatEvent| match event {
+                ghostreel_core::chat::ChatEvent::ToolStarted { tool, args } => {
+                    println!("→ {tool} {args}");
+                }
+                ghostreel_core::chat::ChatEvent::ToolFinished { summary, .. } => {
+                    println!("  ← {summary}");
+                }
+                ghostreel_core::chat::ChatEvent::Drafting => {
+                    println!("Drafting script…");
+                }
+                ghostreel_core::chat::ChatEvent::Validating => {
+                    println!("Validating…");
+                }
+            };
+
+            let res = ghostreel_core::chat::run_turn(&mut ctx, p.id, session, &message, &mut on_event).await?;
+
+            println!("\n{}\n", res.reply);
+            println!("Session: #{}", res.session_id);
+            if let (Some(sid), Some(script)) = (res.script_id, &res.script) {
+                let version: i64 = ctx
+                    .db
+                    .conn
+                    .query_row("SELECT version FROM scripts WHERE id = ?1", [sid], |r| r.get(0))
+                    .unwrap_or(1);
+                println!("Script: #{sid} \"{}\" (v{version})", script.title);
+                println!("\n{:<6} {:<14} {:<30} NARRATION", "BEAT", "PURPOSE", "CLIPS");
+                for beat in &script.beats {
+                    let clips_str = beat
+                        .clips
+                        .iter()
+                        .map(|c| format!("#{} {:.1}–{:.1}s", c.video_id, c.in_s, c.out_s))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let narr = beat.narration.as_deref().unwrap_or("-");
+                    println!("{:<6} {:<14} {:<30} {}", beat.id, beat.purpose, clips_str, narr);
+                }
+                let total_dur = script.total_duration_s();
+                let target_str = script.target_duration_s.map(|t| format!(" (target {:.1}s)", t)).unwrap_or_default();
+                println!("\nDuration: {:.1}s{}", total_dur, target_str);
+            }
+            if !res.issues.is_empty() {
+                println!("\nIssues:");
+                for issue in &res.issues {
+                    let tag = match issue.severity {
+                        IssueSeverity::Error => "error",
+                        IssueSeverity::Warning => "warning",
+                        IssueSeverity::Info => "info",
+                    };
+                    println!("  [{tag}] {}", issue.message);
+                }
+            }
+            println!("Turn completed in {:.1}s", t0.elapsed().as_secs_f64());
+        }
+        ScriptAction::Sessions { project } => {
+            let p = db.require_project(&project)?;
+            let list = ghostreel_core::chat::sessions(&db, p.id)?;
+            if list.is_empty() {
+                println!("no chat sessions in project '{}'", p.name);
+            } else {
+                println!("{:<6} {:<40} {:<10} UPDATED", "ID", "TITLE", "MESSAGES");
+                for s in list {
+                    let count: i64 = db
+                        .conn
+                        .query_row("SELECT count(*) FROM chat_messages WHERE session_id = ?1", [s.id], |r| r.get(0))
+                        .unwrap_or(0);
+                    let now_ts = ghostreel_core::projects::now();
+                    let diff = now_ts.saturating_sub(s.updated_at);
+                    let updated = if diff < 60 {
+                        format!("{diff}s ago")
+                    } else if diff < 3600 {
+                        format!("{}m ago", diff / 60)
+                    } else if diff < 86400 {
+                        format!("{}h ago", diff / 3600)
+                    } else {
+                        format!("{}d ago", diff / 86400)
+                    };
+                    let title: String = s.title.chars().take(38).collect();
+                    println!("{:<6} {:<40} {:<10} {}", s.id, title, count, updated);
+                }
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

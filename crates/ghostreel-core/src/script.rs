@@ -223,6 +223,7 @@ pub struct ScriptSummary {
     pub beats: usize,
     pub clips: usize,
     pub duration_s: f64,
+    pub session_id: Option<i64>,
 }
 
 /// Small tolerance for floating point boundary comparisons.
@@ -491,7 +492,7 @@ pub fn load(db: &Db, script_id: i64) -> Result<StoredScript, Error> {
 /// List all scripts for a project.
 pub fn list(db: &Db, project_id: i64) -> Result<Vec<ScriptSummary>, Error> {
     let mut st = db.conn.prepare(
-        "SELECT id, title, version, script_json, created_at FROM scripts WHERE project_id = ?1 ORDER BY id DESC",
+        "SELECT id, title, version, script_json, created_at, session_id FROM scripts WHERE project_id = ?1 ORDER BY id DESC",
     )?;
     let rows = st.query_map([project_id], |r| {
         Ok((
@@ -500,18 +501,19 @@ pub fn list(db: &Db, project_id: i64) -> Result<Vec<ScriptSummary>, Error> {
             r.get::<_, i64>(2)?,
             r.get::<_, String>(3)?,
             r.get::<_, i64>(4)?,
+            r.get::<_, Option<i64>>(5)?,
         ))
     })?;
 
     let mut result = Vec::new();
     for row in rows {
-        let (id, title, version, json_str, created_at) = row?;
+        let (id, title, version, json_str, created_at, session_id) = row?;
         let (beats, clips, duration_s) = if let Ok(s) = serde_json::from_str::<Script>(&json_str) {
             (s.beats.len(), s.clip_count(), s.total_duration_s())
         } else {
             (0, 0, 0.0)
         };
-        result.push(ScriptSummary { id, title, version, created_at, beats, clips, duration_s });
+        result.push(ScriptSummary { id, title, version, created_at, beats, clips, duration_s, session_id });
     }
     Ok(result)
 }

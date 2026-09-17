@@ -215,6 +215,7 @@ export type TaskState = "queued" | "running" | "done" | "failed" | "cancelled";
 
 export type TaskKind =
   | { type: "index"; project_id: number }
+  | { type: "chat"; project_id: number; session_id: number }
   | { type: "render_preview"; script_id: number; burn_titles: boolean; burn_narration: boolean }
   | { type: "export"; script_id: number; format: string; path: string };
 
@@ -319,3 +320,131 @@ export const humanDuration = (s: number) => {
   const sec = t % 60;
   return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}:${String(sec).padStart(2, "0")}`;
 };
+
+// ---- scripts, chat, timeline preview & export (M8c) --------------------------------------
+
+export type Fps = number | { num: number; den: number };
+
+export interface ScriptClip {
+  video_id: number;
+  in_s: number;
+  out_s: number;
+  audio?: "source" | "mute";
+  why?: string;
+}
+
+export interface Beat {
+  id: string;
+  purpose: string;
+  narration?: string;
+  on_screen_text?: string;
+  clips: ScriptClip[];
+  notes?: string;
+}
+
+export interface Script {
+  title: string;
+  target_duration_s?: number;
+  fps?: Fps;
+  width?: number;
+  height?: number;
+  beats: Beat[];
+}
+
+export interface Issue {
+  severity: "error" | "warning" | "info";
+  beat_id: string | null;
+  clip_index: number | null;
+  message: string;
+}
+
+export interface StoredScript {
+  id: number;
+  project_id: number;
+  session_id: number | null;
+  title: string;
+  version: number;
+  created_at: number;
+  script: Script;
+}
+
+export interface ScriptSummary {
+  id: number;
+  session_id: number | null;
+  title: string;
+  version: number;
+  created_at: number;
+  beats: number;
+  clips: number;
+  duration_s: number;
+}
+
+export interface ChatSession {
+  id: number;
+  project_id: number;
+  title: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ToolCallRecord {
+  tool: string;
+  args: any;
+  summary: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  session_id: number;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  tool_calls: ToolCallRecord[] | null;
+  script_id: number | null;
+  created_at: number;
+}
+
+export interface ChatTurnView {
+  session_id: number;
+  reply: string;
+  script_id: number | null;
+  issues: Issue[];
+}
+
+export interface ScriptView {
+  stored: StoredScript;
+  issues: Issue[];
+}
+
+export interface SaveScriptView {
+  script_id: number;
+  issues: Issue[];
+}
+
+export type ChatEvent =
+  | { kind: "tool_started"; tool: string; args: any }
+  | { kind: "tool_finished"; tool: string; summary: string }
+  | { kind: "drafting" }
+  | { kind: "validating" };
+
+export interface ChatProgress {
+  session_id: number;
+  event: ChatEvent;
+}
+
+export const chatTurn = (projectId: number, sessionId: number | null, message: string) =>
+  invoke<ChatTurnView>("chat_turn", { projectId, sessionId, message });
+
+export const chatSessions = (projectId: number) =>
+  invoke<ChatSession[]>("chat_sessions", { projectId });
+
+export const chatMessages = (sessionId: number) =>
+  invoke<ChatMessage[]>("chat_messages", { sessionId });
+
+export const listScripts = (projectId: number) =>
+  invoke<ScriptSummary[]>("list_scripts", { projectId });
+
+export const getScript = (scriptId: number) =>
+  invoke<ScriptView>("get_script", { scriptId });
+
+export const saveScript = (projectId: number, script: Script, sessionId: number | null) =>
+  invoke<SaveScriptView>("save_script", { projectId, script, sessionId });

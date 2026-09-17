@@ -21,6 +21,7 @@ import {
 import TaskCard from "./TaskCard";
 import { useQueue } from "./useQueue";
 import VideoPanel from "./VideoPanel";
+import ScriptsPanel from "./ScriptsPanel";
 
 function SpeechCell({ v }: { v: VideoRow }) {
   if (v.segments > 0) return <span className="good-text">{v.language ? v.language.toUpperCase() : "✓"}</span>;
@@ -49,6 +50,7 @@ function Snippet({ text }: { text: string }) {
 }
 
 export default function ProjectPage({ projectId, onChanged }: { projectId: number; onChanged: () => void }) {
+  const [tab, setTab] = useState<"library" | "scripts">("library");
   const [view, setView] = useState<ProjectView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -153,7 +155,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
   const selectedVideo = view.videos.find((v) => v.id === selected) ?? null;
 
   return (
-    <main>
+    <main className={tab === "scripts" ? "wide" : ""}>
       <header>
         <div>
           <h1>{p.name}</h1>
@@ -167,10 +169,31 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
         </button>
       </header>
 
-      {error && <div className="banner bad">{error}</div>}
-      {running && <TaskCard task={running} compact />}
-      {!running && queued && <TaskCard task={queued} compact />}
-      {!running && !queued && lastFinished && lastFinished.state !== "done" && <TaskCard task={lastFinished} compact />}
+      <div className="tab-nav">
+        <button
+          type="button"
+          className={`tab-btn ${tab === "library" ? "active" : ""}`}
+          onClick={() => setTab("library")}
+        >
+          Library
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${tab === "scripts" ? "active" : ""}`}
+          onClick={() => setTab("scripts")}
+        >
+          Scripts
+        </button>
+      </div>
+
+      {tab === "scripts" ? (
+        <ScriptsPanel projectId={projectId} />
+      ) : (
+        <>
+          {error && <div className="banner bad">{error}</div>}
+          {running && <TaskCard task={running} compact />}
+          {!running && queued && <TaskCard task={queued} compact />}
+          {!running && !queued && lastFinished && lastFinished.state !== "done" && <TaskCard task={lastFinished} compact />}
 
       <form className="search" onSubmit={onSearch}>
         <input
@@ -318,6 +341,8 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
           Delete project
         </button>
       </p>
+        </>
+      )}
     </main>
   );
 }
