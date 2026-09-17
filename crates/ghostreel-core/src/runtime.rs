@@ -159,7 +159,7 @@ pub async fn resolve(paths: &Paths, config: &Config) -> Result<Runtime, crate::E
         ffprobe,
         stt,
         data_dir: paths.data_dir.clone(),
-        frames: Some(crate::frames::FrameOptions::default()),
+        frames: Some(crate::frames::FrameOptions::from_config(&config.frames)),
         vision,
         embed,
     })

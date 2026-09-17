@@ -94,6 +94,29 @@ export default function PreviewPlayer({
     }
   };
 
+  const onExportMp4 = async () => {
+    setError(null);
+    let targetScriptId = scriptId;
+    if (isDirty && onSaveBeforeAction) {
+      const savedId = await onSaveBeforeAction();
+      if (savedId == null) return;
+      targetScriptId = savedId;
+    }
+    const cleanTitle = scriptTitle.trim().replace(/[^a-zA-Z0-9_\-]/g, "_") || "preview";
+    try {
+      const path = await save({
+        defaultPath: `${cleanTitle}.mp4`,
+        filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+      });
+      if (typeof path === "string") {
+        const taskId = await enqueuePreview(targetScriptId, burnTitles, burnNarration, path);
+        setExportTaskId(taskId);
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const onExport = async (format: "fcp_xml" | "otio") => {
     setError(null);
     let targetScriptId = scriptId;
@@ -139,6 +162,14 @@ export default function PreviewPlayer({
       <div className="card-head">
         <span className="label">Timeline Preview & Export</span>
         <div className="inline">
+          <button
+            type="button"
+            className="ghost small"
+            onClick={onExportMp4}
+            title="Save the preview (540p, with the burn options below) as an MP4 to send as a demo"
+          >
+            Export MP4
+          </button>
           <button
             type="button"
             className="ghost small"

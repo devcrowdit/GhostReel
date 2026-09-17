@@ -26,11 +26,29 @@ pub struct ChatTurnView {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskKind {
-    Index { project_id: i64 },
-    RenderPreview { script_id: i64, burn_titles: bool, burn_narration: bool },
-    Export { script_id: i64, format: String, path: String },
-    Chat { project_id: i64, session_id: i64 },
-    DownloadModel { model_id: String },
+    Index {
+        project_id: i64,
+    },
+    /// `out`: save the render there (MP4 export for demos) instead of the previews folder.
+    RenderPreview {
+        script_id: i64,
+        burn_titles: bool,
+        burn_narration: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<String>,
+    },
+    Export {
+        script_id: i64,
+        format: String,
+        path: String,
+    },
+    Chat {
+        project_id: i64,
+        session_id: i64,
+    },
+    DownloadModel {
+        model_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -225,8 +243,8 @@ pub async fn worker(app: AppHandle) {
             TaskKind::Index { project_id } => {
                 run_index(&app, id, project_id, cancel.clone()).await.map(TaskOutcome::Index)
             }
-            TaskKind::RenderPreview { script_id, burn_titles, burn_narration } => {
-                run_preview(&app, id, script_id, burn_titles, burn_narration, cancel.clone()).await
+            TaskKind::RenderPreview { script_id, burn_titles, burn_narration, out } => {
+                run_preview(&app, id, script_id, burn_titles, burn_narration, out, cancel.clone()).await
             }
             TaskKind::Export { script_id, format, path } => {
                 run_export(&app, id, script_id, &format, &path).await.map(|p| TaskOutcome::Export { path: p })
@@ -379,12 +397,18 @@ async fn run_preview(
     script_id: i64,
     burn_titles: bool,
     burn_narration: bool,
+    out: Option<String>,
     cancel: Arc<AtomicBool>,
 ) -> Result<TaskOutcome, String> {
     let p = Paths::resolve().map_err(|e| e.to_string())?;
     let db = Db::open(&p.db_file()).map_err(|e| e.to_string())?;
     let ffmpeg = ghostreel_core::doctor::locate("ffmpeg").ok_or_else(|| "ffmpeg not found".to_string())?;
-    let opts = ghostreel_core::preview::PreviewOptions { burn_titles, burn_narration, out: None, cancel: Some(cancel) };
+    let opts = ghostreel_core::preview::PreviewOptions {
+        burn_titles,
+        burn_narration,
+        out: out.map(std::path::PathBuf::from),
+        cancel: Some(cancel),
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(f64, String)>();
     let app_clone = app.clone();
@@ -475,7 +499,13 @@ async fn run_chat(
     let embedder = runtime::start_embedder(&setup, |_, _| {}).await.ok();
     let db = Db::open(&p.db_file()).map_err(|e| e.to_string())?;
 
-    let mut ctx = ghostreel_core::chat::ChatContext { db, data_dir: p.data_dir.clone(), backend, embedder };
+    let mut ctx = ghostreel_core::chat::ChatContext {
+        db,
+        data_dir: p.data_dir.clone(),
+        backend,
+        embedder,
+        system_prompt: Some(config.chat.system_prompt.clone()),
+    };
 
     let app_handle = app.clone();
     let mut on_event = move |event: ghostreel_core::chat::ChatEvent| {

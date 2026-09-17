@@ -107,6 +107,47 @@ pub struct ModelsConfig {
     pub search_paths: Vec<PathBuf>,
 }
 
+/// Script chat settings.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Editing instructions for the script chat; empty = the built-in default
+    /// (`chat::DEFAULT_EDITOR_PROMPT`). `{project}`, `{fps}`, `{width}`, `{height}` are filled in.
+    pub system_prompt: String,
+}
+
+/// Keyframe extraction settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FramesConfig {
+    /// Maximum gap between keyframes in seconds. Default 8 s; valid range 1–60.
+    /// Shorter = more detail for search and scripts; longer = faster indexing.
+    /// Scene changes always get a frame regardless of this setting.
+    pub max_interval_s: f64,
+}
+
+impl Default for FramesConfig {
+    fn default() -> Self {
+        Self { max_interval_s: 8.0 }
+    }
+}
+
+impl FramesConfig {
+    /// Clamp `max_interval_s` to the valid range (1–60 s) without erroring.
+    pub fn clamped_interval(&self) -> f64 {
+        self.max_interval_s.clamp(1.0, 60.0)
+    }
+
+    /// Validate that `max_interval_s` is within the 1–60 range, returning an error message if not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_interval_s < 1.0 || self.max_interval_s > 60.0 {
+            Err(format!("frames.max_interval_s must be between 1 and 60, got {}", self.max_interval_s))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -114,6 +155,8 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub stt: SttConfig,
     pub models: ModelsConfig,
+    pub frames: FramesConfig,
+    pub chat: ChatConfig,
 }
 
 impl Config {
@@ -204,5 +247,44 @@ mod tests {
         saved_cfg.save(&path).unwrap();
         let roundtrip = Config::load(&path).unwrap();
         assert_eq!(roundtrip.vision.local_model, "qwen2.5-vl-7b");
+    }
+
+    #[test]
+    fn frames_config_default_is_8s() {
+        let cfg = Config::default();
+        assert_eq!(cfg.frames.max_interval_s, 8.0);
+        assert_eq!(cfg.frames.clamped_interval(), 8.0);
+        assert!(cfg.frames.validate().is_ok());
+    }
+
+    #[test]
+    fn frames_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.frames.max_interval_s = 5.0;
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.frames.max_interval_s, 5.0);
+
+        // Partial file: no [frames] section → default 8 s
+        std::fs::write(&path, "[vision]\nbackend = \"local\"\n").unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.frames.max_interval_s, 8.0);
+    }
+
+    #[test]
+    fn frames_config_clamping_and_validation() {
+        let mut fc = FramesConfig { max_interval_s: 0.5 };
+        assert_eq!(fc.clamped_interval(), 1.0);
+        assert!(fc.validate().is_err());
+
+        fc.max_interval_s = 90.0;
+        assert_eq!(fc.clamped_interval(), 60.0);
+        assert!(fc.validate().is_err());
+
+        fc.max_interval_s = 15.0;
+        assert_eq!(fc.clamped_interval(), 15.0);
+        assert!(fc.validate().is_ok());
     }
 }

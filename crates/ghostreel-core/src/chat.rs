@@ -15,7 +15,7 @@ use crate::Error;
 use crate::db::Db;
 use crate::embed::Embedder;
 use crate::projects::{Project, now};
-use crate::script::{Issue, IssueSeverity, Script, save_version, snap_to_segments, validate};
+use crate::script::{Issue, IssueSeverity, Script, ScriptClip, save_version, snap_to_segments, validate};
 use crate::search::{SearchOptions, query_vector, search_with_vector};
 
 /// Events emitted during agent execution.
@@ -115,6 +115,8 @@ pub struct ChatContext {
     pub data_dir: PathBuf,
     pub backend: ChatBackend,
     pub embedder: Option<Embedder>,
+    /// Custom editing instructions (Settings); `None`/empty = [`DEFAULT_EDITOR_PROMPT`].
+    pub system_prompt: Option<String>,
 }
 
 /// Slack around grounded ranges (search moments are approximate).
@@ -220,8 +222,30 @@ fn enforce_grounding_and_pacing(
         beat.clips = kept;
     }
     s.beats.retain(|b| !b.clips.is_empty());
+    clamp_to_duration(db, s);
+    let repeats = drop_repeated_footage(s);
+    if repeats > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Warning,
+            beat_id: None,
+            clip_index: None,
+            message: format!("dropped {repeats} clip(s) that repeated footage already used earlier"),
+        });
+    }
+    let merged = merge_contiguous_clips(s);
+    if merged > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("joined {merged} back-to-back cut(s) of the same shot into continuous clips"),
+        });
+    }
+    // Pad before trimming, so the target is met with the people's pauses already in.
+    pad_speech(db, s);
     let before = s.total_duration_s();
-    if enforce_target && trim_to_target(s) {
+    let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
+    if enforce_target && fit_speech_to_target(db, s) | trim_to_target_with(s, speaking) {
         issues.push(Issue {
             severity: IssueSeverity::Info,
             beat_id: None,
@@ -310,13 +334,13 @@ pub fn script_json_schema() -> Value {
                                     "audio": { "type": "string", "enum": ["source", "mute"] },
                                     "why": { "type": "string" }
                                 },
-                                "required": ["video_id", "in_s", "out_s"],
+                                "required": ["video_id", "in_s", "out_s", "audio"],
                                 "additionalProperties": false
                             }
                         },
                         "notes": { "type": "string" }
                     },
-                    "required": ["id", "purpose", "clips"],
+                    "required": ["id", "purpose", "narration", "clips"],
                     "additionalProperties": false
                 }
             }
@@ -367,11 +391,13 @@ pub fn tools_definition() -> Value {
             "type": "function",
             "function": {
                 "name": "get_video",
-                "description": "Get video metadata and sampled keyframe summaries",
+                "description": "Get video metadata and keyframe descriptions (what is visible at each time). Pass start_s/end_s to see every keyframe in a range before choosing a clip.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "video_id": { "type": "integer", "description": "Video ID" }
+                        "video_id": { "type": "integer", "description": "Video ID" },
+                        "start_s": { "type": "number", "description": "Optional range start in seconds" },
+                        "end_s": { "type": "number", "description": "Optional range end in seconds" }
                     },
                     "required": ["video_id"],
                     "additionalProperties": false
@@ -471,6 +497,26 @@ pub fn dispatch_tool(
     grounding: &mut Grounding,
     vector: Option<&[f32]>,
 ) -> (String, String) {
+    dispatch_tool_limited(db, data_dir, project_id, tool, args, grounding, vector, LOCAL_TOOL_RESULT_CHARS)
+}
+
+/// Tool results for the local helper (8k context) stay small.
+pub const LOCAL_TOOL_RESULT_CHARS: usize = 1500;
+/// Servers have large contexts (highllama: 120k); richer results make much better edits.
+pub const SERVER_TOOL_RESULT_CHARS: usize = 8000;
+
+/// [`dispatch_tool`] with an explicit cap on the JSON result length.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_tool_limited(
+    db: &Db,
+    data_dir: &Path,
+    project_id: i64,
+    tool: &str,
+    args: &Value,
+    grounding: &mut Grounding,
+    vector: Option<&[f32]>,
+    max_chars: usize,
+) -> (String, String) {
     match tool {
         "search_moments" => {
             let query = match args.get("query").and_then(|v| v.as_str()) {
@@ -515,7 +561,7 @@ pub fn dispatch_tool(
             }
 
             let summary = format!("{} hits", hits.len());
-            let json_str = truncate_json_list(&mut compact, 1500);
+            let json_str = truncate_json_list(&mut compact, max_chars);
             (json_str, summary)
         }
         "get_transcript" => {
@@ -563,7 +609,7 @@ pub fn dispatch_tool(
 
             let mut segs: Vec<CompactSeg> = rows.filter_map(Result::ok).collect();
             let summary = format!("{} segments", segs.len());
-            let json_str = truncate_json_list(&mut segs, 1500);
+            let json_str = truncate_json_list(&mut segs, max_chars);
             (json_str, summary)
         }
         "get_video" => {
@@ -641,13 +687,17 @@ pub fn dispatch_tool(
                 }
             }
 
-            let sampled_raw = if all_frames.len() <= 12 {
+            let range_start = args.get("start_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let range_end = args.get("end_s").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+            all_frames.retain(|(t, _)| *t >= range_start - 0.5 && *t <= range_end + 0.5);
+            let max_sampled = if max_chars > LOCAL_TOOL_RESULT_CHARS { 40 } else { 12 };
+            let sampled_raw = if all_frames.len() <= max_sampled {
                 all_frames
             } else {
                 let count = all_frames.len();
-                let mut chosen = Vec::with_capacity(12);
-                for i in 0..12 {
-                    let idx = (i * (count - 1)) / 11;
+                let mut chosen = Vec::with_capacity(max_sampled);
+                for i in 0..max_sampled {
+                    let idx = (i * (count - 1)) / (max_sampled - 1);
                     chosen.push(all_frames[idx].clone());
                 }
                 chosen
@@ -657,7 +707,22 @@ pub fn dispatch_tool(
             for (t_s, desc_json) in sampled_raw {
                 let summary_text = if let Some(j) = desc_json {
                     if let Ok(v) = serde_json::from_str::<Value>(&j) {
-                        v.get("description").and_then(|d| d.as_str()).unwrap_or("").chars().take(120).collect()
+                        {
+                            let desc_chars = if max_chars > LOCAL_TOOL_RESULT_CHARS { 300 } else { 120 };
+                            let mut text: String = v
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("")
+                                .chars()
+                                .take(desc_chars)
+                                .collect();
+                            if let Some(vt) = v.get("visible_text").and_then(|t| t.as_array()).filter(|a| !a.is_empty())
+                            {
+                                let vt: Vec<&str> = vt.iter().filter_map(|x| x.as_str()).collect();
+                                text.push_str(&format!(" [text: {}]", vt.join(" | ")));
+                            }
+                            text
+                        }
                     } else {
                         String::new()
                     }
@@ -680,8 +745,8 @@ pub fn dispatch_tool(
                 "frames": frames,
             });
 
-            // If serialized JSON > 1500 chars, drop frames until it fits
-            while obj.to_string().len() > 1500 && !frames.is_empty() {
+            // Drop frames until the JSON fits.
+            while obj.to_string().len() > max_chars && !frames.is_empty() {
                 frames.pop();
                 obj["frames"] = json!(frames);
             }
@@ -767,7 +832,7 @@ pub fn dispatch_tool(
             }
 
             let summary = format!("{} videos", videos.len());
-            let json_str = truncate_json_list(&mut videos, 1500);
+            let json_str = truncate_json_list(&mut videos, max_chars);
             (json_str, summary)
         }
         unknown => {
@@ -807,62 +872,392 @@ pub fn check_grounding(db: &Db, project_id: i64, script: &Script, grounding: &Gr
 /// A script is "off target" when its clips add up to more than this factor of the target duration.
 const TARGET_OVERSHOOT: f64 = 1.25;
 /// Shortest clip automatic trimming leaves.
-const MIN_TRIMMED_CLIP_S: f64 = 2.0;
+const MIN_TRIMMED_CLIP_S: f64 = 4.0;
 
 /// Last resort when the model ignores the target: shorten every clip proportionally (keeping its
-/// in point, never below 2 s). Returns whether anything changed.
+/// in point, never below 4 s). Returns whether anything changed.
 pub fn trim_to_target(script: &mut Script) -> bool {
+    trim_to_target_with(script, |_| false)
+}
+
+/// [`trim_to_target`] that leaves `keep` clips (people speaking) whole and shortens the others.
+fn trim_to_target_with(script: &mut Script, keep: impl Fn(&ScriptClip) -> bool) -> bool {
     let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
     let total = script.total_duration_s();
     if total <= target * TARGET_OVERSHOOT {
         return false;
     }
-    let factor = target / total;
+    let kept: f64 = script.beats.iter().flat_map(|b| &b.clips).filter(|c| keep(c)).map(|c| c.out_s - c.in_s).sum();
+    let flexible = total - kept;
+    if flexible <= 0.0 {
+        return false;
+    }
+    let factor = ((target - kept) / flexible).clamp(0.0, 1.0);
+    let mut changed = false;
     for clip in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
+        if keep(clip) {
+            continue;
+        }
         let len = clip.out_s - clip.in_s;
         let new_len = (len * factor).max(MIN_TRIMMED_CLIP_S).min(len);
-        clip.out_s = clip.in_s + new_len;
+        if new_len < len {
+            clip.out_s = clip.in_s + new_len;
+            changed = true;
+        }
     }
-    true
+    changed
 }
 
-/// Construct the system prompt for the editor agent.
-pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>) -> String {
-    let mut prompt = format!(
-        "You are an expert video editor assistant for project \"{}\".\n\
-         Sequence settings: {}/{} fps, {}x{} resolution.\n\n\
-         You have access to 4 tools to inspect the project's footage:\n\
-         - search_moments(query, kind, limit): Find relevant video moments by meaning or keyword.\n\
-         - get_transcript(video_id, start_s, end_s): View speech segments in a video range.\n\
-         - get_video(video_id): View video metadata and sampled keyframes.\n\
-         - list_videos(): View all videos available in this project.\n\n\
-         Rules:\n\
-         1. Only use video_id and footage ranges that you have personally inspected and verified with tools.\n\
-         2. All clip in_s and out_s ranges MUST fall inside ranges returned by your tool calls.\n\
-         3. Ranges returned by search_moments and get_transcript are search windows, not clips: pick a \
-         sub-range of a window for each clip (never copy a whole 30-60 s window).\n\
-         4. Pacing: hold every shot at least 3 s so viewers can see it; 4-8 s for scenery and b-roll, longer \
-         for shots with on-screen text; when someone is speaking, keep the clip until they finish their \
-         sentence (up to ~25 s), using get_transcript to find where the sentence ends. Prefer fewer, longer \
-         clips over many quick cuts.\n\
-         5. The sum of all clip lengths (out_s - in_s) should match the length the user asked for; set \
-         target_duration_s to it. If the user gave no length, choose one that suits the material.\n\
-         6. The user's feedback overrides these defaults. When asked for slower pacing or more time, \
-         lengthen or drop clips and raise target_duration_s as needed; never return the previous draft unchanged.\n\
-         7. Structure the script into story beats, each with an id, clear purpose, clips, and optional narration or on-screen text.\n\
-         8. Always reply in the user's language.\n",
-        project.name, project.fps_num, project.fps_den, project.width, project.height
+fn video_duration(db: &Db, video_id: i64) -> Option<f64> {
+    db.conn
+        .query_row("SELECT duration_s FROM videos WHERE id = ?1", [video_id], |r| r.get::<_, Option<f64>>(0))
+        .ok()
+        .flatten()
+}
+
+/// Keep clips inside their video; drop the ones that start past its end.
+fn clamp_to_duration(db: &Db, script: &mut Script) {
+    for beat in &mut script.beats {
+        beat.clips.retain_mut(|c| {
+            if let Some(d) = video_duration(db, c.video_id) {
+                c.out_s = c.out_s.min(d);
+                c.in_s = c.in_s.max(0.0);
+            }
+            c.out_s - c.in_s >= 1.0
+        });
+    }
+    script.beats.retain(|b| !b.clips.is_empty());
+}
+
+/// A video length stated in the user's message: "60 second", "90s", "1.5 minutes", "2 minutos".
+pub fn requested_duration_s(message: &str) -> Option<f64> {
+    let lower = message.to_lowercase();
+    let tokens: Vec<&str> =
+        lower.split(|c: char| c.is_whitespace() || c == '-' || c == ',').filter(|t| !t.is_empty()).collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        // "90s" / "2min" glued forms, or a number followed by a unit word.
+        let split = tok.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(tok.len());
+        let (num, glued) = tok.split_at(split);
+        let Ok(n) = num.parse::<f64>() else { continue };
+        let unit = if glued.is_empty() { tokens.get(i + 1).copied().unwrap_or("") } else { glued };
+        let unit = unit.trim_matches(|c: char| !c.is_alphabetic());
+        let secs = if ["s", "sec", "secs", "second", "seconds", "seg", "segs", "segundo", "segundos"].contains(&unit) {
+            n
+        } else if ["m", "min", "mins", "minute", "minutes", "minuto", "minutos"].contains(&unit) {
+            n * 60.0
+        } else {
+            continue;
+        };
+        if (5.0..=3600.0).contains(&secs) {
+            return Some(secs);
+        }
+    }
+    None
+}
+
+/// A later clip overlapping footage an earlier clip already showed (by more than 1 s) is dropped.
+fn drop_repeated_footage(script: &mut Script) -> usize {
+    let mut used: Vec<(i64, f64, f64)> = Vec::new();
+    let mut dropped = 0;
+    for beat in &mut script.beats {
+        beat.clips.retain(|c| {
+            let repeat = used.iter().any(|&(v, a, b)| v == c.video_id && c.out_s.min(b) - c.in_s.max(a) > 1.0);
+            if repeat {
+                dropped += 1;
+            } else {
+                used.push((c.video_id, c.in_s, c.out_s));
+            }
+            !repeat
+        });
+    }
+    script.beats.retain(|b| !b.clips.is_empty());
+    dropped
+}
+
+/// When the speaking clips alone overrun the target, shorten each proportionally, cutting after a
+/// whole sentence (plus the tail) rather than mid-word. Returns whether anything changed.
+fn fit_speech_to_target(db: &Db, script: &mut Script) -> bool {
+    let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
+    let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
+    let spoken: f64 =
+        script.beats.iter().flat_map(|b| &b.clips).filter(|c| speaking(c)).map(|c| c.out_s - c.in_s).sum();
+    // Leave room for the other shots: speech may use up to 70 % of the target.
+    let budget = target * 0.7;
+    if spoken <= budget * TARGET_OVERSHOOT {
+        return false;
+    }
+    let factor = budget / spoken;
+    let mut changed = false;
+    for c in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
+        if !speaking(c) {
+            continue;
+        }
+        let max_out = c.in_s + (c.out_s - c.in_s) * factor;
+        let ends: Vec<f64> = db
+            .conn
+            .prepare_cached(
+                "SELECT end_s FROM transcript_segments WHERE video_id = ?1 AND start_s < ?3 AND end_s > ?2 ORDER BY start_s",
+            )
+            .and_then(|mut st| {
+                st.query_map(params![c.video_id, c.in_s, c.out_s], |r| r.get::<_, f64>(0))
+                    .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        // Last sentence end that fits with its tail; at least the first sentence.
+        let cut = ends.iter().copied().rfind(|e| e + SPEECH_TAIL_S <= max_out).or(ends.first().copied());
+        if let Some(e) = cut {
+            let out = (e + SPEECH_TAIL_S).min(c.out_s);
+            if out < c.out_s - 0.05 {
+                c.out_s = out;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Back-to-back clips of the same video in one beat (`0-6`, `6-16`, `16-23`) are jump cuts inside a
+/// single continuous take: join them. Returns how many cuts were removed.
+fn merge_contiguous_clips(script: &mut Script) -> usize {
+    let mut merged = 0;
+    for beat in &mut script.beats {
+        let mut out: Vec<ScriptClip> = Vec::with_capacity(beat.clips.len());
+        for c in beat.clips.drain(..) {
+            if let Some(prev) = out.last_mut()
+                && prev.video_id == c.video_id
+                && (c.in_s - prev.out_s).abs() <= 0.5
+                && c.out_s - prev.in_s <= MAX_CLIP_S
+            {
+                prev.out_s = prev.out_s.max(c.out_s);
+                if c.audio == crate::script::Audio::Source {
+                    prev.audio = crate::script::Audio::Source;
+                }
+                merged += 1;
+                continue;
+            }
+            out.push(c);
+        }
+        beat.clips = out;
+    }
+    merged
+}
+
+/// Default editing instructions. Users can replace them in Settings (`[chat] system_prompt`);
+/// `{project}`, `{fps}`, `{width}` and `{height}` are filled in. The tool list and the clip-range
+/// rule are always appended, since scripts can't be built without them.
+pub const DEFAULT_EDITOR_PROMPT: &str = "You are a senior documentary and promo video editor working on project \"{project}\" \
+({fps} fps, {width}x{height}). You cut real footage into a watchable, well-paced story and write the voice-over for it.
+
+HOW TO EDIT
+1. Understand the material first: list the videos, look at the keyframes of the promising ones, and read the transcripts of the videos where people talk.
+2. Build a story: a hook, 3-6 beats that each make one point, and a clear ending. Every beat has a purpose.
+3. Choose only strong shots: a clear subject (people, a landmark, a building, a sign, activity, a striking view). Skip footage whose keyframes describe black or blank frames, blur, transitions, the ground or sky only, empty hillsides with nothing to see, or the same view as the previous clip.
+4. Pacing - slower is better than frantic:
+   - hold every shot at least 4 s so viewers can see it and read any text; views and b-roll 5-10 s;
+   - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
+   - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
+5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
+6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
+7. Length: the clips add up to the length the user asked for; set target_duration_s to it. If the user gave no length, choose what the material supports (usually 60-180 s).
+8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
+9. Always reply in the user's language.
+";
+
+/// Construct the system prompt for the editor agent: the editing instructions (`custom` or the
+/// default), the fixed tool contract, and the current draft.
+pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>, custom: Option<&str>) -> String {
+    let template = custom.map(str::trim).filter(|c| !c.is_empty()).unwrap_or(DEFAULT_EDITOR_PROMPT);
+    let fps = if project.fps_den == 1 {
+        project.fps_num.to_string()
+    } else {
+        format!("{:.3}", project.fps_num as f64 / project.fps_den as f64)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    let mut prompt = template
+        .replace("{project}", &project.name)
+        .replace("{fps}", &fps)
+        .replace("{width}", &project.width.to_string())
+        .replace("{height}", &project.height.to_string());
+    prompt.push_str(
+        "\n\nTOOLS (use them generously before writing; your clips can only come from what they return)\n\
+         - list_videos(): every video with a short summary.\n\
+         - search_moments(query, kind, limit): find moments by meaning or keyword (speech, on-screen text, visuals).\n\
+         - get_video(video_id, start_s, end_s): keyframe descriptions - what is actually visible and when.\n\
+         - get_transcript(video_id, start_s, end_s): what people say, with timestamps.\n\n\
+         CLIP RANGES: in_s/out_s must lie inside ranges returned by the tools; never use a video_id or range you \
+         have not inspected. Search results are search windows, not clips: cut a sub-range out of them.\n",
     );
 
     if let Some(draft) = latest_script_json {
         prompt.push_str(&format!(
             "\nCurrent script draft from this session:\n{}\n\
-             When the user asks for changes, adjust this draft accordingly.\n",
+             When the user asks for changes, revise this draft accordingly.\n",
             draft
         ));
     }
 
     prompt
+}
+
+/// Spoken voice-over rate used to check that narration fills its beat.
+const NARRATION_WORDS_PER_S: f64 = 2.5;
+/// Narration covering less than this share of its beat triggers a redraft.
+const MIN_NARRATION_COVERAGE: f64 = 0.6;
+
+/// Editorial problems the model can fix in a redraft: narration too short for its beat, and clips
+/// over footage the tools know nothing about (no speech and no described keyframe nearby).
+pub fn content_issues(db: &Db, script: &Script) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    let mut seen_narration: Vec<String> = Vec::new();
+    for beat in &script.beats {
+        let Some(n) = beat.narration.as_deref().map(str::trim).filter(|n| !n.is_empty()) else { continue };
+        let key = n.to_lowercase();
+        if seen_narration.contains(&key) {
+            issues.push(Issue {
+                severity: IssueSeverity::Warning,
+                beat_id: Some(beat.id.clone()),
+                clip_index: None,
+                message:
+                    "narration repeats an earlier beat word for word; write new narration for what this beat shows"
+                        .into(),
+            });
+        } else {
+            seen_narration.push(key);
+        }
+    }
+    for beat in &script.beats {
+        let beat_s: f64 = beat.clips.iter().map(|c| c.out_s - c.in_s).sum();
+        let words = beat.narration.as_deref().map(|n| n.split_whitespace().count()).unwrap_or(0);
+        let has_speech = beat.clips.iter().any(|c| clip_has_speech(db, c.video_id, c.in_s, c.out_s));
+        if words > 0 || !has_speech {
+            let spoken_s = words as f64 / NARRATION_WORDS_PER_S;
+            if beat_s > 0.0 && spoken_s < beat_s * MIN_NARRATION_COVERAGE {
+                issues.push(Issue {
+                    severity: IssueSeverity::Warning,
+                    beat_id: Some(beat.id.clone()),
+                    clip_index: None,
+                    message: format!(
+                        "narration is {words} words (~{spoken_s:.0} s spoken) but the beat runs {beat_s:.0} s; \
+                         write about {:.0} words or shorten the beat",
+                        beat_s * NARRATION_WORDS_PER_S
+                    ),
+                });
+            }
+        }
+        for (i, c) in beat.clips.iter().enumerate() {
+            if !clip_has_speech(db, c.video_id, c.in_s, c.out_s)
+                && !clip_has_described_frame(db, c.video_id, c.in_s, c.out_s)
+            {
+                issues.push(Issue {
+                    severity: IssueSeverity::Warning,
+                    beat_id: Some(beat.id.clone()),
+                    clip_index: Some(i),
+                    message: format!(
+                        "video #{} {:.1}–{:.1} s has no speech and no described keyframe; pick a range you have seen described",
+                        c.video_id, c.in_s, c.out_s
+                    ),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn clip_has_speech(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bool {
+    db.conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3)",
+            params![video_id, in_s, out_s],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+/// A described keyframe inside the clip, or shortly before it (the view it continues from).
+fn clip_has_described_frame(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bool {
+    db.conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM frames WHERE video_id = ?1 AND description_json IS NOT NULL
+               AND t_s >= ?2 - 10.0 AND t_s <= ?3)",
+            params![video_id, in_s, out_s],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+/// Silence kept after the last words of a speaking clip, so the cut doesn't clip the person off.
+const SPEECH_TAIL_S: f64 = 1.5;
+/// Breath kept before the first words.
+const SPEECH_LEAD_S: f64 = 0.5;
+/// Never extend a clip further than this to finish a sentence.
+const MAX_SPEECH_EXTEND_S: f64 = 12.0;
+
+/// Let speaking clips breathe: finish the sentence the clip is in, then hold ~1.5 s of the person
+/// before cutting (without running into their next sentence), and start slightly before the first
+/// words. Runs after [`snap_to_segments`], which lands cuts exactly on segment boundaries.
+fn pad_speech(db: &Db, script: &mut Script) -> usize {
+    let mut changed = 0;
+    for c in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
+        let Ok(mut st) = db
+            .conn
+            .prepare_cached("SELECT start_s, end_s FROM transcript_segments WHERE video_id = ?1 ORDER BY start_s")
+        else {
+            continue;
+        };
+        let segs: Vec<(f64, f64)> = st
+            .query_map([c.video_id], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        let overlapping: Vec<usize> =
+            (0..segs.len()).filter(|&i| segs[i].1 > c.in_s + 0.05 && segs[i].0 < c.out_s - 0.05).collect();
+        let (Some(&first), Some(&last)) = (overlapping.first(), overlapping.last()) else { continue };
+        let duration = video_duration(db, c.video_id).unwrap_or(f64::MAX);
+        let (old_in, old_out) = (c.in_s, c.out_s);
+
+        let speech_end = segs[last].1;
+        let mut out = speech_end + SPEECH_TAIL_S;
+        if let Some(next) = segs.get(last + 1) {
+            out = out.min((next.0 - 0.3).max(speech_end));
+        }
+        let out = out.min(old_out + MAX_SPEECH_EXTEND_S).min(duration);
+        if out > c.out_s {
+            c.out_s = out;
+        }
+
+        let speech_start = segs[first].0;
+        let mut lead = (speech_start - SPEECH_LEAD_S).max(0.0);
+        if first > 0 {
+            lead = lead.max(segs[first - 1].1);
+        }
+        // Also pulls a clip that starts mid-sentence back to the start of that sentence.
+        if c.in_s > lead {
+            c.in_s = lead.max(old_in - MAX_SPEECH_EXTEND_S);
+        }
+        if (c.in_s, c.out_s) != (old_in, old_out) {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Mute clips nobody speaks in when their beat has narration: ambient wind and handling noise
+/// shouldn't play under the voice-over.
+fn mute_silent_clips(db: &Db, script: &mut Script) -> usize {
+    let mut muted = 0;
+    for beat in &mut script.beats {
+        if beat.narration.as_deref().is_none_or(|n| n.trim().is_empty()) {
+            continue;
+        }
+        for c in &mut beat.clips {
+            if c.audio == crate::script::Audio::Source && !clip_has_speech(db, c.video_id, c.in_s, c.out_s) {
+                c.audio = crate::script::Audio::Mute;
+                muted += 1;
+            }
+        }
+    }
+    muted
 }
 
 /// Create a new chat session in the database.
@@ -1015,9 +1410,11 @@ pub async fn run_turn(
         latest_script_json = stored_json;
     }
 
-    let sys_prompt = build_system_prompt(&project, latest_script_json.as_deref());
-    // Only a first draft is squeezed to its target; revisions follow the user's feedback.
-    let enforce_target = latest_script_json.is_none();
+    let sys_prompt = build_system_prompt(&project, latest_script_json.as_deref(), ctx.system_prompt.as_deref());
+    // A length the user states ("60 second promo", "2 minutos") wins over whatever the model sets.
+    let requested_s = requested_duration_s(message);
+    // Only a first draft (or an explicit length) is squeezed to its target; revisions follow feedback.
+    let enforce_target = latest_script_json.is_none() || requested_s.is_some();
 
     let mut tool_records = Vec::new();
     let mut raw_reply = String::new();
@@ -1044,7 +1441,7 @@ pub async fn run_turn(
             let mut tool_rounds = 0;
             let mut last_assistant_text = String::new();
 
-            while tool_rounds < 8 {
+            while tool_rounds < 16 {
                 tool_rounds += 1;
                 let mut body = json!({
                     "messages": req_messages,
@@ -1114,7 +1511,7 @@ pub async fn run_turn(
                         None
                     };
 
-                    let (result_str, summary) = dispatch_tool(
+                    let (result_str, summary) = dispatch_tool_limited(
                         &ctx.db,
                         &ctx.data_dir,
                         project_id,
@@ -1122,6 +1519,7 @@ pub async fn run_turn(
                         &tool_args,
                         &mut grounding,
                         vector.as_deref(),
+                        SERVER_TOOL_RESULT_CHARS,
                     );
 
                     on_event(ChatEvent::ToolFinished { tool: tool_name.clone(), summary: summary.clone() });
@@ -1177,6 +1575,9 @@ pub async fn run_turn(
             let content = v["choices"][0]["message"]["content"].as_str().unwrap_or_default();
 
             let mut script_res = Script::parse_for_project(content, &project);
+            if let (Ok(s), Some(t)) = (&mut script_res, requested_s) {
+                s.target_duration_s = Some(t);
+            }
 
             // Grounding + pacing check, redraft once on the server backend
             on_event(ChatEvent::Validating);
@@ -1185,6 +1586,7 @@ pub async fn run_turn(
                 Ok(s) => {
                     let mut i = check_grounding(&ctx.db, project_id, s, &grounding);
                     i.extend(pacing_issues(s, enforce_target));
+                    i.extend(content_issues(&ctx.db, s));
                     i
                 }
                 Err(_) => Vec::new(),
@@ -1222,6 +1624,9 @@ pub async fn run_turn(
             }
 
             if let Ok(mut s) = script_res {
+                if requested_s.is_some() {
+                    s.target_duration_s = requested_s;
+                }
                 pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, &mut s, &grounding, enforce_target);
                 parsed_script = Some(s);
             }
@@ -1298,6 +1703,9 @@ pub async fn run_turn(
 
             on_event(ChatEvent::Validating);
             if let Some(s) = &mut parsed_script {
+                if requested_s.is_some() {
+                    s.target_duration_s = requested_s;
+                }
                 pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
             }
         }
@@ -1309,6 +1717,18 @@ pub async fn run_turn(
     if let Some(mut s) = parsed_script {
         if s.clip_count() > 0 && !s.beats.is_empty() {
             let _ = snap_to_segments(&ctx.db, &mut s)?;
+            pad_speech(&ctx.db, &mut s);
+            clamp_to_duration(&ctx.db, &mut s);
+            let muted = mute_silent_clips(&ctx.db, &mut s);
+            if muted > 0 {
+                issues.push(Issue {
+                    severity: IssueSeverity::Info,
+                    beat_id: None,
+                    clip_index: None,
+                    message: format!("muted {muted} clip(s) without speech under the narration"),
+                });
+            }
+            issues.extend(content_issues(&ctx.db, &s));
             issues.extend(validate(&ctx.db, project_id, &s)?);
             let sid = save_version(&ctx.db, project_id, &s, Some(session_id))?;
             script_id = Some(sid);
@@ -1479,6 +1899,95 @@ mod tests {
         assert!(!applied.is_empty());
         assert!(s.beats[0].clips.iter().all(|c| c.out_s - c.in_s <= TRIMMED_CLIP_S + 1e-9));
         assert!(s.total_duration_s() <= 20.0 * TARGET_OVERSHOOT);
+    }
+
+    #[test]
+    fn requested_duration_from_message() {
+        assert_eq!(requested_duration_s("Create a 60 second promo video"), Some(60.0));
+        assert_eq!(requested_duration_s("make it 90s long"), Some(90.0));
+        assert_eq!(requested_duration_s("un video de 2 minutos"), Some(120.0));
+        assert_eq!(requested_duration_s("about 1.5 minutes, please"), Some(90.0));
+        assert_eq!(requested_duration_s("a 60-second teaser"), Some(60.0));
+        assert_eq!(requested_duration_s("show the 3 houses"), None);
+        assert_eq!(requested_duration_s("leave people talking longer"), None);
+    }
+
+    #[test]
+    fn content_checks_narration_and_undescribed_footage() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        db.conn
+            .execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 400.0)", [])
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen) VALUES (1, ?1, 'a.mp4', 1, 0, 0)",
+                [folder.id],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (1, 100.0, 110.0, 'hi')",
+                [],
+            )
+            .unwrap();
+        db.conn.execute("INSERT INTO frames(video_id, t_s, description_json) VALUES (1, 20.0, '{}')", []).unwrap();
+        let clip = |in_s: f64, out_s: f64| ScriptClip { video_id: 1, in_s, out_s, audio: Audio::Source, why: None };
+        let beat = |id: &str, narration: Option<&str>, clips| Beat {
+            id: id.into(),
+            purpose: "p".into(),
+            narration: narration.map(Into::into),
+            on_screen_text: None,
+            clips,
+            notes: None,
+        };
+        let mut s = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: None,
+            width: None,
+            height: None,
+            beats: vec![
+                // 20 s of scenery with 5 words of narration: too short.
+                beat("views", Some("A view of the hills"), vec![clip(22.0, 42.0)]),
+                // someone talking, no narration needed
+                beat("talk", None, vec![clip(100.0, 110.0)]),
+                // nothing known about 300-306 s
+                beat(
+                    "dead",
+                    Some("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen"),
+                    vec![clip(300.0, 306.0)],
+                ),
+            ],
+        };
+        let issues = content_issues(&db, &s);
+        let msgs: Vec<_> = issues.iter().map(|i| (i.beat_id.clone().unwrap(), i.clip_index)).collect();
+        assert_eq!(msgs, vec![("views".to_string(), None), ("dead".to_string(), Some(0))], "{issues:?}");
+
+        // clip cut right at the end of the words: gains the 1.5 s tail and a short lead-in
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (1, 111.0, 115.0, 'next')",
+                [],
+            )
+            .unwrap();
+        let mut talk = s.clone();
+        talk.beats[1].clips[0] = clip(100.0, 110.0);
+        pad_speech(&db, &mut talk);
+        let c = &talk.beats[1].clips[0];
+        assert!((c.in_s - 99.5).abs() < 1e-9, "{c:?}");
+        assert!((c.out_s - 110.7).abs() < 1e-9, "stops before the next sentence: {c:?}");
+        db.conn.execute("DELETE FROM transcript_segments WHERE text = 'next'", []).unwrap();
+        let mut talk = s.clone();
+        talk.beats[1].clips[0] = clip(100.0, 105.0);
+        pad_speech(&db, &mut talk);
+        assert!((talk.beats[1].clips[0].out_s - 111.5).abs() < 1e-9, "finishes the sentence, then holds");
+
+        assert_eq!(mute_silent_clips(&db, &mut s), 2);
+        assert_eq!(s.beats[1].clips[0].audio, Audio::Source, "speech without narration keeps its audio");
     }
 
     #[tokio::test]
@@ -1704,6 +2213,7 @@ mod tests {
             data_dir: tmp.path().to_path_buf(),
             backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
             embedder: None,
+            system_prompt: None,
         };
 
         let res =
@@ -1816,6 +2326,7 @@ mod tests {
             data_dir: tmp.path().to_path_buf(),
             backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
             embedder: None,
+            system_prompt: None,
         };
 
         let res = run_turn(&mut ctx, p.id, None, "Make video", &mut |_| {}).await.unwrap();

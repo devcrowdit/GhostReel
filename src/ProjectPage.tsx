@@ -12,6 +12,8 @@ import {
   humanSize,
   projectView,
   removeFolder,
+  redoProjectStage,
+  getAiSettings,
   removeProject,
   renameProject,
   search,
@@ -117,6 +119,20 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     if (typeof dir === "string") run(() => addFolder(projectId, dir));
   };
 
+  const onRebuildFrames = async () => {
+    let interval = "the current";
+    try {
+      interval = `${(await getAiSettings()).frames.max_interval_s} s`;
+    } catch {
+      /* keep generic wording */
+    }
+    const ok = await ask(
+      `Re-extract and re-describe all keyframes of this project with ${interval} interval? Transcripts are kept. This re-runs frame descriptions and search embeddings, which can take a while.`,
+      { title: "Rebuild keyframes", kind: "warning" },
+    );
+    if (ok) run(() => redoProjectStage(projectId, "frames"));
+  };
+
   const onDelete = async () => {
     if (!view) return;
     const ok = await ask(`Delete project "${view.project.name}"? Your video files are not touched.`, {
@@ -199,9 +215,19 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
             {humanDuration(st.total_duration_s)} · {humanSize(st.total_size)}
           </p>
         </div>
-        <button onClick={() => run(() => enqueueIndex(projectId))} disabled={!!queued || view.folders.length === 0}>
-          {running ? "Index again" : queued ? "Queued…" : "Index now"}
-        </button>
+        <div className="header-actions">
+          <button
+            className="ghost"
+            onClick={onRebuildFrames}
+            disabled={!!running || !!queued || view.videos.length === 0}
+            title="Re-extract keyframes with the interval set on the Models page"
+          >
+            Rebuild keyframes
+          </button>
+          <button onClick={() => run(() => enqueueIndex(projectId))} disabled={!!queued || view.folders.length === 0}>
+            {running ? "Index again" : queued ? "Queued…" : "Index now"}
+          </button>
+        </div>
       </header>
 
       <div className="tab-nav">

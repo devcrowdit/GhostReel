@@ -43,6 +43,20 @@ impl Default for FrameOptions {
     }
 }
 
+impl FrameOptions {
+    /// Build options from the user's [`FramesConfig`], clamping `max_interval_s` to the valid
+    /// range (1–60 s) and deriving related fields:
+    ///
+    /// - `max_dup_gap_s = (2 * max_interval_s).max(4.0)` — keeps the de-dupe window proportional
+    ///   so static sections still collapse to one frame even with short intervals.
+    /// - `max_frames` raised to `max(600, duration/interval)` via the caller; here we use a safe
+    ///   global cap of 5000 so very long videos aren't silently truncated.
+    pub fn from_config(cfg: &crate::config::FramesConfig) -> Self {
+        let interval = cfg.clamped_interval();
+        Self { max_interval_s: interval, max_dup_gap_s: (2.0 * interval).max(4.0), max_frames: 5000, ..Self::default() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Frame {
     pub t_s: f64,
@@ -359,5 +373,49 @@ mod tests {
         let b = dhash(&mk("b.jpg", &|x, _| (255 - x * 4) as u8)).unwrap();
         assert!(hamming(a, a2) <= 5);
         assert!(hamming(a, b) > 20);
+    }
+
+    #[test]
+    fn from_config_derives_dup_gap_and_raises_max_frames() {
+        use crate::config::FramesConfig;
+
+        let mut fc = FramesConfig { max_interval_s: 8.0 };
+        // Default 8 s → dup_gap = 16 s
+        let opts = FrameOptions::from_config(&fc);
+        assert_eq!(opts.max_interval_s, 8.0);
+        assert_eq!(opts.max_dup_gap_s, 16.0);
+        assert!(opts.max_frames >= 5000);
+
+        // 1 s → dup_gap = max(2, 4) = 4 s (minimum floor)
+        fc.max_interval_s = 1.0;
+        let opts = FrameOptions::from_config(&fc);
+        assert_eq!(opts.max_interval_s, 1.0);
+        assert_eq!(opts.max_dup_gap_s, 4.0);
+
+        // 30 s → dup_gap = 60 s
+        fc.max_interval_s = 30.0;
+        let opts = FrameOptions::from_config(&fc);
+        assert_eq!(opts.max_dup_gap_s, 60.0);
+
+        // Values out of range are clamped
+        fc.max_interval_s = 0.1;
+        let opts = FrameOptions::from_config(&fc);
+        assert_eq!(opts.max_interval_s, 1.0, "out-of-range clamped to minimum");
+
+        fc.max_interval_s = 120.0;
+        let opts = FrameOptions::from_config(&fc);
+        assert_eq!(opts.max_interval_s, 60.0, "out-of-range clamped to maximum");
+    }
+
+    #[test]
+    fn short_interval_enforced_in_plan() {
+        use crate::config::FramesConfig;
+
+        let fc = FramesConfig { max_interval_s: 5.0 };
+        let opts = FrameOptions::from_config(&fc);
+        // 60 s video, no scene cuts: frames should be at most 5 s apart
+        let t = plan_times(60.0, &[], &opts);
+        assert!(t.windows(2).all(|w| w[1] - w[0] <= 5.0 + 1e-9), "gap exceeds interval: {t:?}");
+        assert!(t.len() >= 11, "expected ≥ 11 frames for 60 s / 5 s interval, got {}", t.len());
     }
 }

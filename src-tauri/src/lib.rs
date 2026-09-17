@@ -207,6 +207,51 @@ async fn enqueue_index(app: AppHandle, queue: State<'_, queue::Queue>, project_i
     Ok(queue.enqueue(&app, queue::TaskKind::Index { project_id }, format!("Index “{name}”")).await)
 }
 
+/// Reset a stage (and later stages) back to pending for a project's videos, then enqueue an index run.
+/// `stage` must be one of: frames, transcribe, describe, embed.
+#[tauri::command]
+async fn redo_project_stage(
+    app: AppHandle,
+    queue: State<'_, queue::Queue>,
+    project_id: i64,
+    stage: String,
+) -> CmdResult<u64> {
+    let p = paths()?;
+    let db = open_db()?;
+    index::reset_stages(&db, &p.data_dir, Some(project_id), &stage).map_err(err)?;
+    let name = db.project(project_id).map_err(err)?.name;
+    let label = format!("Rebuild keyframes — “{name}”");
+    Ok(queue.enqueue(&app, queue::TaskKind::Index { project_id }, label).await)
+}
+
+#[derive(Serialize)]
+struct ChatSettingsView {
+    /// What the user saved; empty = default in use.
+    system_prompt: String,
+    default_system_prompt: &'static str,
+}
+
+#[tauri::command]
+fn get_chat_settings() -> CmdResult<ChatSettingsView> {
+    let config = Config::load(&paths()?.config_file).map_err(err)?;
+    Ok(ChatSettingsView {
+        system_prompt: config.chat.system_prompt,
+        default_system_prompt: ghostreel_core::chat::DEFAULT_EDITOR_PROMPT,
+    })
+}
+
+/// Save the chat system prompt; an empty prompt (or the default text) restores the default.
+#[tauri::command]
+fn set_chat_system_prompt(prompt: String) -> CmdResult<ChatSettingsView> {
+    let p = paths()?;
+    let mut config = Config::load(&p.config_file).map_err(err)?;
+    let trimmed = prompt.trim();
+    config.chat.system_prompt =
+        if trimmed == ghostreel_core::chat::DEFAULT_EDITOR_PROMPT.trim() { String::new() } else { trimmed.to_string() };
+    config.save(&p.config_file).map_err(err)?;
+    get_chat_settings()
+}
+
 #[tauri::command]
 async fn enqueue_preview(
     app: AppHandle,
@@ -214,11 +259,15 @@ async fn enqueue_preview(
     script_id: i64,
     burn_titles: bool,
     burn_narration: bool,
+    out: Option<String>,
 ) -> CmdResult<u64> {
     let db = open_db()?;
     let stored = ghostreel_core::script::load(&db, script_id).map_err(err)?;
-    let label = format!("Preview “{}” v{}", stored.title, stored.version);
-    Ok(queue.enqueue(&app, queue::TaskKind::RenderPreview { script_id, burn_titles, burn_narration }, label).await)
+    let label = match &out {
+        Some(_) => format!("Export MP4 “{}” v{}", stored.title, stored.version),
+        None => format!("Preview “{}” v{}", stored.title, stored.version),
+    };
+    Ok(queue.enqueue(&app, queue::TaskKind::RenderPreview { script_id, burn_titles, burn_narration, out }, label).await)
 }
 
 #[tauri::command]
@@ -304,6 +353,7 @@ struct AiSettingsView {
     vision: VisionSettingsView,
     stt: SttSettingsView,
     embed: EmbedSettingsView,
+    frames: FrameSettingsView,
 }
 
 #[derive(Deserialize, Default)]
@@ -334,6 +384,17 @@ struct AiSettingsPatch {
     vision: Option<VisionSettingsPatch>,
     stt: Option<SttSettingsPatch>,
     embed: Option<EmbedSettingsPatch>,
+    frames: Option<FrameSettingsPatch>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrameSettingsView {
+    max_interval_s: f64,
+}
+
+#[derive(Deserialize, Default)]
+struct FrameSettingsPatch {
+    max_interval_s: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -361,6 +422,7 @@ fn get_ai_settings() -> CmdResult<AiSettingsView> {
             url: config.embed.url,
             model: config.embed.model,
         },
+        frames: FrameSettingsView { max_interval_s: config.frames.max_interval_s },
     })
 }
 
@@ -449,6 +511,15 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
         *search_state.0.lock().await = None;
     }
 
+    if let Some(f) = patch.frames
+        && let Some(v) = f.max_interval_s
+    {
+        if v < 1.0 || v > 60.0 {
+            return Err(format!("frames.max_interval_s must be between 1 and 60, got {v}"));
+        }
+        config.frames.max_interval_s = v;
+    }
+
     config.save(&p.config_file).map_err(err)?;
 
     Ok(AiSettingsView {
@@ -465,6 +536,7 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
             url: config.embed.url,
             model: config.embed.model,
         },
+        frames: FrameSettingsView { max_interval_s: config.frames.max_interval_s },
     })
 }
 
@@ -694,6 +766,9 @@ pub fn run() {
             queue_list,
             cancel_task,
             clear_finished_tasks,
+            redo_project_stage,
+            get_chat_settings,
+            set_chat_system_prompt,
             video_transcript,
             video_frames,
             search,

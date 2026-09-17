@@ -493,6 +493,26 @@ export default function ModelsPage() {
             />
           </div>
 
+          <div className="settings-field">
+            <label>Take a frame at least every</label>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              step={1}
+              style={{ width: "5em" }}
+              defaultValue={ai.frames.max_interval_s}
+              onChange={(e) => {
+                const v = Number(e.currentTarget.value);
+                if (v >= 1 && v <= 60) debouncedUrlPatch("frames.max_interval_s", { frames: { max_interval_s: v } });
+              }}
+            />
+            <span className="muted small">
+              s · shorter = more detail for search and scripts, longer indexing. Scene changes always get a frame.
+              Use “Rebuild keyframes” on a project to apply it to indexed videos.
+            </span>
+          </div>
+
           {(visionBackend === "server" || visionBackend === "auto") && (
             <div className="settings-fields">
               <div className="settings-field">

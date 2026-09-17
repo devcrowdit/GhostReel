@@ -4,9 +4,10 @@ import ActivityPage from "./ActivityPage";
 import ModelsPage from "./ModelsPage";
 import ProjectPage from "./ProjectPage";
 import StatusPage from "./StatusPage";
+import SettingsPage from "./SettingsPage";
 import { isActive, useQueue } from "./useQueue";
 
-type Page = { kind: "status" } | { kind: "models" } | { kind: "activity" } | { kind: "project"; id: number };
+type Page = { kind: "status" } | { kind: "models" } | { kind: "settings" } | { kind: "activity" } | { kind: "project"; id: number };
 
 function NewProject({ onCreated, onCancel }: { onCreated: (id: number) => void; onCancel: () => void }) {
   const [name, setName] = useState("");
@@ -129,6 +130,12 @@ export default function App() {
           Models
         </button>
         <button
+          className={`nav-item ${page.kind === "settings" ? "active" : ""}`}
+          onClick={() => setPage({ kind: "settings" })}
+        >
+          Settings
+        </button>
+        <button
           className={`nav-item ${page.kind === "status" ? "active" : ""}`}
           onClick={() => setPage({ kind: "status" })}
         >
@@ -140,6 +147,8 @@ export default function App() {
           <StatusPage />
         ) : page.kind === "models" ? (
           <ModelsPage />
+        ) : page.kind === "settings" ? (
+          <SettingsPage />
         ) : page.kind === "activity" ? (
           <ActivityPage />
         ) : (

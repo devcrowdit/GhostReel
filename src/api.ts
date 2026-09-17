@@ -247,8 +247,9 @@ export interface PlannedSegment {
 }
 
 export const enqueueIndex = (projectId: number) => invoke<number>("enqueue_index", { projectId });
-export const enqueuePreview = (scriptId: number, burnTitles: boolean, burnNarration: boolean) =>
-  invoke<number>("enqueue_preview", { scriptId, burnTitles, burnNarration });
+/** `out`: save the rendered MP4 there (demo export) instead of the previews folder. */
+export const enqueuePreview = (scriptId: number, burnTitles: boolean, burnNarration: boolean, out?: string) =>
+  invoke<number>("enqueue_preview", { scriptId, burnTitles, burnNarration, out: out ?? null });
 export const enqueueExport = (scriptId: number, format: string, path: string) =>
   invoke<number>("enqueue_export", { scriptId, format, path });
 export const previewPlan = (scriptId: number) => invoke<PlannedSegment[]>("preview_plan", { scriptId });
@@ -509,10 +510,15 @@ export interface EmbedSettings {
   model: string;
 }
 
+export interface FrameSettings {
+  max_interval_s: number;
+}
+
 export interface AiSettings {
   vision: VisionSettings;
   stt: SttSettings;
   embed: EmbedSettings;
+  frames: FrameSettings;
 }
 
 export interface BackendsResolution {
@@ -541,10 +547,15 @@ export interface EmbedSettingsPatch {
   model?: string;
 }
 
+export interface FrameSettingsPatch {
+  max_interval_s?: number;
+}
+
 export interface AiSettingsPatch {
   vision?: VisionSettingsPatch;
   stt?: SttSettingsPatch;
   embed?: EmbedSettingsPatch;
+  frames?: FrameSettingsPatch;
 }
 
 export const getAiSettings = () => invoke<AiSettings>("get_ai_settings");
@@ -561,6 +572,16 @@ export const setWhisperModel = (modelId: string) =>
   invoke<void>("set_whisper_model", { modelId });
 export const openModelsDir = () => invoke<void>("open_models_dir");
 
+export const redoProjectStage = (projectId: number, stage: string) =>
+  invoke<number>("redo_project_stage", { projectId, stage });
+
 /** Compact bar meter like "▰▰▰▱▱" for a 1–5 score. */
 export const scoreMeter = (n: number) =>
   "▰".repeat(Math.min(5, Math.max(0, n))) + "▱".repeat(Math.max(0, 5 - n));
+
+export interface ChatSettings {
+  system_prompt: string;
+  default_system_prompt: string;
+}
+export const getChatSettings = () => invoke<ChatSettings>("get_chat_settings");
+export const setChatSystemPrompt = (prompt: string) => invoke<ChatSettings>("set_chat_system_prompt", { prompt });

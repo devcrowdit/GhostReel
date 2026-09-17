@@ -64,6 +64,11 @@ enum Command {
         retry_failed: bool,
         #[arg(long)]
         json: bool,
+        /// Reset a stage (and all later stages) back to pending before indexing.
+        /// Accepted values: frames, transcribe, describe, embed.
+        /// When --redo frames is used, old keyframe files are deleted and re-extracted.
+        #[arg(long, value_name = "STAGE")]
+        redo: Option<String>,
     },
     /// Print a video's transcript.
     Transcript {
@@ -264,7 +269,7 @@ enum ConfigAction {
     Init,
     /// Set a configuration value.
     Set {
-        /// Key to set (e.g. vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url).
+        /// Key to set (e.g. vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s).
         key: String,
         /// Value to assign.
         value: String,
@@ -296,8 +301,8 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Project { action } => project_cmd(&paths, action),
         Command::Folder { action } => folder_cmd(&paths, action),
-        Command::Index { project, watch, retry_failed, json } => {
-            index_cmd(&paths, project.as_deref(), watch, retry_failed, json).await
+        Command::Index { project, watch, retry_failed, json, redo } => {
+            index_cmd(&paths, project.as_deref(), watch, retry_failed, json, redo.as_deref()).await
         }
         Command::Status { project, videos, json } => status_cmd(&paths, project.as_deref(), videos, json),
         Command::Transcript { video_id, srt, json } => transcript_cmd(&paths, video_id, srt, json),
@@ -364,8 +369,17 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         "stt.url" => cfg.stt.url = value.clone(),
                         "embed.backend" | "embeddings.backend" => cfg.embed.backend = parse_backend(&value)?,
                         "embed.url" | "embeddings.url" => cfg.embed.url = value.clone(),
+                        "frames.max_interval_s" => {
+                            let v: f64 = value
+                                .parse()
+                                .with_context(|| format!("frames.max_interval_s must be a number, got '{value}'"))?;
+                            if v < 1.0 || v > 60.0 {
+                                bail!("frames.max_interval_s must be between 1 and 60, got {v}");
+                            }
+                            cfg.frames.max_interval_s = v;
+                        }
                         other => bail!(
-                            "unknown or unsupported config key '{other}'; supported keys: vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url"
+                            "unknown or unsupported config key '{other}'; supported keys: vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s"
                         ),
                     }
                     cfg.save(&paths.config_file)?;
@@ -785,7 +799,13 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 Err(why) => eprintln!("(meaning search unavailable: {why}; using keywords only)"),
             }
 
-            let mut ctx = ghostreel_core::chat::ChatContext { db, data_dir: paths.data_dir.clone(), backend, embedder };
+            let mut ctx = ghostreel_core::chat::ChatContext {
+                db,
+                data_dir: paths.data_dir.clone(),
+                backend,
+                embedder,
+                system_prompt: Some(config.chat.system_prompt.clone()),
+            };
 
             let t0 = std::time::Instant::now();
             let mut on_event = |event: ghostreel_core::chat::ChatEvent| match event {
@@ -880,13 +900,25 @@ async fn index_cmd(
     watch: bool,
     retry_failed: bool,
     json: bool,
+    redo: Option<&str>,
 ) -> anyhow::Result<ExitCode> {
     let mut db = open_db(paths)?;
     let pid = project_id(&db, project)?;
     let config = Config::load(&paths.config_file)?;
     let opts = index::Options { project_id: pid, retry_failed, settle_secs: if watch { 10 } else { 0 }, cancel: None };
 
-    // On a terminal: one live progress line (per-video successes are implied by it).
+    // --redo: reset the specified stage (and later stages) back to pending.
+    if let Some(stage) = redo {
+        let valid = index::STAGES;
+        if !valid.contains(&stage) {
+            anyhow::bail!("unknown stage '{stage}'; valid values: {}", valid.join(", "));
+        }
+        index::reset_stages(&db, &paths.data_dir, pid, stage).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if !json {
+            println!("reset stage '{stage}' (and later stages) to pending");
+        }
+    }
+
     let tty = !json && std::io::stderr().is_terminal();
     let mut bar_visible = false;
     let mut print = |e: Event| {

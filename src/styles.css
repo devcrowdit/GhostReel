@@ -1534,3 +1534,8 @@ form.rename input { font-size: 1.6rem; font-weight: 700; padding: 2px 8px; min-w
 
 .vision-table .col-radio { width: 44px; text-align: center; }
 
+
+.header-actions { display: flex; gap: 8px; align-items: center; }
+
+.prompt-editor { width: 100%; min-height: 460px; font-family: ui-monospace, monospace; font-size: 0.85rem; line-height: 1.45; resize: vertical; box-sizing: border-box; }
+.prompt-actions { justify-content: space-between; margin-top: 8px; }
