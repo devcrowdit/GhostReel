@@ -30,7 +30,7 @@ permissions:
 jobs:
   create-release:
     name: Create release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
@@ -58,14 +58,17 @@ jobs:
               draft: true, prerelease: false,
             });
             return data.id;
+  # Runner choice keeps the build free: Blacksmith's free tier (3,000 2-vCPU-Linux-equivalent
+  # minutes/month) pays for the small Linux job, while Windows — the long one, and billed at a
+  # higher rate — runs on GitHub's runners, which are free for public repos.
   linux-x64:
     name: linux-x64
     needs: create-release
-    runs-on: blacksmith-16vcpu-ubuntu-2204
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "16"
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
       GHOSTREEL_GPU: cuda
     steps:
       - name: Free disk space
@@ -144,7 +147,7 @@ jobs:
         if: steps.helpers.outputs.cache-hit != 'true'
         run: scripts/build-helpers.sh asr llm
         env:
-          JOBS: "16"
+          JOBS: "4"
 
       - name: Save CUDA helpers
         if: steps.helpers.outputs.cache-hit != 'true'
@@ -221,11 +224,11 @@ jobs:
   windows-x64:
     name: windows-x64
     needs: create-release
-    runs-on: blacksmith-16vcpu-windows-2025
+    runs-on: windows-2022
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "16"
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
       GHOSTREEL_GPU: cuda
     steps:
       - name: Checkout repository
@@ -287,12 +290,12 @@ jobs:
       - name: Build helper ghostreel-asr
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 16 --release -p ghostreel-asr --features cuda
+        run: cargo build -j 4 --release -p ghostreel-asr --features cuda
 
       - name: Build helper ghostreel-llm
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 16 --release -p ghostreel-llm --features cuda
+        run: cargo build -j 4 --release -p ghostreel-llm --features cuda
 
       - name: Save CUDA helpers
         if: steps.helpers.outputs.cache-hit != 'true'
@@ -369,7 +372,7 @@ jobs:
     needs: [create-release, linux-x64, windows-x64]
     # Publish whatever built: a failed platform shouldn't hold back the other's installer.
     if: always() && needs.create-release.result == 'success' && (needs.linux-x64.result == 'success' || needs.windows-x64.result == 'success')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - name: Flip draft to published
         uses: actions/github-script@v8
