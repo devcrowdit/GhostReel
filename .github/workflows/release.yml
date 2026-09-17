@@ -1,19 +1,66 @@
-# CUDA libs are NVIDIA redistributables (EULA); Windows job not yet exercised; code signing TODO.
-
 name: Release
+
+# Build the GhostReel bundles (CUDA helpers included) and publish them to ONE GitHub Release,
+# the same shape as GhostPen's release.yml:
+#   1. create-release  -> one draft release for the tag (reused on re-runs)
+#   2. linux-x64 / windows-x64 -> build and upload their bundles into that draft by id
+#      (the API can't find draft releases by tag, so each job would otherwise make its own)
+#   3. publish-release -> flip the draft to published once every platform uploaded
+#
+# Trigger: push a tag like `v0.1.1`, or run manually with a tag input.
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish under (e.g. v0.1.1). Created if it doesn't exist."
+        required: true
+        default: "v0.0.0-dev"
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo,
+            });
+            const existing = releases.find((r) => r.tag_name === tag);
+            if (existing) { core.info(`Reusing release ${existing.id} for ${tag}`); return existing.id; }
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              tag_name: tag, target_commitish: context.sha, name: `GhostReel ${tag}`,
+              body: [
+                "**Windows:** `GhostReel_*_x64-setup.exe` · **Linux:** `.AppImage`, `.deb` or `.rpm` · **CLI only:** `ghostreel-cli-*`.",
+                "",
+                "GPU acceleration needs an NVIDIA driver 570+ (CUDA 12.8 runtime is bundled). On first start open **Models** and download the models.",
+              ].join("\n"),
+              draft: true, prerelease: false,
+            });
+            return data.id;
   linux-x64:
     name: linux-x64
+    needs: create-release
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     env:
@@ -52,7 +99,9 @@ jobs:
         with:
           cuda: "12.8.1"
           method: network
-          sub-packages: '["nvcc","cudart","cudart-dev","cublas","cublas-dev"]'
+          sub-packages: '["nvcc","cudart","cudart-dev"]'
+          # cuBLAS is packaged as libcublas-12-8 on apt, not cuda-cublas-12-8.
+          non-cuda-sub-packages: '["libcublas","libcublas-dev"]'
           use-github-cache: false
 
       - name: Install Rust toolchain
@@ -111,19 +160,39 @@ jobs:
             target/release/bundle/rpm/*.rpm
             target/dist/*.tar.gz
 
-      - name: Publish draft release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Upload bundles to the release
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          FILES: 'target/release/bundle,target/dist|\.(AppImage|deb|rpm|tar\.gz)$'
         with:
-          draft: true
-          files: |
-            target/release/bundle/appimage/*.AppImage
-            target/release/bundle/deb/*.deb
-            target/release/bundle/rpm/*.rpm
-            target/dist/*.tar.gz
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const walk = (d) => !fs.existsSync(d) ? [] : fs.readdirSync(d, { withFileTypes: true })
+              .flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+            const [dirs, pattern] = process.env.FILES.split('|');
+            const re = new RegExp(pattern, 'i');
+            const files = dirs.split(',').flatMap(walk).filter((f) => re.test(f));
+            if (!files.length) { core.setFailed('no bundles found'); return; }
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId, per_page: 100,
+            });
+            for (const f of files) {
+              const name = path.basename(f);
+              const old = assets.find((a) => a.name === name);
+              if (old) await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: old.id });
+              core.info(`uploading ${name} (${(fs.statSync(f).size / 1e6).toFixed(1)} MB)`);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
+                name, data: fs.readFileSync(f),
+              });
+            }
 
   windows-x64:
     name: windows-x64
+    needs: create-release
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -142,6 +211,13 @@ jobs:
           method: network
           sub-packages: '["nvcc","cudart","cublas","cublas_dev","visual_studio_integration"]'
           use-github-cache: false
+
+      # whisper-rs / llama-cpp-2 bindgen needs libclang.
+      - name: libclang for bindgen
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) { choco install llvm --no-progress -y }
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -212,11 +288,50 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/dist/ghostreel-cli-windows-x64.zip
 
-      - name: Publish draft release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Upload bundles to the release
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          FILES: 'target/release/bundle/nsis,target/dist|(setup\.exe|\.zip)$'
         with:
-          draft: true
-          files: |
-            target/release/bundle/nsis/*.exe
-            target/dist/ghostreel-cli-windows-x64.zip
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const walk = (d) => !fs.existsSync(d) ? [] : fs.readdirSync(d, { withFileTypes: true })
+              .flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+            const [dirs, pattern] = process.env.FILES.split('|');
+            const re = new RegExp(pattern, 'i');
+            const files = dirs.split(',').flatMap(walk).filter((f) => re.test(f));
+            if (!files.length) { core.setFailed('no bundles found'); return; }
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId, per_page: 100,
+            });
+            for (const f of files) {
+              const name = path.basename(f);
+              const old = assets.find((a) => a.name === name);
+              if (old) await github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: old.id });
+              core.info(`uploading ${name} (${(fs.statSync(f).size / 1e6).toFixed(1)} MB)`);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
+                name, data: fs.readFileSync(f),
+              });
+            }
+
+  publish-release:
+    name: Publish release
+    needs: [create-release, linux-x64, windows-x64]
+    # Publish whatever built: a failed platform shouldn't hold back the other's installer.
+    if: always() && needs.create-release.result == 'success' && (needs.linux-x64.result == 'success' || needs.windows-x64.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flip draft to published
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID), draft: false,
+            });
