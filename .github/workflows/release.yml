@@ -100,7 +100,8 @@ jobs:
         with:
           cuda: "12.8.1"
           method: network
-          sub-packages: '["nvcc","cudart","cudart-dev"]'
+          # driver-dev ships the libcuda.so link stub the AppImage step needs (no driver on the runner).
+          sub-packages: '["nvcc","cudart","cudart-dev","driver-dev"]'
           # cuBLAS is packaged as libcublas-12-8 on apt, not cuda-cublas-12-8.
           non-cuda-sub-packages: '["libcublas","libcublas-dev"]'
           use-github-cache: false
@@ -170,8 +171,17 @@ jobs:
           readelf -d src-tauri/binaries/ghostreel-asr-x86_64-unknown-linux-gnu | grep RUNPATH
           readelf -d src-tauri/binaries/ghostreel-llm-x86_64-unknown-linux-gnu | grep RUNPATH
 
+      # linuxdeploy must resolve every library the helpers link, including libcuda.so.1, which
+      # only an NVIDIA driver provides. Point it at the toolkit's stub; fix-appimage.sh then
+      # removes libcuda from the AppImage so the user's own driver is used at runtime.
       - name: Build Tauri bundles
-        run: npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb,rpm --verbose
+        run: |
+          stub=$(find "$CUDA_PATH" -path '*stubs/libcuda.so' | head -n1)
+          test -n "$stub" || { echo "::error::CUDA libcuda.so stub not found under $CUDA_PATH"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/cuda-stub"
+          ln -sf "$stub" "$RUNNER_TEMP/cuda-stub/libcuda.so.1"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb,rpm --verbose
         env:
           NO_STRIP: "true"
           APPIMAGE_EXTRACT_AND_RUN: "1"
