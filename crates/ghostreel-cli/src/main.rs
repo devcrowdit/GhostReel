@@ -139,6 +139,11 @@ enum ModelsAction {
     },
     /// Print the effective models directory.
     Dir,
+    /// Select a model to use for speech (whisper) or vision.
+    Use {
+        /// Model id (e.g. large-v3-turbo, gemma-3-4b-it, bonsai-27b).
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,6 +227,8 @@ enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+    /// Rename a project.
+    Rename { name: String, new_name: String },
     /// Delete a project (indexed video data is kept for reuse).
     Remove { name: String },
 }
@@ -255,6 +262,13 @@ enum ConfigAction {
     Show,
     /// Write the default configuration if no config file exists yet.
     Init,
+    /// Set a configuration value.
+    Set {
+        /// Key to set (e.g. vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url).
+        key: String,
+        /// Value to assign.
+        value: String,
+    },
 }
 
 #[tokio::main]
@@ -332,6 +346,31 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         println!("created: {}", paths.config_file.display());
                     }
                 }
+                ConfigAction::Set { key, value } => {
+                    let mut cfg = Config::load(&paths.config_file).unwrap_or_default();
+                    let parse_backend = |val: &str| -> anyhow::Result<ghostreel_core::config::Backend> {
+                        match val.to_lowercase().as_str() {
+                            "auto" => Ok(ghostreel_core::config::Backend::Auto),
+                            "local" => Ok(ghostreel_core::config::Backend::Local),
+                            "server" => Ok(ghostreel_core::config::Backend::Server),
+                            other => bail!("invalid backend '{other}'; expected 'auto', 'local', or 'server'"),
+                        }
+                    };
+                    match key.as_str() {
+                        "vision.backend" => cfg.vision.backend = parse_backend(&value)?,
+                        "vision.url" => cfg.vision.url = value.clone(),
+                        "vision.model" => cfg.vision.model = value.clone(),
+                        "stt.backend" => cfg.stt.backend = parse_backend(&value)?,
+                        "stt.url" => cfg.stt.url = value.clone(),
+                        "embed.backend" | "embeddings.backend" => cfg.embed.backend = parse_backend(&value)?,
+                        "embed.url" | "embeddings.url" => cfg.embed.url = value.clone(),
+                        other => bail!(
+                            "unknown or unsupported config key '{other}'; supported keys: vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url"
+                        ),
+                    }
+                    cfg.save(&paths.config_file)?;
+                    println!("{key} = \"{value}\"");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -385,40 +424,90 @@ async fn models_cmd(paths: &Paths, action: ModelsAction) -> anyhow::Result<ExitC
             Ok(ExitCode::SUCCESS)
         }
         ModelsAction::Download { id } => {
-            let spec = match ghostreel_core::models::find_entry(&id) {
-                Some(entry) => entry.spec(),
-                None => ghostreel_core::models::whisper(&id).map_err(|e| anyhow::anyhow!("{e}"))?,
+            let specs = match ghostreel_core::models::find_entry(&id) {
+                Some(entry) => {
+                    let mut s = vec![entry.spec()];
+                    if let Some(m) = entry.mmproj_spec() {
+                        s.push(m);
+                    }
+                    s
+                }
+                None => vec![ghostreel_core::models::whisper(&id).map_err(|e| anyhow::anyhow!("{e}"))?],
             };
             let is_tty = std::io::stdout().is_terminal();
-            let mut last_pct = 0;
-            let dest = ghostreel_core::models::download(&spec, &models_dir, |done, total| {
-                if let Some(total) = total {
-                    let pct = (done * 100).checked_div(total).unwrap_or(0);
-                    let done_h = human_size(done as i64);
-                    let total_h = human_size(total as i64);
-                    if is_tty {
-                        print!("\rDownloading {}: {} / {} ({}%)   ", spec.file_name, done_h, total_h, pct);
+            for spec in specs {
+                let mut last_pct = 0;
+                let dest = ghostreel_core::models::download(&spec, &models_dir, |done, total| {
+                    if let Some(total) = total {
+                        let pct = (done * 100).checked_div(total).unwrap_or(0);
+                        let done_h = human_size(done as i64);
+                        let total_h = human_size(total as i64);
+                        if is_tty {
+                            print!("\rDownloading {}: {} / {} ({}%)   ", spec.file_name, done_h, total_h, pct);
+                            let _ = std::io::stdout().flush();
+                        } else if pct >= last_pct + 10 || done == total {
+                            last_pct = pct;
+                            println!("Downloading {}: {} / {} ({}%)", spec.file_name, done_h, total_h, pct);
+                        }
+                    } else if is_tty {
+                        print!("\rDownloading {}: {}   ", spec.file_name, human_size(done as i64));
                         let _ = std::io::stdout().flush();
-                    } else if pct >= last_pct + 10 || done == total {
-                        last_pct = pct;
-                        println!("Downloading {}: {} / {} ({}%)", spec.file_name, done_h, total_h, pct);
                     }
-                } else if is_tty {
-                    print!("\rDownloading {}: {}   ", spec.file_name, human_size(done as i64));
-                    let _ = std::io::stdout().flush();
+                })
+                .await?;
+                if is_tty {
+                    println!();
                 }
-            })
-            .await?;
-            if is_tty {
-                println!();
+                println!("Downloaded {} to {}", spec.file_name, dest.display());
             }
-            println!("Downloaded {} to {}", spec.file_name, dest.display());
             Ok(ExitCode::SUCCESS)
         }
         ModelsAction::Remove { id } => {
             let dest = ghostreel_core::models::remove(&models_dir, &id).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Removed {}", dest.display());
             Ok(ExitCode::SUCCESS)
+        }
+        ModelsAction::Use { id } => {
+            if id == ghostreel_core::config::EMBED_MODEL
+                || ghostreel_core::models::find_entry(&id)
+                    .is_some_and(|e| e.kind == ghostreel_core::models::ModelKind::Embedding)
+            {
+                bail!(
+                    "embedding model is locked to {} to keep search vectors compatible between computers",
+                    ghostreel_core::config::EMBED_MODEL
+                );
+            }
+            let mut cfg = Config::load(&paths.config_file).unwrap_or_default();
+            if id == "auto" {
+                cfg.stt.model = "auto".into();
+                cfg.save(&paths.config_file)?;
+                println!("Selected speech model: auto");
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Check vision catalog first — vision IDs are explicit catalog entries and must
+            // not be matched by the generic whisper() fallback (which accepts any valid name).
+            if ghostreel_core::models::vision_pair(&id).is_some()
+                || ghostreel_core::models::find_entry(&id)
+                    .is_some_and(|e| e.kind == ghostreel_core::models::ModelKind::Vision)
+            {
+                cfg.vision.local_model = id.clone();
+                cfg.save(&paths.config_file)?;
+                println!("Selected vision model: {id}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            if ghostreel_core::models::find_entry(&id)
+                .is_some_and(|e| e.kind == ghostreel_core::models::ModelKind::Whisper)
+                // Custom ggml names are fine once the file is in the models folder.
+                || ghostreel_core::models::whisper(&id).is_ok_and(|s| models_dir.join(&s.file_name).is_file())
+            {
+                cfg.stt.model = id.clone();
+                cfg.save(&paths.config_file)?;
+                println!("Selected speech model: {id}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            bail!(
+                "unknown model '{id}'; use a whisper model (e.g. tiny, small, large-v3-turbo) or vision model (e.g. bonsai-27b, gemma-3-4b-it, qwen2.5-vl-7b, qwen2.5-vl-3b)"
+            );
         }
     }
 }
@@ -513,6 +602,11 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
                 }
                 print_status(&st);
             }
+        }
+        ProjectAction::Rename { name, new_name } => {
+            let p = db.require_project(&name)?;
+            let renamed = db.rename_project(p.id, &new_name)?;
+            println!("renamed project '{}' to '{}'", p.name, renamed.name);
         }
         ProjectAction::Remove { name } => {
             let p = db.require_project(&name)?;

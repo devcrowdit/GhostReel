@@ -291,6 +291,8 @@ export const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 export const listProjects = () => invoke<ProjectSummary[]>("list_projects");
 export const createProject = (name: string, fpsNum: number, fpsDen: number, width: number, height: number) =>
   invoke<Project>("create_project", { name, fpsNum, fpsDen, width, height });
+export const renameProject = (projectId: number, name: string) =>
+  invoke<Project>("rename_project", { projectId, name });
 export const removeProject = (projectId: number) => invoke<void>("remove_project", { projectId });
 export const projectView = (projectId: number) => invoke<ProjectView>("project_view", { projectId });
 export const addFolder = (projectId: number, path: string, recursive = true) =>
@@ -465,6 +467,10 @@ export interface CatalogEntry {
   accuracy: number;
   note: string;
   languages: string;
+  mmproj_file_name?: string;
+  mmproj_url?: string;
+  mmproj_size_bytes?: number;
+  vram_mb?: number;
 }
 
 export interface ModelStatus {
@@ -478,7 +484,73 @@ export interface ModelsStatusView {
   dir: string;
   models: ModelStatus[];
   current_whisper_model?: string;
+  current_vision_model?: string;
 }
+
+// ---- AI settings (backend per capability) ------------------------------------------------
+
+export interface VisionSettings {
+  backend: Backend;
+  url: string;
+  model: string;
+  local_model: string;
+  api_key_set: boolean;
+}
+
+export interface SttSettings {
+  backend: Backend;
+  url: string;
+  model: string;
+}
+
+export interface EmbedSettings {
+  backend: Backend;
+  url: string;
+  model: string;
+}
+
+export interface AiSettings {
+  vision: VisionSettings;
+  stt: SttSettings;
+  embed: EmbedSettings;
+}
+
+export interface BackendsResolution {
+  vision: Resolution;
+  embeddings: Resolution;
+  stt: Resolution;
+}
+
+export interface VisionSettingsPatch {
+  backend?: string;
+  url?: string;
+  model?: string;
+  local_model?: string;
+  api_key?: string;
+}
+
+export interface SttSettingsPatch {
+  backend?: string;
+  url?: string;
+  model?: string;
+}
+
+export interface EmbedSettingsPatch {
+  backend?: string;
+  url?: string;
+  model?: string;
+}
+
+export interface AiSettingsPatch {
+  vision?: VisionSettingsPatch;
+  stt?: SttSettingsPatch;
+  embed?: EmbedSettingsPatch;
+}
+
+export const getAiSettings = () => invoke<AiSettings>("get_ai_settings");
+export const setAiSettings = (patch: AiSettingsPatch) => invoke<AiSettings>("set_ai_settings", { patch });
+export const probeBackends = () => invoke<BackendsResolution>("probe_backends");
+export const serverModels = (url: string) => invoke<string[]>("server_models", { url });
 
 export const modelsStatus = () => invoke<ModelsStatusView>("models_status");
 export const enqueueModelDownload = (modelId: string) =>

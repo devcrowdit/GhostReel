@@ -117,6 +117,21 @@ impl Db {
         self.project_by_name(name)?.ok_or_else(|| Error::NotFound(format!("project '{name}'")))
     }
 
+    /// Rename a project. Names stay unique (case-insensitive); changing only the case is allowed.
+    pub fn rename_project(&mut self, id: i64, name: &str) -> Result<Project, Error> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("project name is empty".into()));
+        }
+        if self.project_by_name(name)?.is_some_and(|p| p.id != id) {
+            return Err(Error::Invalid(format!("project '{name}' already exists")));
+        }
+        if self.conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", params![name, id])? == 0 {
+            return Err(Error::NotFound(format!("project #{id}")));
+        }
+        self.project(id)
+    }
+
     /// Delete a project; folders no other project uses are removed with it.
     pub fn remove_project(&mut self, id: i64) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
@@ -239,6 +254,12 @@ mod tests {
         assert!(db.create_project(&NewProject::named("teaser")).is_err(), "names are case-insensitive");
         assert!(db.create_project(&NewProject::named("  ")).is_err());
         assert_eq!(db.require_project("TEASER").unwrap().id, p.id);
+        let other = db.create_project(&NewProject::named("Other")).unwrap();
+        assert!(db.rename_project(other.id, "teaser").is_err(), "rename can't take another project's name");
+        assert!(db.rename_project(other.id, " ").is_err());
+        assert_eq!(db.rename_project(p.id, " TEASER cut ").unwrap().name, "TEASER cut");
+        assert_eq!(db.rename_project(p.id, "teaser CUT").unwrap().name, "teaser CUT", "case-only change");
+        db.remove_project(other.id).unwrap();
         db.remove_project(p.id).unwrap();
         assert!(db.projects().unwrap().is_empty());
     }

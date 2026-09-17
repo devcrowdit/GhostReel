@@ -36,9 +36,9 @@ pub struct DbStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelFile {
-    pub role: &'static str,
+    pub role: String,
     /// File name pattern searched for.
-    pub pattern: &'static str,
+    pub pattern: String,
     pub found: Option<PathBuf>,
 }
 
@@ -82,15 +82,6 @@ impl Report {
     }
 }
 
-/// Model files the local backends will need (download manager arrives in M4).
-const MODEL_FILES: &[(&str, &str)] = &[
-    ("vision (local)", "Bonsai-27B-Q1_0.gguf"),
-    ("vision projector (local)", "Bonsai-27B-mmproj-Q8_0.gguf"),
-    ("embeddings (local)", "embeddinggemma-300M-Q8_0.gguf"),
-    ("whisper (local, GPU)", "ggml-large-v3-turbo.bin"),
-    ("whisper (local, CPU)", "ggml-small.bin"),
-];
-
 pub async fn run(paths: &Paths) -> Report {
     let (config, config_error) = match Config::load(&paths.config_file) {
         Ok(c) => (c, None),
@@ -124,9 +115,26 @@ pub async fn run(paths: &Paths) -> Report {
     let models_dir = crate::models::effective_models_dir(paths, &config);
     let mut search: Vec<PathBuf> = vec![models_dir];
     search.extend(config.models.search_paths.iter().cloned());
-    let models = MODEL_FILES
-        .iter()
-        .map(|(role, pattern)| ModelFile { role, pattern, found: find_file(&search, pattern, 5) })
+
+    let (vision_file, proj_file) = match crate::models::vision_pair(&config.vision.local_model) {
+        Some((m, p)) => (m.file_name, p.file_name),
+        None => ("Bonsai-27B-Q1_0.gguf".to_string(), "Bonsai-27B-mmproj-Q8_0.gguf".to_string()),
+    };
+
+    let model_files = vec![
+        ("vision (local)".to_string(), vision_file),
+        ("vision projector (local)".to_string(), proj_file),
+        ("embeddings (local)".to_string(), "embeddinggemma-300M-Q8_0.gguf".to_string()),
+        ("whisper (local, GPU)".to_string(), "ggml-large-v3-turbo.bin".to_string()),
+        ("whisper (local, CPU)".to_string(), "ggml-small.bin".to_string()),
+    ];
+
+    let models = model_files
+        .into_iter()
+        .map(|(role, pattern)| {
+            let found = find_file(&search, &pattern, 5);
+            ModelFile { role, pattern, found }
+        })
         .collect();
 
     Report {

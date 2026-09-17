@@ -57,11 +57,30 @@ pub struct CatalogEntry {
     pub accuracy: u8,
     pub note: String,
     pub languages: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_mb: Option<u64>,
 }
 
 impl CatalogEntry {
     pub fn spec(&self) -> ModelSpec {
         ModelSpec { file_name: self.file_name.clone(), url: self.url.clone() }
+    }
+
+    pub fn mmproj_spec(&self) -> Option<ModelSpec> {
+        match (&self.mmproj_file_name, &self.mmproj_url) {
+            (Some(file_name), Some(url)) => Some(ModelSpec { file_name: file_name.clone(), url: url.clone() }),
+            _ => None,
+        }
+    }
+
+    pub fn total_size_bytes(&self) -> u64 {
+        self.size_bytes + self.mmproj_size_bytes.unwrap_or(0)
     }
 }
 
@@ -76,7 +95,10 @@ pub struct ModelStatus {
 
 /// Built-in catalog of recommended models with verified byte sizes.
 pub fn catalog() -> Vec<CatalogEntry> {
-    let (vision_spec, proj_spec) = bonsai_vision();
+    let (vision_spec, proj_spec) = (
+        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-Q1_0.gguf"),
+        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-mmproj-Q8_0.gguf"),
+    );
     let embed_spec = embeddinggemma();
     vec![
         // Whisper models (HF ggerganov/whisper.cpp)
@@ -90,6 +112,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 1,
             note: "fastest, lowest accuracy".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "tiny.en".into(),
@@ -101,6 +127,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 2,
             note: "fastest, English-only".into(),
             languages: "english".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "base".into(),
@@ -112,6 +142,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 2,
             note: "fast, basic accuracy".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "base.en".into(),
@@ -123,6 +157,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 3,
             note: "fast, English-only".into(),
             languages: "english".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "small".into(),
@@ -134,6 +172,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 4,
             note: "balanced — sweet spot on a GPU".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "small.en".into(),
@@ -145,6 +187,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 4,
             note: "balanced, English-only".into(),
             languages: "english".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "medium".into(),
@@ -156,6 +202,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 5,
             note: "most accurate classic whisper, heaviest".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "medium.en".into(),
@@ -167,6 +217,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 5,
             note: "most accurate classic whisper, English-only".into(),
             languages: "english".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
         CatalogEntry {
             id: "large-v3-turbo".into(),
@@ -178,6 +232,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 5,
             note: "best accuracy, needs ~2 GB VRAM".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: Some(2000),
         },
         CatalogEntry {
             id: "large-v3-turbo-q8_0".into(),
@@ -189,6 +247,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 5,
             note: "high accuracy, 8-bit quantized (~874 MB)".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: Some(1500),
         },
         CatalogEntry {
             id: "large-v3-turbo-q5_0".into(),
@@ -200,8 +262,12 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 4,
             note: "fast, 5-bit quantized (~574 MB)".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: Some(1000),
         },
-        // Vision: Bonsai-27B at 1-bit + mmproj image projector
+        // Vision models: pair of (model, projector) under one id
         CatalogEntry {
             id: "bonsai-27b".into(),
             kind: ModelKind::Vision,
@@ -210,19 +276,57 @@ pub fn catalog() -> Vec<CatalogEntry> {
             size_bytes: 3_803_452_480,
             speed: 3,
             accuracy: 4,
-            note: "1-bit quantized 27B vision model (~3.8 GB)".into(),
+            note: "recommended — 1-bit 27B vision model (~4.4 GB total)".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: Some(proj_spec.file_name),
+            mmproj_url: Some(proj_spec.url),
+            mmproj_size_bytes: Some(629_246_880),
+            vram_mb: Some(6000),
         },
         CatalogEntry {
-            id: "bonsai-27b-mmproj".into(),
-            kind: ModelKind::VisionProjector,
-            file_name: proj_spec.file_name,
-            url: proj_spec.url,
-            size_bytes: 629_246_880,
+            id: "gemma-3-4b-it".into(),
+            kind: ModelKind::Vision,
+            file_name: "gemma-3-4b-it-Q4_K_M.gguf".into(),
+            url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf".into(),
+            size_bytes: 2_489_757_856,
             speed: 4,
-            accuracy: 5,
-            note: "image projector for Bonsai-27B (~630 MB)".into(),
+            accuracy: 3,
+            note: "less accurate, fits 6 GB (~3.3 GB total)".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: Some("gemma-3-4b-it-mmproj-f16.gguf".into()),
+            mmproj_url: Some("https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf".into()),
+            mmproj_size_bytes: Some(851_251_104),
+            vram_mb: Some(4500),
+        },
+        CatalogEntry {
+            id: "qwen2.5-vl-7b".into(),
+            kind: ModelKind::Vision,
+            file_name: "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf".into(),
+            url: "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf".into(),
+            size_bytes: 4_683_072_032,
+            speed: 3,
+            accuracy: 4,
+            note: "strong visual details, fits 8 GB (~5.5 GB total)".into(),
+            languages: "multilingual".into(),
+            mmproj_file_name: Some("mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf".into()),
+            mmproj_url: Some("https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf".into()),
+            mmproj_size_bytes: Some(853_119_712),
+            vram_mb: Some(6500),
+        },
+        CatalogEntry {
+            id: "qwen2.5-vl-3b".into(),
+            kind: ModelKind::Vision,
+            file_name: "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf".into(),
+            url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf".into(),
+            size_bytes: 1_929_901_056,
+            speed: 5,
+            accuracy: 3,
+            note: "fastest vision, fits 4 GB (~2.8 GB total)".into(),
+            languages: "multilingual".into(),
+            mmproj_file_name: Some("mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf".into()),
+            mmproj_url: Some("https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf".into()),
+            mmproj_size_bytes: Some(844_757_728),
+            vram_mb: Some(3500),
         },
         // Search embeddings: embeddinggemma 300M
         CatalogEntry {
@@ -235,6 +339,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             accuracy: 5,
             note: "768-dim text embeddings, runs on CPU (~334 MB)".into(),
             languages: "multilingual".into(),
+            mmproj_file_name: None,
+            mmproj_url: None,
+            mmproj_size_bytes: None,
+            vram_mb: None,
         },
     ]
 }
@@ -250,10 +358,13 @@ pub fn find_entry(id: &str) -> Option<CatalogEntry> {
     if trimmed.eq_ignore_ascii_case("embeddinggemma") {
         return cat.iter().find(|e| e.id == "embeddinggemma-300M-Q8_0").cloned();
     }
-    if trimmed.eq_ignore_ascii_case("bonsai-27b-projector") {
-        return cat.iter().find(|e| e.id == "bonsai-27b-mmproj").cloned();
+    if trimmed.eq_ignore_ascii_case("bonsai-27b-projector") || trimmed.eq_ignore_ascii_case("bonsai-27b-mmproj") {
+        return cat.iter().find(|e| e.id == "bonsai-27b").cloned();
     }
-    cat.into_iter().find(|e| e.file_name.eq_ignore_ascii_case(trimmed))
+    cat.into_iter().find(|e| {
+        e.file_name.eq_ignore_ascii_case(trimmed)
+            || e.mmproj_file_name.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(trimmed))
+    })
 }
 
 /// Query installation status for every catalog entry.
@@ -262,6 +373,40 @@ pub fn status(models_dir: &Path, search_paths: &[PathBuf]) -> Vec<ModelStatus> {
     catalog()
         .into_iter()
         .map(|entry| {
+            if let Some(proj_name) = &entry.mmproj_file_name {
+                let model_own = models_dir.join(&entry.file_name);
+                let proj_own = models_dir.join(proj_name);
+                let model_in_own = model_own.is_file() && model_own.metadata().map(|m| m.len() > 0).unwrap_or(false);
+                let proj_in_own = proj_own.is_file() && proj_own.metadata().map(|m| m.len() > 0).unwrap_or(false);
+
+                let model_path = if model_in_own { Some(model_own) } else { find(&roots, &entry.file_name) };
+                let proj_path = if proj_in_own { Some(proj_own) } else { find(&roots, proj_name) };
+
+                if let (Some(m_p), Some(_p_p)) = (model_path, proj_path) {
+                    let in_own = m_p.starts_with(models_dir);
+                    return ModelStatus { entry, installed_path: Some(m_p), in_own_dir: in_own, partial_bytes: None };
+                }
+
+                // If not fully installed, check for partial files or already downloaded individual files
+                let m_part = models_dir.join(format!("{}.part", entry.file_name));
+                let p_part = models_dir.join(format!("{proj_name}.part"));
+                let mut partial = 0u64;
+                if let Ok(m) = m_part.metadata() {
+                    partial += m.len();
+                }
+                if let Ok(m) = p_part.metadata() {
+                    partial += m.len();
+                }
+                if model_in_own && let Ok(m) = models_dir.join(&entry.file_name).metadata() {
+                    partial += m.len();
+                }
+                if proj_in_own && let Ok(m) = models_dir.join(proj_name).metadata() {
+                    partial += m.len();
+                }
+                let partial_bytes = if partial > 0 { Some(partial) } else { None };
+                return ModelStatus { entry, installed_path: None, in_own_dir: false, partial_bytes };
+            }
+
             let own = models_dir.join(&entry.file_name);
             if own.is_file() && own.metadata().map(|m| m.len() > 0).unwrap_or(false) {
                 return ModelStatus { entry, installed_path: Some(own), in_own_dir: true, partial_bytes: None };
@@ -280,10 +425,11 @@ pub fn status(models_dir: &Path, search_paths: &[PathBuf]) -> Vec<ModelStatus> {
 /// Remove a model file (and any `.part` file) from GhostReel's own `models_dir`.
 /// Never touches copies found in search_paths or external apps like GhostPen or LM Studio.
 pub fn remove(models_dir: &Path, id: &str) -> Result<PathBuf, Error> {
-    let file_name = if let Some(e) = find_entry(id) {
-        e.file_name
+    let entry = find_entry(id);
+    let (file_name, proj_file_name) = if let Some(ref e) = entry {
+        (e.file_name.clone(), e.mmproj_file_name.clone())
     } else if let Ok(spec) = whisper(id) {
-        spec.file_name
+        (spec.file_name, None)
     } else {
         return Err(Error::NotFound(format!("unknown model '{id}'")));
     };
@@ -299,6 +445,19 @@ pub fn remove(models_dir: &Path, id: &str) -> Result<PathBuf, Error> {
     if part.is_file() {
         let _ = std::fs::remove_file(&part);
         removed = true;
+    }
+
+    if let Some(proj_name) = proj_file_name {
+        let p_dest = models_dir.join(&proj_name);
+        let p_part = models_dir.join(format!("{proj_name}.part"));
+        if p_dest.is_file() {
+            let _ = std::fs::remove_file(&p_dest);
+            removed = true;
+        }
+        if p_part.is_file() {
+            let _ = std::fs::remove_file(&p_part);
+            removed = true;
+        }
     }
 
     if removed {
@@ -324,12 +483,24 @@ fn hf(repo: &str, file: &str) -> ModelSpec {
     ModelSpec { file_name: file.to_string(), url: format!("https://huggingface.co/{repo}/resolve/main/{file}") }
 }
 
+/// Resolve a vision model pair by catalog ID.
+pub fn vision_pair(id: &str) -> Option<(ModelSpec, ModelSpec)> {
+    let entry = find_entry(id)?;
+    if entry.kind != ModelKind::Vision {
+        return None;
+    }
+    let mmproj = entry.mmproj_spec()?;
+    Some((entry.spec(), mmproj))
+}
+
 /// Default local vision model: Bonsai-27B at 1-bit (~3.6 GB) + its image projector (S0).
 pub fn bonsai_vision() -> (ModelSpec, ModelSpec) {
-    (
-        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-Q1_0.gguf"),
-        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-mmproj-Q8_0.gguf"),
-    )
+    vision_pair("bonsai-27b").unwrap_or_else(|| {
+        (
+            hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-Q1_0.gguf"),
+            hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-mmproj-Q8_0.gguf"),
+        )
+    })
 }
 
 /// The one embedding model GhostReel uses everywhere (plan D5).
@@ -519,17 +690,35 @@ mod tests {
         assert!(cat.len() >= 14);
         assert!(cat.iter().any(|e| e.id == "tiny" && e.kind == ModelKind::Whisper));
         assert!(cat.iter().any(|e| e.id == "large-v3-turbo" && e.size_bytes == 1_624_555_275));
-        assert!(cat.iter().any(|e| e.id == "bonsai-27b" && e.kind == ModelKind::Vision));
-        assert!(cat.iter().any(|e| e.id == "bonsai-27b-mmproj" && e.kind == ModelKind::VisionProjector));
+        assert!(
+            cat.iter().any(|e| e.id == "bonsai-27b" && e.kind == ModelKind::Vision && e.mmproj_file_name.is_some())
+        );
+        assert!(
+            cat.iter().any(|e| e.id == "gemma-3-4b-it" && e.kind == ModelKind::Vision && e.mmproj_file_name.is_some())
+        );
+        assert!(
+            cat.iter().any(|e| e.id == "qwen2.5-vl-7b" && e.kind == ModelKind::Vision && e.mmproj_file_name.is_some())
+        );
         assert!(cat.iter().any(|e| e.id == "embeddinggemma-300M-Q8_0" && e.kind == ModelKind::Embedding));
+
+        let (b_model, b_proj) = bonsai_vision();
+        assert_eq!(b_model.file_name, "Bonsai-27B-Q1_0.gguf");
+        assert_eq!(b_proj.file_name, "Bonsai-27B-mmproj-Q8_0.gguf");
+
+        let (g_model, g_proj) = vision_pair("gemma-3-4b-it").unwrap();
+        assert_eq!(g_model.file_name, "gemma-3-4b-it-Q4_K_M.gguf");
+        assert_eq!(g_proj.file_name, "gemma-3-4b-it-mmproj-f16.gguf");
     }
 
     #[test]
     fn find_entry_aliases() {
         assert_eq!(find_entry("tiny").unwrap().file_name, "ggml-tiny.bin");
         assert_eq!(find_entry("embeddinggemma").unwrap().id, "embeddinggemma-300M-Q8_0");
-        assert_eq!(find_entry("bonsai-27b-projector").unwrap().id, "bonsai-27b-mmproj");
+        assert_eq!(find_entry("bonsai-27b-projector").unwrap().id, "bonsai-27b");
+        assert_eq!(find_entry("bonsai-27b-mmproj").unwrap().id, "bonsai-27b");
         assert_eq!(find_entry("Bonsai-27B-Q1_0.gguf").unwrap().id, "bonsai-27b");
+        assert_eq!(find_entry("Bonsai-27B-mmproj-Q8_0.gguf").unwrap().id, "bonsai-27b");
+        assert_eq!(find_entry("gemma-3-4b-it").unwrap().file_name, "gemma-3-4b-it-Q4_K_M.gguf");
         assert!(find_entry("nonexistent-model-xyz").is_none());
     }
 
@@ -575,6 +764,28 @@ mod tests {
             // Never removes files outside models_dir
             assert!(remove(&models_dir, "tiny").is_err());
         }
+
+        // Vision pair status: only installed when BOTH model and projector files exist
+        let gemma_st = status(&models_dir, &[]).into_iter().find(|s| s.entry.id == "gemma-3-4b-it").unwrap();
+        assert!(gemma_st.installed_path.is_none());
+
+        // Model only: still not installed
+        std::fs::write(models_dir.join("gemma-3-4b-it-Q4_K_M.gguf"), b"model data").unwrap();
+        let gemma_st = status(&models_dir, &[]).into_iter().find(|s| s.entry.id == "gemma-3-4b-it").unwrap();
+        assert!(gemma_st.installed_path.is_none());
+        assert!(gemma_st.partial_bytes.is_some());
+
+        // Both model and projector: installed!
+        std::fs::write(models_dir.join("gemma-3-4b-it-mmproj-f16.gguf"), b"proj data").unwrap();
+        let gemma_st = status(&models_dir, &[]).into_iter().find(|s| s.entry.id == "gemma-3-4b-it").unwrap();
+        assert!(gemma_st.installed_path.is_some());
+        assert!(gemma_st.in_own_dir);
+        assert!(gemma_st.partial_bytes.is_none());
+
+        // Removing gemma-3-4b-it removes both files!
+        remove(&models_dir, "gemma-3-4b-it").unwrap();
+        assert!(!models_dir.join("gemma-3-4b-it-Q4_K_M.gguf").exists());
+        assert!(!models_dir.join("gemma-3-4b-it-mmproj-f16.gguf").exists());
     }
 
     #[test]

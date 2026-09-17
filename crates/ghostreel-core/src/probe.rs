@@ -186,6 +186,32 @@ pub async fn stt(client: &reqwest::Client, url: &str) -> Probe {
     }
 }
 
+/// Query `{url}/v1/models` and return the list of model IDs (3 s timeout).
+pub async fn server_models(url: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let b = base(url);
+    let body = get_json(&client, &format!("{b}/v1/models")).await?;
+    let mut out = Vec::new();
+    if let Some(arr) = body["data"].as_array() {
+        for m in arr {
+            if let Some(id) = m["id"].as_str() {
+                out.push(id.to_string());
+            }
+        }
+    } else if let Some(arr) = body.as_array() {
+        for m in arr {
+            if let Some(id) = m["id"].as_str() {
+                out.push(id.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +329,12 @@ mod tests {
         assert_eq!(resolve(Backend::Server, Some(down)).target, Target::Unavailable);
         assert_eq!(resolve(Backend::Local, Some(up)).target, Target::Local);
         assert_eq!(resolve(Backend::Local, None).target, Target::Local);
+    }
+
+    #[tokio::test]
+    async fn server_models_lists_ids() {
+        let url = serve(vec![("GET /v1/models", 200, r#"{"data":[{"id":"model-a"},{"id":"model-b"}]}"#.into())]).await;
+        let list = server_models(&url).await.unwrap();
+        assert_eq!(list, vec!["model-a", "model-b"]);
     }
 }

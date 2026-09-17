@@ -51,11 +51,19 @@ pub struct VisionConfig {
     pub model: String,
     /// Bearer token for non-local servers.
     pub api_key: String,
+    /// Local vision model catalog id (pair: model + projector). Default: "bonsai-27b".
+    pub local_model: String,
 }
 
 impl Default for VisionConfig {
     fn default() -> Self {
-        Self { backend: Backend::Auto, url: DEFAULT_VISION_URL.into(), model: String::new(), api_key: String::new() }
+        Self {
+            backend: Backend::Auto,
+            url: DEFAULT_VISION_URL.into(),
+            model: String::new(),
+            api_key: String::new(),
+            local_model: "bonsai-27b".into(),
+        }
     }
 }
 
@@ -177,5 +185,24 @@ mod tests {
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.models.dir, Some(PathBuf::from("/custom/models")));
         assert_eq!(cfg.models.search_paths, vec![PathBuf::from("/extra/path")]);
+    }
+
+    #[test]
+    fn vision_local_model_default_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = Config::default();
+        assert_eq!(cfg.vision.local_model, "bonsai-27b");
+
+        std::fs::write(&path, "[vision]\nlocal_model = \"gemma-3-4b-it\"\n").unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.vision.local_model, "gemma-3-4b-it");
+        assert_eq!(loaded.vision.backend, Backend::Auto);
+
+        let mut saved_cfg = Config::default();
+        saved_cfg.vision.local_model = "qwen2.5-vl-7b".into();
+        saved_cfg.save(&path).unwrap();
+        let roundtrip = Config::load(&path).unwrap();
+        assert_eq!(roundtrip.vision.local_model, "qwen2.5-vl-7b");
     }
 }

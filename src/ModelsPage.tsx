@@ -1,33 +1,102 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   cancelTask,
   enqueueModelDownload,
+  getAiSettings,
   humanSize,
   modelsStatus,
   openModelsDir,
+  probeBackends,
   removeModel,
   scoreMeter,
+  serverModels,
+  setAiSettings,
   setWhisperModel,
+  type AiSettings,
+  type AiSettingsPatch,
+  type BackendsResolution,
+  type Backend,
   type ModelStatus,
   type ModelsStatusView,
+  type Resolution,
 } from "./api";
 import { useQueue } from "./useQueue";
 
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+function probeLabel(r: Resolution): { text: string; cls: string } {
+  if (r.target === "server" && r.probe) {
+    const m = r.probe.model ? ` · ${r.probe.model}` : "";
+    const host = (() => {
+      try {
+        return new URL(r.probe.url).host;
+      } catch {
+        return r.probe.url;
+      }
+    })();
+    return { text: `Now using: server${m} @ ${host}`, cls: "probe-ok" };
+  }
+  if (r.target === "local") {
+    return { text: r.reason || "Now using: this computer", cls: "probe-ok" };
+  }
+  if (r.target === "unavailable") {
+    return { text: r.reason || "Unavailable", cls: "probe-bad" };
+  }
+  return { text: r.reason || "", cls: "" };
+}
+
+// ─── segmented control ────────────────────────────────────────────────────────
+
+interface SegmentedProps {
+  value: Backend;
+  onChange: (v: Backend) => void;
+}
+function BackendSegmented({ value, onChange }: SegmentedProps) {
+  const opts: { label: string; v: Backend }[] = [
+    { label: "Auto", v: "auto" },
+    { label: "This computer", v: "local" },
+    { label: "Server", v: "server" },
+  ];
+  return (
+    <div className="segmented-control">
+      {opts.map(({ label, v }) => (
+        <button key={v} className={value === v ? "active" : ""} onClick={() => onChange(v)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── main component ───────────────────────────────────────────────────────────
+
 export default function ModelsPage() {
   const [data, setData] = useState<ModelsStatusView | null>(null);
-  const [whisperModel, setLocalWhisperModel] = useState<string>("auto");
+  const [aiSettings, setAiSettingsState] = useState<AiSettings | null>(null);
+  const [resolution, setResolution] = useState<BackendsResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Server model lists per section (fetched on demand)
+  const [sttServerModels, setSttServerModels] = useState<string[]>([]);
+  const [visionServerModels, setVisionServerModels] = useState<string[]>([]);
+  const [embedServerModels, setEmbedServerModels] = useState<string[]>([]);
+  const [fetchingServerModels, setFetchingServerModels] = useState<Record<string, boolean>>({});
+
+  // API-key masked display
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const apiKeyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const urlDebounceRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
   const tasks = useQueue();
 
   const refresh = useCallback(async () => {
     try {
-      const res = await modelsStatus();
+      const [res, ai, probe] = await Promise.all([modelsStatus(), getAiSettings(), probeBackends()]);
       setData(res);
-      if (res.current_whisper_model) {
-        setLocalWhisperModel(res.current_whisper_model);
-      }
+      setAiSettingsState(ai);
+      setResolution(probe);
     } catch (e) {
       setError(String(e));
     }
@@ -35,13 +104,51 @@ export default function ModelsPage() {
 
   useEffect(() => {
     refresh();
-    const un = listen("task-finished", () => {
-      refresh();
-    });
+    const un = listen("task-finished", () => refresh());
     return () => {
       un.then((f) => f());
     };
   }, [refresh]);
+
+  // ─── patch helpers ──────────────────────────────────────────────────────────
+
+  const applyPatch = useCallback(
+    async (patch: AiSettingsPatch) => {
+      try {
+        setError(null);
+        const updated = await setAiSettings(patch);
+        setAiSettingsState(updated);
+        // Re-probe after settings change
+        const probe = await probeBackends();
+        setResolution(probe);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [],
+  );
+
+  const fetchServerModelList = useCallback(
+    async (
+      url: string,
+      setter: (list: string[]) => void,
+      key: string,
+    ) => {
+      if (!url) return;
+      setFetchingServerModels((p) => ({ ...p, [key]: true }));
+      try {
+        const list = await serverModels(url);
+        setter(list);
+      } catch {
+        setter([]);
+      } finally {
+        setFetchingServerModels((p) => ({ ...p, [key]: false }));
+      }
+    },
+    [],
+  );
+
+  // ─── model actions ──────────────────────────────────────────────────────────
 
   const handleDownload = async (modelId: string) => {
     try {
@@ -62,28 +169,7 @@ export default function ModelsPage() {
     }
   };
 
-  const handleSetWhisper = async (modelId: string) => {
-    try {
-      setLocalWhisperModel(modelId);
-      await setWhisperModel(modelId);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const handleOpenFolder = async () => {
-    try {
-      await openModelsDir();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const whisperModels = data?.models.filter((m) => m.entry.kind === "whisper") ?? [];
-  const visionModels =
-    data?.models.filter((m) => m.entry.kind === "vision" || m.entry.kind === "vision_projector") ?? [];
-  const embeddingModels = data?.models.filter((m) => m.entry.kind === "embedding") ?? [];
+  // ─── model status cells ─────────────────────────────────────────────────────
 
   const renderStatus = (m: ModelStatus) => {
     const activeTask = tasks.find(
@@ -200,6 +286,30 @@ export default function ModelsPage() {
     );
   };
 
+  // ─── debounced URL setter ───────────────────────────────────────────────────
+
+  function debouncedUrlPatch(key: string, patch: AiSettingsPatch, delayMs = 600) {
+    if (urlDebounceRef.current[key]) clearTimeout(urlDebounceRef.current[key]);
+    urlDebounceRef.current[key] = setTimeout(() => applyPatch(patch), delayMs);
+  }
+
+  // ─── computed lists ─────────────────────────────────────────────────────────
+
+  const whisperModels = data?.models.filter((m) => m.entry.kind === "whisper") ?? [];
+  const visionModels = data?.models.filter((m) => m.entry.kind === "vision") ?? [];
+  const embeddingModels = data?.models.filter((m) => m.entry.kind === "embedding") ?? [];
+
+  const ai = aiSettings;
+  const sttBackend = ai?.stt.backend ?? "auto";
+  const visionBackend = ai?.vision.backend ?? "auto";
+  const embedBackend = ai?.embed.backend ?? "auto";
+
+  const sttProbe = resolution ? probeLabel(resolution.stt) : null;
+  const visionProbe = resolution ? probeLabel(resolution.vision) : null;
+  const embedProbe = resolution ? probeLabel(resolution.embeddings) : null;
+
+  // ─── render ─────────────────────────────────────────────────────────────────
+
   return (
     <main>
       <header>
@@ -229,14 +339,71 @@ export default function ModelsPage() {
               <div className="label">Models directory</div>
               <div className="muted small path">{data.dir}</div>
             </div>
-            <button className="ghost small" onClick={handleOpenFolder}>
+            <button className="ghost small" onClick={openModelsDir}>
               Open folder
             </button>
           </div>
         </div>
       )}
 
+      {/* ── Speech (whisper) ── */}
       <h2>Speech (whisper)</h2>
+
+      {ai && (
+        <div className="card ai-settings-card">
+          <div>
+            <BackendSegmented
+              value={sttBackend}
+              onChange={(b) => applyPatch({ stt: { backend: b } })}
+            />
+          </div>
+
+          {(sttBackend === "server" || sttBackend === "auto") && (
+            <div className="settings-fields">
+              <div className="settings-field">
+                <label>URL</label>
+                <input
+                  type="text"
+                  defaultValue={ai.stt.url}
+                  placeholder="http://127.0.0.1:8771"
+                  onBlur={(e) => debouncedUrlPatch("stt.url", { stt: { url: e.currentTarget.value } })}
+                  onChange={(e) => debouncedUrlPatch("stt.url", { stt: { url: e.currentTarget.value } })}
+                />
+                <button
+                  className="ghost small"
+                  disabled={!!fetchingServerModels["stt"]}
+                  onClick={() => fetchServerModelList(ai.stt.url, setSttServerModels, "stt")}
+                >
+                  {fetchingServerModels["stt"] ? "…" : "Refresh"}
+                </button>
+              </div>
+              {sttServerModels.length > 0 && (
+                <div className="settings-field">
+                  <label>Model</label>
+                  <select
+                    value={ai.stt.model}
+                    onChange={(e) => applyPatch({ stt: { model: e.currentTarget.value } })}
+                  >
+                    {sttServerModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {sttProbe && (
+            <div className="probe-status">
+              <span className={sttProbe.cls}>{sttProbe.text}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* whisper model table */}
       <div className="card whisper-config-card">
         <div className="whisper-auto-row">
           <label className="radio-label">
@@ -244,8 +411,11 @@ export default function ModelsPage() {
               type="radio"
               name="whisper-select"
               value="auto"
-              checked={whisperModel === "auto"}
-              onChange={() => handleSetWhisper("auto")}
+              checked={(ai?.stt.model ?? "auto") === "auto"}
+              onChange={() => {
+                applyPatch({ stt: { model: "auto" } });
+                setWhisperModel("auto").catch(() => null);
+              }}
             />
             <span className="radio-text">
               <strong>Auto</strong> — large-v3-turbo on ≥6 GB NVIDIA GPU, otherwise small (recommended)
@@ -270,7 +440,7 @@ export default function ModelsPage() {
           </thead>
           <tbody>
             {whisperModels.map((m) => {
-              const isSelected = whisperModel === m.entry.id;
+              const isSelected = (ai?.stt.model ?? "auto") === m.entry.id;
               return (
                 <tr key={m.entry.id} className={isSelected ? "selected-row" : ""}>
                   <td className="col-radio">
@@ -279,7 +449,10 @@ export default function ModelsPage() {
                       name="whisper-select"
                       value={m.entry.id}
                       checked={isSelected}
-                      onChange={() => handleSetWhisper(m.entry.id)}
+                      onChange={() => {
+                        applyPatch({ stt: { model: m.entry.id } });
+                        setWhisperModel(m.entry.id).catch(() => null);
+                      }}
                       title={`Use ${m.entry.id} for transcription`}
                     />
                   </td>
@@ -308,13 +481,89 @@ export default function ModelsPage() {
         </table>
       </div>
 
-      <h2>Vision</h2>
+      {/* ── Frame descriptions & chat (vision) ── */}
+      <h2>Frame descriptions &amp; chat</h2>
+
+      {ai && (
+        <div className="card ai-settings-card">
+          <div>
+            <BackendSegmented
+              value={visionBackend}
+              onChange={(b) => applyPatch({ vision: { backend: b } })}
+            />
+          </div>
+
+          {(visionBackend === "server" || visionBackend === "auto") && (
+            <div className="settings-fields">
+              <div className="settings-field">
+                <label>URL</label>
+                <input
+                  type="text"
+                  defaultValue={ai.vision.url}
+                  placeholder="http://127.0.0.1:8089"
+                  onBlur={(e) => debouncedUrlPatch("vision.url", { vision: { url: e.currentTarget.value } })}
+                  onChange={(e) => debouncedUrlPatch("vision.url", { vision: { url: e.currentTarget.value } })}
+                />
+                <button
+                  className="ghost small"
+                  disabled={!!fetchingServerModels["vision"]}
+                  onClick={() => fetchServerModelList(ai.vision.url, setVisionServerModels, "vision")}
+                >
+                  {fetchingServerModels["vision"] ? "…" : "Refresh"}
+                </button>
+              </div>
+              {visionServerModels.length > 0 && (
+                <div className="settings-field">
+                  <label>Model</label>
+                  <select
+                    value={ai.vision.model}
+                    onChange={(e) => applyPatch({ vision: { model: e.currentTarget.value } })}
+                  >
+                    <option value="">— server default —</option>
+                    {visionServerModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="settings-field">
+                <label>API key</label>
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  placeholder={ai.vision.api_key_set ? "••••••••  (set — enter new to change)" : "optional"}
+                  onChange={(e) => {
+                    setApiKeyInput(e.currentTarget.value);
+                    if (apiKeyDebounceRef.current) clearTimeout(apiKeyDebounceRef.current);
+                    apiKeyDebounceRef.current = setTimeout(
+                      () => applyPatch({ vision: { api_key: e.currentTarget.value } }),
+                      800,
+                    );
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {visionProbe && (
+            <div className="probe-status">
+              <span className={visionProbe.cls}>{visionProbe.text}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* vision model table */}
       <div className="card table-card">
-        <table className="models-table">
+        <table className="models-table vision-table">
           <thead>
             <tr>
+              {visionBackend !== "server" && <th className="col-radio">Use</th>}
               <th>Model</th>
               <th>Size</th>
+              <th>VRAM</th>
               <th>Speed</th>
               <th>Accuracy</th>
               <th>Note</th>
@@ -323,31 +572,107 @@ export default function ModelsPage() {
             </tr>
           </thead>
           <tbody>
-            {visionModels.map((m) => (
-              <tr key={m.entry.id}>
-                <td>
-                  <div className="model-name">
-                    <strong>{m.entry.id}</strong>
-                    <span className="pill">{m.entry.kind === "vision" ? "Vision model" : "Projector"}</span>
-                  </div>
-                </td>
-                <td className="col-size">{humanSize(m.entry.size_bytes)}</td>
-                <td className="col-meter" title={`Speed ${m.entry.speed}/5`}>
-                  <span className="score-meter">{scoreMeter(m.entry.speed)}</span>
-                </td>
-                <td className="col-meter" title={`Accuracy ${m.entry.accuracy}/5`}>
-                  <span className="score-meter">{scoreMeter(m.entry.accuracy)}</span>
-                </td>
-                <td className="muted small col-note">{m.entry.note}</td>
-                <td>{renderStatus(m)}</td>
-                <td className="col-action">{renderActions(m)}</td>
-              </tr>
-            ))}
+            {visionModels.map((m) => {
+              const isSelected = (ai?.vision.local_model ?? "bonsai-27b") === m.entry.id;
+              const totalSize = m.entry.size_bytes + (m.entry.mmproj_size_bytes ?? 0);
+              return (
+                <tr key={m.entry.id} className={isSelected && visionBackend !== "server" ? "selected-row" : ""}>
+                  {visionBackend !== "server" && (
+                    <td className="col-radio">
+                      <input
+                        type="radio"
+                        name="vision-select"
+                        value={m.entry.id}
+                        checked={isSelected}
+                        onChange={() => applyPatch({ vision: { local_model: m.entry.id } })}
+                        title={`Use ${m.entry.id} for vision`}
+                      />
+                    </td>
+                  )}
+                  <td>
+                    <div className="model-name">
+                      <strong>{m.entry.id}</strong>
+                      {m.entry.mmproj_file_name && (
+                        <span className="pill" title={`Model + projector: ${m.entry.file_name}, ${m.entry.mmproj_file_name}`}>
+                          model + projector
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="col-size">{humanSize(totalSize)}</td>
+                  <td className="col-size">
+                    {m.entry.vram_mb != null ? `${m.entry.vram_mb >= 1024 ? `${(m.entry.vram_mb / 1024).toFixed(0)} GB` : `${m.entry.vram_mb} MB`}` : "—"}
+                  </td>
+                  <td className="col-meter" title={`Speed ${m.entry.speed}/5`}>
+                    <span className="score-meter">{scoreMeter(m.entry.speed)}</span>
+                  </td>
+                  <td className="col-meter" title={`Accuracy ${m.entry.accuracy}/5`}>
+                    <span className="score-meter">{scoreMeter(m.entry.accuracy)}</span>
+                  </td>
+                  <td className="muted small col-note">{m.entry.note}</td>
+                  <td>{renderStatus(m)}</td>
+                  <td className="col-action">{renderActions(m)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
 
+      {/* ── Search embeddings ── */}
       <h2>Search embeddings</h2>
+
+      {ai && (
+        <div className="card ai-settings-card">
+          <div>
+            <BackendSegmented
+              value={embedBackend}
+              onChange={(b) => applyPatch({ embed: { backend: b } })}
+            />
+          </div>
+
+          {(embedBackend === "server" || embedBackend === "auto") && (
+            <div className="settings-fields">
+              <div className="settings-field">
+                <label>URL</label>
+                <input
+                  type="text"
+                  defaultValue={ai.embed.url}
+                  placeholder="http://127.0.0.1:8091"
+                  onBlur={(e) => debouncedUrlPatch("embed.url", { embed: { url: e.currentTarget.value } })}
+                  onChange={(e) => debouncedUrlPatch("embed.url", { embed: { url: e.currentTarget.value } })}
+                />
+                <button
+                  className="ghost small"
+                  disabled={!!fetchingServerModels["embed"]}
+                  onClick={() => fetchServerModelList(ai.embed.url, setEmbedServerModels, "embed")}
+                >
+                  {fetchingServerModels["embed"] ? "…" : "Refresh"}
+                </button>
+              </div>
+              {embedServerModels.length > 0 && (
+                <div className="settings-field">
+                  <label>Model</label>
+                  <select value={ai.embed.model} onChange={(e) => applyPatch({ embed: { model: e.currentTarget.value } })}>
+                    {embedServerModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {embedProbe && (
+            <div className="probe-status">
+              <span className={embedProbe.cls}>{embedProbe.text}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="card table-card">
         <table className="models-table">
           <thead>
@@ -384,6 +709,9 @@ export default function ModelsPage() {
             ))}
           </tbody>
         </table>
+      </div>
+      <div className="embed-locked-note">
+        The embedding model is fixed to keep search indexes compatible between computers (AGENTS.md rule 3).
       </div>
     </main>
   );

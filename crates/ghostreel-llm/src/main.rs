@@ -27,8 +27,8 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
 use llama_cpp_2::mtmd::{MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::data::LlamaTokenData;
@@ -107,6 +107,22 @@ struct Vision<'a> {
     n_batch: u32,
 }
 
+fn format_prompt_with_template(model: &LlamaModel, user_message: &str) -> String {
+    if let Ok(tmpl) = model.chat_template(None)
+        && let Ok(msg) = LlamaChatMessage::new("user".to_string(), user_message.to_string())
+        && let Ok(mut text) = model.apply_chat_template(&tmpl, &[msg], true)
+    {
+        if text.ends_with("<|im_start|>assistant\n") {
+            text.push_str("<think>\n\n</think>\n\n");
+        } else if text.ends_with("<|im_start|>assistant") {
+            text.push_str("\n<think>\n\n</think>\n\n");
+        }
+        return text;
+    }
+    // Fallback: ChatML with thinking disabled
+    format!("<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+}
+
 impl Vision<'_> {
     fn sample(
         &mut self,
@@ -181,10 +197,8 @@ impl Vision<'_> {
         let t0 = Instant::now();
         self.ctx.clear_kv_cache();
         let marker = llama_cpp_2::mtmd::mtmd_default_marker();
-        // ChatML with thinking disabled (Qwen-style template used by Bonsai; same as the server's
-        // jinja output with enable_thinking=false).
-        let text =
-            format!("<|im_start|>user\n{marker}{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        let user_msg = format!("{marker}{prompt}");
+        let text = format_prompt_with_template(self.model, &user_msg);
         let bitmap = MtmdBitmap::from_file(&self.mtmd, image, false).map_err(|e| format!("image {image}: {e:?}"))?;
         let chunks = self
             .mtmd
@@ -204,11 +218,15 @@ impl Vision<'_> {
         let text = if prompt.starts_with("<|im_start|>") {
             if prompt.ends_with("<think>\n\n</think>\n\n") {
                 prompt.to_string()
+            } else if prompt.ends_with("<|im_start|>assistant\n") {
+                format!("{prompt}<think>\n\n</think>\n\n")
+            } else if prompt.ends_with("<|im_start|>assistant") {
+                format!("{prompt}\n<think>\n\n</think>\n\n")
             } else {
                 format!("{prompt}\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
             }
         } else {
-            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            format_prompt_with_template(self.model, prompt)
         };
         let chunks = self
             .mtmd

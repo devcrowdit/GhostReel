@@ -13,6 +13,7 @@ import {
   projectView,
   removeFolder,
   removeProject,
+  renameProject,
   search,
   type Hit,
   type ProjectView,
@@ -59,6 +60,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
   const [hits, setHits] = useState<Hit[] | null>(null);
   const [searchNote, setSearchNote] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+  const [editName, setEditName] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const tasks = useQueue();
 
@@ -76,6 +78,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     setSelected(null);
     setHits(null);
     setQuery("");
+    setEditName(null);
     refresh();
   }, [refresh]);
 
@@ -123,6 +126,24 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     if (ok) run(() => removeProject(projectId));
   };
 
+  const onRename = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (editName == null || !view) return;
+    const name = editName.trim();
+    if (!name || name === view.project.name) {
+      setEditName(null);
+      return;
+    }
+    try {
+      await renameProject(projectId, name);
+      setEditName(null);
+      await refresh();
+      onChanged();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const onSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     const q = query.trim();
@@ -158,7 +179,21 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     <main className={tab === "scripts" ? "wide" : ""}>
       <header>
         <div>
-          <h1>{p.name}</h1>
+          {editName != null ? (
+            <form className="rename" onSubmit={onRename}>
+              <input
+                autoFocus
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                onBlur={() => onRename()}
+                onKeyDown={(e) => e.key === "Escape" && setEditName(null)}
+              />
+            </form>
+          ) : (
+            <h1 className="editable" title="Click to rename" onClick={() => setEditName(p.name)}>
+              {p.name} <span className="edit-hint">✎</span>
+            </h1>
+          )}
           <p className="muted">
             {p.width}×{p.height} · {fpsLabel(p.fps_num, p.fps_den)} fps · {st.videos} videos ·{" "}
             {humanDuration(st.total_duration_s)} · {humanSize(st.total_size)}

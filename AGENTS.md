@@ -79,3 +79,9 @@ scripts/package-cli.sh                         # target/dist/ghostreel-cli-linux
 10. Video identity = content hash; `video_files` are locations, unique per *(folder, path)* so
     overlapping folders of different projects don't fight over a file.
 9. Don't create branches in `~/Code/ghostpen` or `~/Code/highllama`; work on main there.
+11. **Vision model selection** (`config.vision.local_model`): the catalog has 4 pairs (bonsai-27b,
+    gemma-3-4b-it, qwen2.5-vl-7b, qwen2.5-vl-3b); `models use <id>` checks the vision catalog
+    **before** the generic `whisper()` function (which accepts any valid name). `ghostreel-llm`
+    uses the model's own chat template via `apply_chat_template`; Qwen-style thinking is suppressed
+    by appending `<think>\n\n</think>\n\n` when the template emits the ChatML assistant header.
+    Known gap: non-Bonsai templates are untested on GPU.

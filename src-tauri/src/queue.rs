@@ -540,77 +540,109 @@ async fn run_download_model(
     let config = Config::load(&p.config_file).unwrap_or_default();
     let models_dir = ghostreel_core::models::effective_models_dir(&p, &config);
 
-    let (spec, size_bytes) = if let Some(e) = ghostreel_core::models::find_entry(model_id) {
-        (e.spec(), e.size_bytes)
-    } else if let Ok(s) = ghostreel_core::models::whisper(model_id) {
-        (s, 0)
-    } else {
+    let entry = ghostreel_core::models::find_entry(model_id);
+    let whisper_spec = if entry.is_none() { ghostreel_core::models::whisper(model_id).ok() } else { None };
+
+    if entry.is_none() && whisper_spec.is_none() {
         return Err(format!("unknown model '{model_id}'"));
+    }
+
+    let specs: Vec<(ghostreel_core::models::ModelSpec, u64)> = if let Some(ref e) = entry {
+        let mut v = vec![(e.spec(), e.size_bytes)];
+        if let Some(proj) = e.mmproj_spec() {
+            v.push((proj, e.mmproj_size_bytes.unwrap_or(0)));
+        }
+        v
+    } else {
+        vec![(whisper_spec.unwrap(), 0)]
     };
 
-    let size_str = if size_bytes > 0 { format!(" ({})", format_size(size_bytes)) } else { String::new() };
-    let note = format!("Downloading {}{size_str}", spec.file_name);
+    let mut last_path = String::new();
+    for (spec, size_bytes) in specs {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(TaskOutcome::Cancelled);
+        }
 
-    app.state::<Queue>()
-        .update(app, task_id, |t| {
-            t.note = Some(note);
-        })
-        .await;
+        let dest = models_dir.join(&spec.file_name);
+        if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            last_path = dest.to_string_lossy().to_string();
+            continue;
+        }
 
-    let app_clone = app.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
-    let file_name = spec.file_name.clone();
+        let size_str = if size_bytes > 0 { format!(" ({})", format_size(size_bytes)) } else { String::new() };
+        let note = format!("Downloading {}{size_str}", spec.file_name);
 
-    let forward = tauri::async_runtime::spawn(async move {
-        let t0 = std::time::Instant::now();
-        let mut last_emit = std::time::Instant::now();
-        while let Some((done, total_opt)) = rx.recv().await {
-            let total = total_opt.unwrap_or(size_bytes).max(1);
-            let is_final = done >= total;
-            if !is_final && last_emit.elapsed() < std::time::Duration::from_millis(200) {
-                continue;
+        app.state::<Queue>()
+            .update(app, task_id, |t| {
+                t.note = Some(note);
+            })
+            .await;
+
+        let app_clone = app.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
+        let file_name = spec.file_name.clone();
+
+        let forward = tauri::async_runtime::spawn(async move {
+            let t0 = std::time::Instant::now();
+            let mut last_emit = std::time::Instant::now();
+            while let Some((done, total_opt)) = rx.recv().await {
+                let total = total_opt.unwrap_or(size_bytes).max(1);
+                let is_final = done >= total;
+                if !is_final && last_emit.elapsed() < std::time::Duration::from_millis(200) {
+                    continue;
+                }
+                last_emit = std::time::Instant::now();
+                let frac = (done as f64 / total as f64).clamp(0.0, 1.0);
+                let elapsed = t0.elapsed().as_secs_f64();
+                let eta_secs = if frac > 0.01 && elapsed > 0.5 { Some((elapsed / frac) * (1.0 - frac)) } else { None };
+                let queue = app_clone.state::<Queue>();
+                queue
+                    .update(&app_clone, task_id, |t| {
+                        t.progress = Some(Progress {
+                            phase: "download_model".to_string(),
+                            phase_done: done,
+                            phase_total: total,
+                            fraction: frac,
+                            eta_secs,
+                            elapsed_secs: elapsed,
+                            current: Some(std::path::PathBuf::from(&file_name)),
+                        });
+                    })
+                    .await;
             }
-            last_emit = std::time::Instant::now();
-            let frac = (done as f64 / total as f64).clamp(0.0, 1.0);
-            let elapsed = t0.elapsed().as_secs_f64();
-            let eta_secs = if frac > 0.01 && elapsed > 0.5 { Some((elapsed / frac) * (1.0 - frac)) } else { None };
-            let queue = app_clone.state::<Queue>();
-            queue
-                .update(&app_clone, task_id, |t| {
-                    t.progress = Some(Progress {
-                        phase: "download_model".to_string(),
-                        phase_done: done,
-                        phase_total: total,
-                        fraction: frac,
-                        eta_secs,
-                        elapsed_secs: elapsed,
-                        current: Some(std::path::PathBuf::from(&file_name)),
-                    });
-                })
-                .await;
-        }
-    });
+        });
 
-    let download_fut = ghostreel_core::models::download(&spec, &models_dir, move |done, total| {
-        let _ = tx.send((done, total));
-    });
+        let download_fut = ghostreel_core::models::download(&spec, &models_dir, move |done, total| {
+            let _ = tx.send((done, total));
+        });
 
-    let cancel_fut = async {
-        while !cancel.load(Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-    };
+        let cancel_clone = cancel.clone();
+        let cancel_fut = async {
+            while !cancel_clone.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        };
 
-    let outcome = tokio::select! {
-        res = download_fut => {
-            let path = res.map_err(|e| e.to_string())?;
-            Ok(TaskOutcome::DownloadModel { path: path.to_string_lossy().to_string() })
-        }
-        _ = cancel_fut => {
-            Ok(TaskOutcome::Cancelled)
-        }
-    };
+        let outcome = tokio::select! {
+            res = download_fut => {
+                let path = res.map_err(|e| e.to_string())?;
+                last_path = path.to_string_lossy().to_string();
+                Ok(())
+            }
+            _ = cancel_fut => {
+                Err("cancelled".to_string())
+            }
+        };
 
-    let _ = forward.await;
-    outcome
+        let _ = forward.await;
+
+        if let Err(e) = outcome {
+            if e == "cancelled" {
+                return Ok(TaskOutcome::Cancelled);
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(TaskOutcome::DownloadModel { path: last_path })
 }

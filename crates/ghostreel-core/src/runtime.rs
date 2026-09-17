@@ -204,17 +204,22 @@ pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
         Target::Unavailable => return VisionSetup::Unavailable(resolution.reason),
         Target::Local => {}
     }
+    let (model, mmproj) = match models::vision_pair(&cfg.local_model) {
+        Some(pair) => pair,
+        None => {
+            return VisionSetup::Unavailable(format!("unknown vision model '{}'", cfg.local_model));
+        }
+    };
     let Some(helper) = locate_helper("ghostreel-llm") else {
         return VisionSetup::Unavailable("local model helper ghostreel-llm not found".into());
     };
     let models_dir = models::effective_models_dir(paths, config);
-    let (model, mmproj) = models::bonsai_vision();
     let roots = models::search_roots(&models_dir, &config.models.search_paths);
     let found = [&model, &mmproj].iter().filter_map(|s| models::find(&roots, &s.file_name)).collect();
     VisionSetup::Local { helper, models_dir, model, mmproj, found }
 }
 
-async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {
+pub async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {
     let cfg = &config.stt;
     let probe = match cfg.backend {
         Backend::Local => None,
@@ -267,5 +272,64 @@ mod tests {
         assert_eq!(auto_whisper_model(&[gpu(8192)]), "large-v3-turbo");
         assert_eq!(auto_whisper_model(&[gpu(4096)]), "small");
         assert_eq!(auto_whisper_model(&[]), "small");
+    }
+
+    #[tokio::test]
+    async fn resolve_vision_unknown_model_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths { config_file: dir.path().join("config.toml"), data_dir: dir.path().join("data") };
+        let mut cfg = Config::default();
+        cfg.vision.backend = Backend::Local;
+        cfg.vision.local_model = "nonexistent-model-xyz".into();
+
+        let setup = resolve_vision(&paths, &cfg).await;
+        match setup {
+            VisionSetup::Unavailable(why) => {
+                assert!(why.contains("unknown vision model 'nonexistent-model-xyz'"), "{why}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_vision_known_models_pick_correct_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_helper = dir.path().join("fake_llm");
+        std::fs::write(&fake_helper, b"fake helper").unwrap();
+        // Set env var so locate_helper finds it
+        unsafe {
+            std::env::set_var("GHOSTREEL_GHOSTREEL-LLM", &fake_helper);
+        }
+
+        let paths = Paths { config_file: dir.path().join("config.toml"), data_dir: dir.path().join("data") };
+
+        // Test default bonsai-27b
+        let mut cfg = Config::default();
+        cfg.vision.backend = Backend::Local;
+        cfg.vision.local_model = "bonsai-27b".into();
+        let setup = resolve_vision(&paths, &cfg).await;
+        match setup {
+            VisionSetup::Local { model, mmproj, .. } => {
+                assert_eq!(model.file_name, "Bonsai-27B-Q1_0.gguf");
+                assert_eq!(mmproj.file_name, "Bonsai-27B-mmproj-Q8_0.gguf");
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+
+        // Test gemma-3-4b-it
+        cfg.vision.local_model = "gemma-3-4b-it".into();
+        let setup = resolve_vision(&paths, &cfg).await;
+        match setup {
+            VisionSetup::Local { model, mmproj, .. } => {
+                assert_eq!(model.file_name, "gemma-3-4b-it-Q4_K_M.gguf");
+                assert_eq!(mmproj.file_name, "gemma-3-4b-it-mmproj-f16.gguf");
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+
+        // Clean up env var
+        unsafe {
+            std::env::remove_var("GHOSTREEL_GHOSTREEL-LLM");
+        }
     }
 }

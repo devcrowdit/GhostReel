@@ -6,14 +6,16 @@ mod queue;
 
 use std::path::PathBuf;
 
-use ghostreel_core::config::Config;
+use ghostreel_core::config::{Backend, Config, EMBED_MODEL};
 use ghostreel_core::db::Db;
 use ghostreel_core::doctor::{self, Report};
 use ghostreel_core::index::{self, FrameRow, Status, TranscriptSegment, VideoRow};
+use ghostreel_core::models;
 use ghostreel_core::paths::Paths;
+use ghostreel_core::probe::{self, Resolution};
 use ghostreel_core::projects::{Folder, NewProject, Project};
 use ghostreel_core::runtime;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 type CmdResult<T> = Result<T, String>;
@@ -65,6 +67,11 @@ fn create_project(name: String, fps_num: i64, fps_den: i64, width: i64, height: 
     open_db()?
         .create_project(&NewProject { name, description: String::new(), fps_num, fps_den, width, height })
         .map_err(err)
+}
+
+#[tauri::command]
+fn rename_project(project_id: i64, name: String) -> CmdResult<Project> {
+    open_db()?.rename_project(project_id, &name).map_err(err)
 }
 
 #[tauri::command]
@@ -255,6 +262,7 @@ struct ModelsStatusView {
     dir: PathBuf,
     models: Vec<ghostreel_core::models::ModelStatus>,
     current_whisper_model: String,
+    current_vision_model: String,
 }
 
 #[tauri::command]
@@ -264,7 +272,236 @@ fn models_status() -> CmdResult<ModelsStatusView> {
     let dir = ghostreel_core::models::effective_models_dir(&p, &config);
     let models = ghostreel_core::models::status(&dir, &config.models.search_paths);
     let current_whisper_model = config.stt.model;
-    Ok(ModelsStatusView { dir, models, current_whisper_model })
+    let current_vision_model = config.vision.local_model;
+    Ok(ModelsStatusView { dir, models, current_whisper_model, current_vision_model })
+}
+
+#[derive(Serialize, Deserialize)]
+struct VisionSettingsView {
+    backend: String,
+    url: String,
+    model: String,
+    local_model: String,
+    api_key_set: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SttSettingsView {
+    backend: String,
+    url: String,
+    model: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EmbedSettingsView {
+    backend: String,
+    url: String,
+    model: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AiSettingsView {
+    vision: VisionSettingsView,
+    stt: SttSettingsView,
+    embed: EmbedSettingsView,
+}
+
+#[derive(Deserialize, Default)]
+struct VisionSettingsPatch {
+    backend: Option<String>,
+    url: Option<String>,
+    model: Option<String>,
+    local_model: Option<String>,
+    api_key: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SttSettingsPatch {
+    backend: Option<String>,
+    url: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct EmbedSettingsPatch {
+    backend: Option<String>,
+    url: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct AiSettingsPatch {
+    vision: Option<VisionSettingsPatch>,
+    stt: Option<SttSettingsPatch>,
+    embed: Option<EmbedSettingsPatch>,
+}
+
+#[derive(Serialize)]
+struct BackendsResolutionView {
+    vision: Resolution,
+    embeddings: Resolution,
+    stt: Resolution,
+}
+
+#[tauri::command]
+fn get_ai_settings() -> CmdResult<AiSettingsView> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    Ok(AiSettingsView {
+        vision: VisionSettingsView {
+            backend: config.vision.backend.to_string(),
+            url: config.vision.url,
+            model: config.vision.model,
+            local_model: config.vision.local_model,
+            api_key_set: !config.vision.api_key.trim().is_empty(),
+        },
+        stt: SttSettingsView { backend: config.stt.backend.to_string(), url: config.stt.url, model: config.stt.model },
+        embed: EmbedSettingsView {
+            backend: config.embed.backend.to_string(),
+            url: config.embed.url,
+            model: config.embed.model,
+        },
+    })
+}
+
+#[tauri::command]
+async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchState>) -> CmdResult<AiSettingsView> {
+    let p = paths()?;
+    let mut config = Config::load(&p.config_file).unwrap_or_default();
+
+    fn parse_backend(s: &str) -> CmdResult<Backend> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Backend::Auto),
+            "local" => Ok(Backend::Local),
+            "server" => Ok(Backend::Server),
+            other => Err(format!("invalid backend '{other}'; expected 'auto', 'local', or 'server'")),
+        }
+    }
+
+    if let Some(v) = patch.vision {
+        if let Some(b) = v.backend {
+            config.vision.backend = parse_backend(&b)?;
+        }
+        if let Some(url) = v.url {
+            config.vision.url = url;
+        }
+        if let Some(model) = v.model {
+            config.vision.model = model;
+        }
+        if let Some(lm) = v.local_model {
+            if models::vision_pair(&lm).is_none()
+                && !models::find_entry(&lm).is_some_and(|e| e.kind == models::ModelKind::Vision)
+            {
+                return Err(format!("unknown local vision model '{lm}'"));
+            }
+            config.vision.local_model = lm;
+        }
+        if let Some(key) = v.api_key {
+            config.vision.api_key = key;
+        }
+    }
+
+    if let Some(s) = patch.stt {
+        if let Some(b) = s.backend {
+            config.stt.backend = parse_backend(&b)?;
+        }
+        if let Some(url) = s.url {
+            config.stt.url = url;
+        }
+        if let Some(model) = s.model {
+            // Reject vision catalog IDs (whisper() accepts any valid name, so we must
+            // explicitly exclude known vision entries to avoid ambiguity).
+            let is_vision = models::find_entry(&model).is_some_and(|e| e.kind == models::ModelKind::Vision);
+            let is_valid_whisper = model == "auto"
+                || models::find_entry(&model).is_some_and(|e| e.kind == models::ModelKind::Whisper)
+                || (!is_vision && models::whisper(&model).is_ok());
+            if !is_valid_whisper {
+                return Err(format!("unknown speech model '{model}'"));
+            }
+            config.stt.model = model;
+        }
+    }
+
+    let mut embed_changed = false;
+    if let Some(e) = patch.embed {
+        if let Some(b) = e.backend {
+            let parsed = parse_backend(&b)?;
+            if parsed != config.embed.backend {
+                embed_changed = true;
+                config.embed.backend = parsed;
+            }
+        }
+        if let Some(url) = e.url
+            && url != config.embed.url
+        {
+            embed_changed = true;
+            config.embed.url = url;
+        }
+        if let Some(model) = e.model
+            && !model.is_empty()
+            && model != EMBED_MODEL
+        {
+            return Err(format!("embedding model cannot be changed from {EMBED_MODEL}: vectors must remain portable"));
+        }
+    }
+
+    if embed_changed {
+        *search_state.0.lock().await = None;
+    }
+
+    config.save(&p.config_file).map_err(err)?;
+
+    Ok(AiSettingsView {
+        vision: VisionSettingsView {
+            backend: config.vision.backend.to_string(),
+            url: config.vision.url,
+            model: config.vision.model,
+            local_model: config.vision.local_model,
+            api_key_set: !config.vision.api_key.trim().is_empty(),
+        },
+        stt: SttSettingsView { backend: config.stt.backend.to_string(), url: config.stt.url, model: config.stt.model },
+        embed: EmbedSettingsView {
+            backend: config.embed.backend.to_string(),
+            url: config.embed.url,
+            model: config.embed.model,
+        },
+    })
+}
+
+#[tauri::command]
+async fn server_models(url: String) -> CmdResult<Vec<String>> {
+    probe::server_models(&url).await.map_err(err)
+}
+
+#[tauri::command]
+async fn probe_backends() -> CmdResult<BackendsResolutionView> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
+    let client = probe::probe_client();
+
+    let vision_probe = async {
+        match config.vision.backend {
+            Backend::Local => None,
+            _ => Some(probe::vision(&client, &config.vision.url, &config.vision.model).await),
+        }
+    };
+    let embed_probe = async {
+        match config.embed.backend {
+            Backend::Local => None,
+            _ => Some(probe::embeddings(&client, &config.embed.url, &config.embed.model).await),
+        }
+    };
+    let stt_probe = async {
+        match config.stt.backend {
+            Backend::Local => None,
+            _ => Some(probe::stt(&client, &config.stt.url).await),
+        }
+    };
+    let (vision_p, embed_p, stt_p) = tokio::join!(vision_probe, embed_probe, stt_probe);
+    let vision = probe::resolve(config.vision.backend, vision_p);
+    let embeddings = probe::resolve(config.embed.backend, embed_p);
+    let stt = probe::resolve(config.stt.backend, stt_p);
+    Ok(BackendsResolutionView { vision, embeddings, stt })
 }
 
 #[tauri::command]
@@ -445,6 +682,7 @@ pub fn run() {
             doctor,
             list_projects,
             create_project,
+            rename_project,
             remove_project,
             project_view,
             add_folder,
@@ -472,6 +710,10 @@ pub fn run() {
             remove_model,
             set_whisper_model,
             open_models_dir,
+            get_ai_settings,
+            set_ai_settings,
+            server_models,
+            probe_backends,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

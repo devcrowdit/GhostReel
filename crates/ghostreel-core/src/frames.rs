@@ -51,55 +51,64 @@ pub struct Frame {
 }
 
 /// Scene-change timestamps from one low-resolution decode. `on_progress` gets seconds decoded.
+///
+/// Every sampled frame prints its scene score (`metadata=print`), so progress advances steadily
+/// instead of only at cuts. Decoding uses CUDA when available (4K HEVC is ~8× faster than on the
+/// CPU); ffmpeg falls back to software decoding by itself when it isn't.
 pub async fn scene_times(
     ffmpeg: &Path,
     video: &Path,
     threshold: f64,
     mut on_progress: impl FnMut(f64),
 ) -> Result<Vec<f64>, Error> {
-    let filter = format!("fps=4,scale=256:-2,select='gt(scene\\,{threshold})',showinfo");
+    let filter = "fps=4,scale=256:-2,select='gte(scene\\,0)',metadata=print:key=lavfi.scene_score";
     let mut child = tokio::process::Command::new(ffmpeg)
-        .args(["-nostdin", "-hide_banner", "-nostats", "-i"])
+        .args(["-nostdin", "-hide_banner", "-nostats"])
+        .args(hwaccel_args())
+        .arg("-i")
         .arg(video)
-        .args(["-an", "-sn", "-dn", "-vf", &filter, "-f", "null", "-", "-progress", "pipe:1"])
-        .stdout(Stdio::piped())
+        .args(["-an", "-sn", "-dn", "-vf", filter, "-f", "null", "-"])
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| Error::Frames(format!("cannot run {}: {e}", ffmpeg.display())))?;
 
     let stderr = child.stderr.take().ok_or_else(|| Error::Frames("ffmpeg stderr unavailable".into()))?;
-    let showinfo = tokio::spawn(async move {
-        let mut times = Vec::new();
-        let mut last_error = String::new();
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(l)) = lines.next_line().await {
-            if l.contains("Parsed_showinfo") {
-                if let Some(t) = l.split("pts_time:").nth(1).and_then(|v| v.split_whitespace().next())
-                    && let Ok(t) = t.parse::<f64>()
-                {
-                    times.push(t);
-                }
-            } else if !l.trim().is_empty() {
-                last_error = l;
-            }
-        }
-        (times, last_error)
-    });
-
-    let stdout = child.stdout.take().ok_or_else(|| Error::Frames("ffmpeg stdout unavailable".into()))?;
-    let mut lines = BufReader::new(stdout).lines();
+    let mut times = Vec::new();
+    let mut last_error = String::new();
+    let mut pts = 0.0f64;
+    let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(l)) = lines.next_line().await {
-        if let Some(us) = l.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<i64>().ok()) {
-            on_progress(us.max(0) as f64 / 1e6);
+        if let Some(t) = l.split("pts_time:").nth(1).and_then(|v| v.split_whitespace().next()) {
+            if let Ok(t) = t.parse::<f64>() {
+                pts = t;
+                on_progress(t);
+            }
+        } else if let Some(score) = l.split("lavfi.scene_score=").nth(1) {
+            if score.trim().parse::<f64>().is_ok_and(|s| s > threshold) {
+                times.push(pts);
+            }
+        } else if !l.trim().is_empty() {
+            last_error = l;
         }
     }
     let status = child.wait().await.map_err(|e| Error::Frames(e.to_string()))?;
-    let (times, last_error) = showinfo.await.unwrap_or_default();
     if !status.success() {
         return Err(Error::Frames(format!("scene detection failed: {last_error}")));
     }
     Ok(times)
+}
+
+/// Hardware decoding for the full-length scan. macOS uses VideoToolbox; elsewhere CUDA (NVIDIA).
+fn hwaccel_args() -> &'static [&'static str] {
+    if std::env::var_os("GHOSTREEL_NO_HWACCEL").is_some() {
+        &[]
+    } else if cfg!(target_os = "macos") {
+        &["-hwaccel", "videotoolbox"]
+    } else {
+        &["-hwaccel", "cuda"]
+    }
 }
 
 /// Final sampling plan: an early frame, scene cuts (thinned to `min_interval_s`), and fillers so no
