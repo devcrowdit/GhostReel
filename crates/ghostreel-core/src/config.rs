@@ -55,12 +55,7 @@ pub struct VisionConfig {
 
 impl Default for VisionConfig {
     fn default() -> Self {
-        Self {
-            backend: Backend::Auto,
-            url: DEFAULT_VISION_URL.into(),
-            model: String::new(),
-            api_key: String::new(),
-        }
+        Self { backend: Backend::Auto, url: DEFAULT_VISION_URL.into(), model: String::new(), api_key: String::new() }
     }
 }
 
@@ -74,11 +69,7 @@ pub struct EmbedConfig {
 
 impl Default for EmbedConfig {
     fn default() -> Self {
-        Self {
-            backend: Backend::Auto,
-            url: DEFAULT_EMBED_URL.into(),
-            model: EMBED_MODEL.into(),
-        }
+        Self { backend: Backend::Auto, url: DEFAULT_EMBED_URL.into(), model: EMBED_MODEL.into() }
     }
 }
 
@@ -94,11 +85,7 @@ pub struct SttConfig {
 
 impl Default for SttConfig {
     fn default() -> Self {
-        Self {
-            backend: Backend::Auto,
-            url: DEFAULT_STT_URL.into(),
-            model: "auto".into(),
-        }
+        Self { backend: Backend::Auto, url: DEFAULT_STT_URL.into(), model: "auto".into() }
     }
 }
 

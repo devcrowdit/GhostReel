@@ -203,11 +203,9 @@ async fn tool(name: &str) -> Tool {
 
 pub async fn nvidia_gpus() -> Vec<Gpu> {
     let Some(smi) = locate("nvidia-smi") else { return Vec::new() };
-    let Some(csv) = output(
-        &smi,
-        &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader,nounits"],
-    )
-    .await
+    let Some(csv) =
+        output(&smi, &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader,nounits"])
+            .await
     else {
         return Vec::new();
     };

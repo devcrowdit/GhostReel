@@ -23,7 +23,7 @@ use crate::runtime::{Runtime, SttSetup};
 use crate::stt::{self, Engine};
 
 /// Pipeline stages in execution order.
-pub const STAGES: &[&str] = &["probe", "transcribe"];
+pub const STAGES: &[&str] = &["probe", "transcribe", "frames"];
 
 /// A failed job is retried on later runs until it has failed this many times.
 pub const MAX_ATTEMPTS: i64 = 3;
@@ -34,17 +34,45 @@ const PARALLEL_PROBE: usize = 4;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    ScanFolder { path: PathBuf },
-    FolderMissing { path: PathBuf },
-    Scanned { new: usize, changed: usize, unchanged: usize, removed: usize },
-    JobStarted { video_id: i64, stage: String, path: PathBuf },
-    JobDone { video_id: i64, stage: String },
-    JobFailed { video_id: i64, stage: String, error: String },
+    ScanFolder {
+        path: PathBuf,
+    },
+    FolderMissing {
+        path: PathBuf,
+    },
+    Scanned {
+        new: usize,
+        changed: usize,
+        unchanged: usize,
+        removed: usize,
+    },
+    JobStarted {
+        video_id: i64,
+        stage: String,
+        path: PathBuf,
+    },
+    JobDone {
+        video_id: i64,
+        stage: String,
+    },
+    JobFailed {
+        video_id: i64,
+        stage: String,
+        error: String,
+    },
     /// Which backend a stage uses in this run (e.g. "GhostPen @ http://127.0.0.1:8771").
-    StageBackend { stage: String, backend: String },
+    StageBackend {
+        stage: String,
+        backend: String,
+    },
     /// A stage can't run now; its jobs stay pending for a later run.
-    StageUnavailable { stage: String, reason: String },
-    DownloadingModel { file: String },
+    StageUnavailable {
+        stage: String,
+        reason: String,
+    },
+    DownloadingModel {
+        file: String,
+    },
     /// Overall progress and time remaining (throttled to ~4 per second).
     Progress(Progress),
 }
@@ -106,6 +134,7 @@ const PHASES: &[(&str, f64)] = &[
     ("download", 20_000_000.0),
     ("transcribe_server", 40.0),
     ("transcribe_local", 20.0),
+    ("frames", 40.0),
 ];
 
 /// Assumed length of a video whose duration isn't known yet (for the first estimate only).
@@ -142,6 +171,10 @@ pub async fn run(db: &mut Db, rt: &Runtime, opts: &Options, mut on_event: impl F
     tracker.set_total("hash", hash_work);
     // Upper bound until hashing tells us which files are genuinely new content.
     tracker.set_total("probe", already_queued + to_hash.len() as u64);
+    if rt.frames.is_some() {
+        let (known, unknown) = stage_work(db, "frames", opts)?;
+        tracker.set_total("frames", (known + (unknown as f64 + to_hash.len() as f64) * UNKNOWN_DURATION_S) as u64);
+    }
     let stt_phase = stt_phase(&rt.stt);
     if let Some(phase) = stt_phase {
         let (known, unknown) = transcribe_work(db, opts)?;
@@ -155,10 +188,9 @@ pub async fn run(db: &mut Db, rt: &Runtime, opts: &Options, mut on_event: impl F
     summary.new = new;
     summary.changed = changed;
     for w in &pending {
-        summary.removed += db.conn.execute(
-            "DELETE FROM video_files WHERE folder_id = ?1 AND last_seen < ?2",
-            params![w.folder_id, w.seq],
-        )?;
+        summary.removed += db
+            .conn
+            .execute("DELETE FROM video_files WHERE folder_id = ?1 AND last_seen < ?2", params![w.folder_id, w.seq])?;
     }
     on_event(Event::Scanned {
         new: summary.new,
@@ -173,6 +205,10 @@ pub async fn run(db: &mut Db, rt: &Runtime, opts: &Options, mut on_event: impl F
     summary.jobs_failed += failed;
 
     let (done, failed) = run_transcribe_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
+    summary.jobs_done += done;
+    summary.jobs_failed += failed;
+
+    let (done, failed) = run_frame_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
@@ -344,11 +380,7 @@ async fn hash_and_store(
             )?;
         }
         tx.commit()?;
-        if f.existed {
-            changed += 1
-        } else {
-            new += 1
-        }
+        if f.existed { changed += 1 } else { new += 1 }
     }
     Ok((new, changed))
 }
@@ -387,10 +419,7 @@ fn claimable_jobs(db: &Db, stage: &str, opts: &Options) -> Result<Vec<(i64, Path
     let rows = st.query_map(params![stage, max_attempts, opts.project_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
     })?;
-    Ok(rows
-        .filter_map(Result::ok)
-        .filter_map(|(id, path)| path.map(|p| (id, PathBuf::from(p))))
-        .collect())
+    Ok(rows.filter_map(Result::ok).filter_map(|(id, path)| path.map(|p| (id, PathBuf::from(p)))).collect())
 }
 
 fn set_job(db: &Db, video_id: i64, stage: &str, state: &str, error: Option<&str>) -> Result<(), Error> {
@@ -410,8 +439,18 @@ fn store_media(db: &Db, video_id: i64, m: &MediaInfo) -> Result<(), Error> {
                 status = 'probed', error = NULL
           WHERE id = ?12",
         params![
-            m.duration_s, m.width, m.height, m.rotation, m.fps, m.avg_fps, m.vfr, m.vcodec, m.acodec,
-            m.has_audio, m.created_time, video_id
+            m.duration_s,
+            m.width,
+            m.height,
+            m.rotation,
+            m.fps,
+            m.avg_fps,
+            m.vfr,
+            m.vcodec,
+            m.acodec,
+            m.has_audio,
+            m.created_time,
+            video_id
         ],
     )?;
     Ok(())
@@ -454,7 +493,8 @@ async fn run_probe_jobs(
             Err(e) => {
                 let msg = e.to_string();
                 set_job(db, video_id, STAGE, "failed", Some(&msg))?;
-                db.conn.execute("UPDATE videos SET status = 'error', error = ?1 WHERE id = ?2", params![msg, video_id])?;
+                db.conn
+                    .execute("UPDATE videos SET status = 'error', error = ?1 WHERE id = ?2", params![msg, video_id])?;
                 on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: msg });
                 failed += 1;
             }
@@ -529,9 +569,10 @@ async fn run_transcribe_jobs(
     let jobs = claimable_jobs(db, STAGE, opts)?;
     let Some(phase) = stt_phase(&rt.stt) else {
         if !jobs.is_empty()
-            && let SttSetup::Unavailable(reason) = &rt.stt {
-                on_event(Event::StageUnavailable { stage: STAGE.into(), reason: reason.clone() });
-            }
+            && let SttSetup::Unavailable(reason) = &rt.stt
+        {
+            on_event(Event::StageUnavailable { stage: STAGE.into(), reason: reason.clone() });
+        }
         return Ok((0, 0));
     };
     if jobs.is_empty() {
@@ -634,7 +675,140 @@ pub struct TranscriptSegment {
 pub fn transcript(db: &Db, video_id: i64) -> Result<Vec<TranscriptSegment>, Error> {
     let mut st =
         db.conn.prepare("SELECT start_s, end_s, text FROM transcript_segments WHERE video_id = ?1 ORDER BY start_s")?;
-    let rows = st.query_map([video_id], |r| Ok(TranscriptSegment { start: r.get(0)?, end: r.get(1)?, text: r.get(2)? }))?;
+    let rows =
+        st.query_map([video_id], |r| Ok(TranscriptSegment { start: r.get(0)?, end: r.get(1)?, text: r.get(2)? }))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+// ---- frames -------------------------------------------------------------------------------
+
+/// (seconds of video queued for `stage`, queued videos with unknown duration)
+fn stage_work(db: &Db, stage: &str, opts: &Options) -> Result<(f64, i64), Error> {
+    let max_attempts = if opts.retry_failed { i64::MAX } else { MAX_ATTEMPTS };
+    Ok(db.conn.query_row(
+        "SELECT COALESCE(SUM(v.duration_s), 0), COALESCE(SUM(v.duration_s IS NULL), 0)
+           FROM jobs j JOIN videos v ON v.id = j.video_id
+          WHERE j.stage = ?1
+            AND (j.state = 'pending' OR (j.state = 'failed' AND j.attempts < ?2))
+            AND EXISTS (SELECT 1 FROM video_files vf JOIN project_folders pf ON pf.folder_id = vf.folder_id
+                         WHERE vf.video_id = j.video_id AND (?3 IS NULL OR pf.project_id = ?3))",
+        params![stage, max_attempts, opts.project_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// `frames/<2 hex>/<hash>/` under the data dir (relative, so the data dir can move).
+fn frames_rel_dir(content_hash: &str) -> PathBuf {
+    let hex = content_hash.rsplit(':').next().unwrap_or(content_hash);
+    PathBuf::from("frames").join(&hex[..2.min(hex.len())]).join(hex)
+}
+
+fn store_frames(db: &mut Db, video_id: i64, data_dir: &Path, frames: &[crate::frames::Frame]) -> Result<(), Error> {
+    let tx = db.conn.transaction()?;
+    tx.execute("DELETE FROM frames WHERE video_id = ?1", [video_id])?;
+    for f in frames {
+        let rel = f.path.strip_prefix(data_dir).unwrap_or(&f.path).to_string_lossy().replace('\\', "/");
+        tx.execute(
+            "INSERT INTO frames(video_id, t_s, thumb_path, phash) VALUES (?1, ?2, ?3, ?4)",
+            params![video_id, f.t_s, rel, f.dhash as i64],
+        )?;
+    }
+    tx.execute(
+        "UPDATE jobs SET state = 'done', last_error = NULL, updated_at = ?1 WHERE video_id = ?2 AND stage = 'frames'",
+        params![now(), video_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+async fn run_frame_jobs(
+    db: &mut Db,
+    rt: &Runtime,
+    opts: &Options,
+    tracker: &mut Tracker,
+    on_event: &mut impl FnMut(Event),
+) -> Result<(usize, usize), Error> {
+    const STAGE: &str = "frames";
+    let Some(frame_opts) = rt.frames.clone() else { return Ok((0, 0)) };
+    let jobs = claimable_jobs(db, STAGE, opts)?;
+    if jobs.is_empty() {
+        tracker.set_total(STAGE, 0);
+        return Ok((0, 0));
+    }
+    let info: HashMap<i64, (f64, String)> = {
+        let mut st = db.conn.prepare("SELECT id, COALESCE(duration_s, 0), content_hash FROM videos")?;
+        st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect::<Result<_, _>>()?
+    };
+    let total: f64 = jobs.iter().map(|(id, _)| info.get(id).map(|i| i.0).unwrap_or(0.0)).sum();
+    tracker.set_total(STAGE, total.ceil() as u64);
+    tracker.start(STAGE);
+    on_event(Event::Progress(tracker.snapshot(None)));
+
+    let (mut done, mut failed) = (0, 0);
+    for (video_id, path) in jobs {
+        let Some((duration, hash)) = info.get(&video_id).cloned() else { continue };
+        set_job(db, video_id, STAGE, "running", None)?;
+        on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
+        let dir = rt.data_dir.join(frames_rel_dir(&hash));
+        // Start clean: a previous interrupted run may have left files.
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let mut credited = 0.0f64;
+        let result = crate::frames::extract_keyframes(&rt.ffmpeg, &path, duration, &dir, &frame_opts, |fraction| {
+            let secs = (fraction * duration).floor();
+            if secs > credited {
+                tracker.advance(STAGE, (secs - credited) as u64);
+                credited = secs;
+            }
+            if tracker.should_emit() {
+                on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
+            }
+        })
+        .await;
+        match result {
+            Ok(frames) => {
+                store_frames(db, video_id, &rt.data_dir, &frames)?;
+                on_event(Event::JobDone { video_id, stage: STAGE.into() });
+                done += 1;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                set_job(db, video_id, STAGE, "failed", Some(&msg))?;
+                on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: msg });
+                failed += 1;
+            }
+        }
+        if duration > credited {
+            tracker.advance(STAGE, (duration - credited).round() as u64);
+        }
+        on_event(Event::Progress(tracker.snapshot(Some(path))));
+    }
+    Ok((done, failed))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FrameRow {
+    pub id: i64,
+    pub t_s: f64,
+    /// Absolute path of the JPEG.
+    pub path: PathBuf,
+    pub description: Option<String>,
+    pub visible_text: Option<String>,
+}
+
+pub fn frames(db: &Db, data_dir: &Path, video_id: i64) -> Result<Vec<FrameRow>, Error> {
+    let mut st = db.conn.prepare(
+        "SELECT id, t_s, thumb_path, description_json, visible_text FROM frames WHERE video_id = ?1 ORDER BY t_s",
+    )?;
+    let rows = st.query_map([video_id], |r| {
+        let rel: String = r.get(2)?;
+        Ok(FrameRow {
+            id: r.get(0)?,
+            t_s: r.get(1)?,
+            path: data_dir.join(rel),
+            description: r.get(3)?,
+            visible_text: r.get(4)?,
+        })
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -680,6 +854,8 @@ pub struct VideoRow {
     pub segments: i64,
     /// State of the transcribe job (`pending`, `done`, `failed`, `skipped`, …).
     pub transcribe: Option<String>,
+    /// Keyframes stored.
+    pub frames: i64,
 }
 
 /// Videos visible to a project (or all), one row per content with its first path.
@@ -726,7 +902,8 @@ pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> 
         "SELECT v.id, sc.path, sc.copies, v.size, v.duration_s, v.width, v.height, v.fps, COALESCE(v.vfr, 0),
                 v.vcodec, v.has_audio, v.status, v.error, v.language,
                 (SELECT COUNT(*) FROM transcript_segments t WHERE t.video_id = v.id),
-                (SELECT j.state FROM jobs j WHERE j.video_id = v.id AND j.stage = 'transcribe')
+                (SELECT j.state FROM jobs j WHERE j.video_id = v.id AND j.stage = 'transcribe'),
+                (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id)
            FROM ({SCOPE}) sc JOIN videos v ON v.id = sc.video_id
           ORDER BY sc.path"
     ))?;
@@ -748,6 +925,7 @@ pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> 
             language: r.get(13)?,
             segments: r.get(14)?,
             transcribe: r.get(15)?,
+            frames: r.get(16)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -788,6 +966,8 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             ffmpeg: "ffmpeg".into(),
             ffprobe: ffprobe.to_path_buf(),
             stt: SttSetup::Unavailable("not configured in this test".into()),
+            data_dir: std::env::temp_dir(),
+            frames: None,
         }
     }
 
@@ -870,17 +1050,21 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         db.add_folder(p1.id, &media, true).unwrap();
         db.add_folder(p2.id, &media, true).unwrap();
 
-        let s = run(&mut db, &rt(&bin), &Options { project_id: Some(p1.id), ..Default::default() }, |_| {}).await.unwrap();
+        let s =
+            run(&mut db, &rt(&bin), &Options { project_id: Some(p1.id), ..Default::default() }, |_| {}).await.unwrap();
         assert_eq!(s.jobs_done, 1);
         // Project Two sees the already-probed video without any work.
-        let s = run(&mut db, &rt(&bin), &Options { project_id: Some(p2.id), ..Default::default() }, |_| {}).await.unwrap();
+        let s =
+            run(&mut db, &rt(&bin), &Options { project_id: Some(p2.id), ..Default::default() }, |_| {}).await.unwrap();
         assert_eq!((s.new, s.jobs_done), (0, 0));
         assert_eq!(status(&db, Some(p2.id)).unwrap().stages[0].done, 1);
 
         // Unmounted drive: folder missing → files are NOT dropped.
         std::fs::rename(&media, tmp.path().join("unplugged")).unwrap();
         let mut missing = false;
-        run(&mut db, &rt(&bin), &Options::default(), |e| missing |= matches!(e, Event::FolderMissing { .. })).await.unwrap();
+        run(&mut db, &rt(&bin), &Options::default(), |e| missing |= matches!(e, Event::FolderMissing { .. }))
+            .await
+            .unwrap();
         assert!(missing);
         assert_eq!(status(&db, None).unwrap().videos, 1);
     }
@@ -923,14 +1107,17 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         let watch = Options { project_id: Some(p.id), settle_secs: 3600, ..Default::default() };
         let s = run(&mut db, &rt(&bin), &watch, |_| {}).await.unwrap();
         assert_eq!((s.new, s.unsettled), (0, 1));
-        let s = run(&mut db, &rt(&bin), &Options { project_id: Some(p.id), ..Default::default() }, |_| {}).await.unwrap();
+        let s =
+            run(&mut db, &rt(&bin), &Options { project_id: Some(p.id), ..Default::default() }, |_| {}).await.unwrap();
         assert_eq!((s.new, s.unsettled), (1, 0));
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn transcribe_stage_end_to_end() {
-        let have = |b: &str| std::process::Command::new(b).arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
+        let have = |b: &str| {
+            std::process::Command::new(b).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+        };
         if !have("ffmpeg") || !have("ffprobe") {
             eprintln!("skipping: ffmpeg/ffprobe not installed");
             return;
@@ -949,7 +1136,26 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
                 .success();
             assert!(ok, "ffmpeg {out}");
         };
-        make(&["-f", "lavfi", "-i", "testsrc=size=160x120:rate=10", "-f", "lavfi", "-i", "sine=d=3", "-t", "3", "-c:v", "mpeg4", "-c:a", "aac", "-shortest"], "talk.mp4");
+        make(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=3",
+                "-t",
+                "3",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ],
+            "talk.mp4",
+        );
         make(&["-f", "lavfi", "-i", "testsrc=size=160x120:rate=10", "-t", "2", "-c:v", "mpeg4"], "silent.mp4");
 
         let asr = tmp.path().join("asr");
@@ -966,7 +1172,13 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         let opts = Options { project_id: Some(p.id), ..Default::default() };
 
         // 1. Transcription unavailable: probe runs, transcribe stays pending (not failed).
-        let unavailable = Runtime { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), stt: SttSetup::Unavailable("GhostPen down".into()) };
+        let unavailable = Runtime {
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+            stt: SttSetup::Unavailable("GhostPen down".into()),
+            data_dir: tmp.path().join("data"),
+            frames: None,
+        };
         let mut events = Vec::new();
         let s = run(&mut db, &unavailable, &opts, |e| events.push(e)).await.unwrap();
         assert_eq!((s.jobs_done, s.jobs_failed), (2, 0));
@@ -980,18 +1192,27 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         std::fs::write(&model, b"m").unwrap();
         let local = Runtime {
             stt: SttSetup::Ready(Engine::Local { asr_bin: asr, model, language: "auto".into() }),
+            frames: Some(crate::frames::FrameOptions::default()),
             ..unavailable
         };
         let mut events = Vec::new();
         let s = run(&mut db, &local, &opts, |e| events.push(e)).await.unwrap();
-        assert_eq!((s.jobs_done, s.jobs_failed), (1, 0));
+        assert_eq!((s.jobs_done, s.jobs_failed), (3, 0), "1 transcript + 2 frame jobs");
         let rows = videos(&db, Some(p.id)).unwrap();
         let talk = rows.iter().find(|v| v.path.ends_with("talk.mp4")).unwrap();
-        assert_eq!((talk.segments, talk.language.as_deref(), talk.transcribe.as_deref()), (1, Some("en"), Some("done")));
+        assert_eq!(
+            (talk.segments, talk.language.as_deref(), talk.transcribe.as_deref()),
+            (1, Some("en"), Some("done"))
+        );
         let silent = rows.iter().find(|v| v.path.ends_with("silent.mp4")).unwrap();
         assert_eq!(silent.transcribe.as_deref(), Some("skipped"));
         assert_eq!(transcript(&db, talk.id).unwrap()[0].text, "hello world");
-        let last = events.iter().rev().find_map(|e| if let Event::Progress(p) = e { Some(p.clone()) } else { None }).unwrap();
+        // Keyframes: both videos get frames stored under the data dir, paths resolve to files.
+        assert!(talk.frames >= 1 && silent.frames >= 1, "{} {}", talk.frames, silent.frames);
+        let fr = frames(&db, &local.data_dir, talk.id).unwrap();
+        assert!(fr.iter().all(|f| f.path.is_file() && f.path.starts_with(&local.data_dir)));
+        let last =
+            events.iter().rev().find_map(|e| if let Event::Progress(p) = e { Some(p.clone()) } else { None }).unwrap();
         assert_eq!(last.fraction, 1.0);
         assert!(events.iter().any(|e| matches!(e, Event::StageBackend { .. })));
 
@@ -1006,6 +1227,14 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         let first = IndexLock::acquire(tmp.path()).unwrap();
         assert!(matches!(IndexLock::acquire(tmp.path()), Err(Error::Busy(_))));
         drop(first);
-        assert!(IndexLock::acquire(tmp.path()).is_ok());
+        // Other tests spawn processes concurrently; a child can hold an inherited copy of the fd for
+        // an instant between fork and exec, so allow a short retry.
+        let reacquired = (0..50).any(|_| {
+            IndexLock::acquire(tmp.path()).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(reacquired);
     }
 }

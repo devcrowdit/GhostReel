@@ -87,7 +87,13 @@ pub async fn transcribe(
 }
 
 fn normalize(text: &str) -> String {
-    text.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whisper tends to repeat the previous sentence in long silences ("Chapter 5. The green…" twice,
@@ -208,9 +214,10 @@ fn parse_silences(log: &str) -> Vec<(f64, f64)> {
         if let Some(v) = line.split("silence_start: ").nth(1) {
             start = v.split_whitespace().next().and_then(|x| x.parse::<f64>().ok());
         } else if let Some(v) = line.split("silence_end: ").nth(1)
-            && let (Some(a), Some(b)) = (start.take(), v.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())) {
-                out.push((a.max(0.0), b));
-            }
+            && let (Some(a), Some(b)) = (start.take(), v.split_whitespace().next().and_then(|x| x.parse::<f64>().ok()))
+        {
+            out.push((a.max(0.0), b));
+        }
     }
     out
 }
@@ -244,7 +251,8 @@ async fn post_chunk(client: &reqwest::Client, url: &str, audio: Vec<u8>) -> Resu
         let text = resp.text().await.unwrap_or_default();
         return Err(Error::Stt(format!("GhostPen at {url}: HTTP {status} {}", text.trim())));
     }
-    let body: VerboseJson = resp.json().await.map_err(|e| Error::Stt(format!("GhostPen at {url}: bad response: {e}")))?;
+    let body: VerboseJson =
+        resp.json().await.map_err(|e| Error::Stt(format!("GhostPen at {url}: bad response: {e}")))?;
     if body.segments.is_none() {
         return Err(Error::Stt(format!("GhostPen at {url} returned no segments (update GhostPen)")));
     }
@@ -301,9 +309,19 @@ enum AsrLine {
         #[serde(default)]
         gpu: bool,
     },
-    Progress { percent: f64 },
-    Segment { start: f64, end: f64, text: String, #[serde(default)] no_speech: Option<f64> },
-    Done { language: Option<String> },
+    Progress {
+        percent: f64,
+    },
+    Segment {
+        start: f64,
+        end: f64,
+        text: String,
+        #[serde(default)]
+        no_speech: Option<f64>,
+    },
+    Done {
+        language: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -417,7 +435,13 @@ mod tests {
     fn chunk_seams_are_deduplicated() {
         let mut acc = Vec::new();
         // chunk 0 owns [0, 10); a segment starting at/after 10 belongs to chunk 1.
-        merge_chunk(&mut acc, 0.0, 0.0, 10.0, Some(vec![seg(0.0, 4.0, " one"), seg(4.0, 9.8, "two"), seg(10.0, 12.0, "Chap")]));
+        merge_chunk(
+            &mut acc,
+            0.0,
+            0.0,
+            10.0,
+            Some(vec![seg(0.0, 4.0, " one"), seg(4.0, 9.8, "two"), seg(10.0, 12.0, "Chap")]),
+        );
         // chunk 1 audio starts 2 s early (at 8): it re-hears "two" and hears "Chapter ten" whole.
         merge_chunk(
             &mut acc,
@@ -434,13 +458,29 @@ mod tests {
     #[test]
     fn repeated_sentences_in_silence_collapse() {
         let segs = vec![
-            seg(120.0, 126.0, "Chapter 5. The green light links twice, which means the boot loader found the operating system."),
-            seg(143.0, 150.0, "Chapter 5. The green light links twice, which means the boot loader found the operating system, and is starting the containers."),
+            seg(
+                120.0,
+                126.0,
+                "Chapter 5. The green light links twice, which means the boot loader found the operating system.",
+            ),
+            seg(
+                143.0,
+                150.0,
+                "Chapter 5. The green light links twice, which means the boot loader found the operating system, and is starting the containers.",
+            ),
             seg(174.0, 180.0, "Chapter 6. We open the provisioning page."),
             seg(181.0, 183.0, "Okay."),
             seg(184.0, 186.0, "Okay."),
-            seg(240.0, 246.0, "Chapter 9. The update is transactional, so if something fails the device rolls back automatically to the computer."),
-            seg(264.0, 270.0, "Chapter 9. The update is transactional, so if something fails the device rolls back automatically to the previous working revision."),
+            seg(
+                240.0,
+                246.0,
+                "Chapter 9. The update is transactional, so if something fails the device rolls back automatically to the computer.",
+            ),
+            seg(
+                264.0,
+                270.0,
+                "Chapter 9. The update is transactional, so if something fails the device rolls back automatically to the previous working revision.",
+            ),
             seg(346.0, 350.0, "[Music]"),
             seg(351.0, 352.0, "♪ ♪"),
         ];
@@ -524,7 +564,8 @@ echo '{"type":"done","language":"en","audio_s":2.0}'
             .status()
             .unwrap();
         let asr = tmp.path().join("asr");
-        std::fs::write(&asr, "#!/bin/sh\ncat >/dev/null\necho 'ghostreel-asr: loading model m: Failed' >&2\nexit 1\n").unwrap();
+        std::fs::write(&asr, "#!/bin/sh\ncat >/dev/null\necho 'ghostreel-asr: loading model m: Failed' >&2\nexit 1\n")
+            .unwrap();
         std::fs::set_permissions(&asr, std::fs::Permissions::from_mode(0o755)).unwrap();
         let engine = Engine::Local { asr_bin: asr, model: "m".into(), language: "auto".into() };
         let err = transcribe(&engine, Path::new("ffmpeg"), &video, 1.0, |_| {}).await.unwrap_err();

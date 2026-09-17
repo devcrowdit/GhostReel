@@ -46,7 +46,9 @@ fn parse_args() -> Result<Args, String> {
                 std::process::exit(0);
             }
             "-h" | "--help" => {
-                println!("usage: ghostreel-asr --model <ggml-*.bin> [--language auto|en|es…] [--threads N] [--cpu] < pcm_f32le_16k_mono");
+                println!(
+                    "usage: ghostreel-asr --model <ggml-*.bin> [--language auto|en|es…] [--threads N] [--cpu] < pcm_f32le_16k_mono"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}")),

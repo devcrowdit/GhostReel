@@ -6,15 +6,16 @@
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod frames;
 pub mod index;
 pub mod media;
 pub mod models;
 pub mod paths;
 pub mod probe;
 pub mod progress;
+pub mod projects;
 pub mod runtime;
 pub mod stt;
-pub mod projects;
 pub mod watch;
 
 use std::path::PathBuf;
@@ -39,6 +40,8 @@ pub enum Error {
     Probe(String),
     #[error("download failed: {0}")]
     Download(String),
+    #[error("frames: {0}")]
+    Frames(String),
     #[error("transcription: {0}")]
     Stt(String),
     #[error("another GhostReel process is already indexing ({0})")]

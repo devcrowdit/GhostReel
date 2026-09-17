@@ -22,10 +22,14 @@
       when unavailable), CLI `transcript [--srt|--json]`, app transcript column + panel with filter
 - [x] Indexing progress bar + ETA (learned per-stage rates)
 
-## Next — M3 (frames)
-- [ ] keyframe sampling: scene change + max interval, 1280 px long side, JPEG thumbs in `<data>/thumbs/<hash>/`
-- [ ] perceptual-hash dedupe (dHash), cap frames per minute
-- [ ] `frames` stage after probe; frames table rows; app: frame strip per video
+- [x] M3: keyframes — low-res scene detection pass + 20 s max gap fillers, 1280 px JPEGs, dHash dedupe
+      with 60 s coverage floor, `frames` stage, `ghostreel frames <id>`, app frame strip (asset protocol)
+
+## Next — M4 (frame descriptions)
+- [ ] vision backend: `OpenAiServer` (highllama) with JSON-schema response_format, thinking off
+- [ ] local vision: decide helper process (`ghostreel-vlm`, llama-cpp-2 CUDA) vs in-process; model manager
+- [ ] `describe` stage (frame JSON: description, visible_text, objects, setting, shot, tags) with transcript context
+- [ ] app: descriptions under frames
 
 ## Open / to review with Sergio
 - [ ] Visual check of M2 UI (monitors were asleep during the night run; app built fine, logic tested)

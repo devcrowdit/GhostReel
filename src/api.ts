@@ -1,4 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+
+export const fileUrl = (path: string) => convertFileSrc(path);
 
 // Mirrors ghostreel-core's doctor::Report (serde field names).
 export type Target = "server" | "local" | "unavailable";
@@ -127,7 +129,18 @@ export interface VideoRow {
   language: string | null;
   segments: number;
   transcribe: string | null;
+  frames: number;
 }
+
+export interface FrameRow {
+  id: number;
+  t_s: number;
+  path: string;
+  description: string | null;
+  visible_text: string | null;
+}
+
+export const videoFrames = (videoId: number) => invoke<FrameRow[]>("video_frames", { videoId });
 
 export interface TranscriptSegment {
   start: number;
@@ -172,6 +185,7 @@ export const PHASE_LABELS: Record<string, string> = {
   download: "Downloading speech model",
   transcribe_server: "Transcribing (GhostPen)",
   transcribe_local: "Transcribing",
+  frames: "Picking keyframes",
 };
 
 /** "a few seconds", "42 s", "about 2 min", "about 1 h 20 min" — same wording as the CLI. */

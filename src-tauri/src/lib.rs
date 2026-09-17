@@ -4,13 +4,13 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ghostreel_core::config::Config;
 use ghostreel_core::db::Db;
 use ghostreel_core::doctor::{self, Report};
-use ghostreel_core::config::Config;
-use ghostreel_core::index::{self, IndexLock, Status, TranscriptSegment, VideoRow};
-use ghostreel_core::runtime;
+use ghostreel_core::index::{self, FrameRow, IndexLock, Status, TranscriptSegment, VideoRow};
 use ghostreel_core::paths::Paths;
 use ghostreel_core::projects::{Folder, NewProject, Project};
+use ghostreel_core::runtime;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -173,6 +173,12 @@ fn video_transcript(video_id: i64) -> CmdResult<Vec<TranscriptSegment>> {
 }
 
 #[tauri::command]
+fn video_frames(video_id: i64) -> CmdResult<Vec<FrameRow>> {
+    let p = paths()?;
+    index::frames(&Db::open(&p.db_file()).map_err(err)?, &p.data_dir, video_id).map_err(err)
+}
+
+#[tauri::command]
 fn is_indexing(state: State<'_, Indexing>) -> bool {
     state.0.load(Ordering::SeqCst)
 }
@@ -197,6 +203,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Indexing::default())
+        .setup(|app| {
+            // Frames/thumbnails are served from the data dir via the asset protocol; scope it
+            // at runtime because GHOSTREEL_DATA can move it.
+            use tauri::Manager;
+            if let Ok(p) = Paths::resolve() {
+                let _ = std::fs::create_dir_all(&p.data_dir);
+                app.asset_protocol_scope().allow_directory(&p.data_dir, true)?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             doctor,
             list_projects,
@@ -208,6 +224,7 @@ pub fn run() {
             start_index,
             is_indexing,
             video_transcript,
+            video_frames,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

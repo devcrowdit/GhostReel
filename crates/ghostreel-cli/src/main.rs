@@ -72,6 +72,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List a video's keyframes (JPEG paths).
+    Frames {
+        video_id: i64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show indexing progress.
     Status {
         #[arg(long, short)]
@@ -173,6 +179,19 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Status { project, videos, json } => status_cmd(&paths, project.as_deref(), videos, json),
         Command::Transcript { video_id, srt, json } => transcript_cmd(&paths, video_id, srt, json),
+        Command::Frames { video_id, json } => {
+            let rows = index::frames(&open_db(&paths)?, &paths.data_dir, video_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("no frames for video #{video_id} yet");
+            } else {
+                for f in rows {
+                    println!("[{}] {}", human_duration(f.t_s), f.path.display());
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Config { action } => {
             match action {
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
@@ -234,7 +253,13 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
         ProjectAction::Create { name, description, fps, width, height } => {
             let (fps_num, fps_den) = parse_fps(&fps)?;
             let p = db.create_project(&NewProject { name, description, fps_num, fps_den, width, height })?;
-            println!("created project '{}' ({}x{} @ {} fps)", p.name, p.width, p.height, fps_label(p.fps_num, p.fps_den));
+            println!(
+                "created project '{}' ({}x{} @ {} fps)",
+                p.name,
+                p.width,
+                p.height,
+                fps_label(p.fps_num, p.fps_den)
+            );
         }
         ProjectAction::List { json } => {
             let projects = db.projects()?;
@@ -245,7 +270,15 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
             } else {
                 for p in projects {
                     let st = index::status(&db, Some(p.id))?;
-                    println!("{:<24} {:>3} folders {:>5} videos  {}x{} @ {}", p.name, st.folders, st.videos, p.width, p.height, fps_label(p.fps_num, p.fps_den));
+                    println!(
+                        "{:<24} {:>3} folders {:>5} videos  {}x{} @ {}",
+                        p.name,
+                        st.folders,
+                        st.videos,
+                        p.width,
+                        p.height,
+                        fps_label(p.fps_num, p.fps_den)
+                    );
                 }
             }
         }
@@ -254,7 +287,12 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
             let folders = db.folders(Some(p.id))?;
             let st = index::status(&db, Some(p.id))?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "project": p, "folders": folders, "status": st }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "project": p, "folders": folders, "status": st })
+                    )?
+                );
             } else {
                 println!("{} — {}x{} @ {} fps", p.name, p.width, p.height, fps_label(p.fps_num, p.fps_den));
                 if !p.description.is_empty() {
@@ -299,7 +337,13 @@ fn folder_cmd(paths: &Paths, action: FolderAction) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_failed: bool, json: bool) -> anyhow::Result<ExitCode> {
+async fn index_cmd(
+    paths: &Paths,
+    project: Option<&str>,
+    watch: bool,
+    retry_failed: bool,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
     let mut db = open_db(paths)?;
     let pid = project_id(&db, project)?;
     let config = Config::load(&paths.config_file)?;
@@ -371,8 +415,12 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
         }
         failed_total += s.jobs_failed;
         if !json {
-            println!("done: {} jobs ok, {} failed{}", s.jobs_done, s.jobs_failed,
-                if s.unsettled > 0 { format!(", {} still copying", s.unsettled) } else { String::new() });
+            println!(
+                "done: {} jobs ok, {} failed{}",
+                s.jobs_done,
+                s.jobs_failed,
+                if s.unsettled > 0 { format!(", {} still copying", s.unsettled) } else { String::new() }
+            );
         }
         if !watch {
             break;
@@ -411,6 +459,7 @@ fn progress_line(p: &Progress) -> String {
         "probe" => "video details",
         "download" => "downloading model",
         "transcribe_server" | "transcribe_local" => "transcribing",
+        "frames" => "keyframes",
         other => other,
     };
     format!(
@@ -453,8 +502,13 @@ fn human_duration(s: f64) -> String {
 }
 
 fn print_status(st: &index::Status) {
-    println!("  {} videos, {}, {} of footage{}", st.videos, human_size(st.total_size), human_duration(st.total_duration_s),
-        if st.vfr_videos > 0 { format!(", {} variable-frame-rate", st.vfr_videos) } else { String::new() });
+    println!(
+        "  {} videos, {}, {} of footage{}",
+        st.videos,
+        human_size(st.total_size),
+        human_duration(st.total_duration_s),
+        if st.vfr_videos > 0 { format!(", {} variable-frame-rate", st.vfr_videos) } else { String::new() }
+    );
     for c in &st.stages {
         let skipped = if c.skipped > 0 { format!(", {} skipped", c.skipped) } else { String::new() };
         println!(
@@ -500,12 +554,24 @@ fn status_cmd(paths: &Paths, project: Option<&str>, videos: bool, json: bool) ->
     println!("{}", project.map(|p| format!("Project {p}")).unwrap_or_else(|| "All projects".into()));
     print_status(&st);
     for v in rows.unwrap_or_default() {
-        let dims = match (v.width, v.height) { (Some(w), Some(h)) => format!("{w}x{h}"), _ => "-".into() };
+        let dims = match (v.width, v.height) {
+            (Some(w), Some(h)) => format!("{w}x{h}"),
+            _ => "-".into(),
+        };
         let fps = v.fps.map(|f| format!("{f:.2}fps")).unwrap_or_default();
         let dur = v.duration_s.map(human_duration).unwrap_or_else(|| "-".into());
-        let flags = format!("{}{}{}{}", if v.vfr { " VFR" } else { "" }, if v.has_audio == Some(false) { " no-audio" } else { "" },
-            if v.segments > 0 { format!(" 📝{}{}", v.segments, v.language.as_deref().map(|l| format!(" {l}")).unwrap_or_default()) } else { String::new() },
-            if v.copies > 1 { format!(" ×{}", v.copies) } else { String::new() });
+        let flags = format!(
+            "{}{}{}{}{}",
+            if v.vfr { " VFR" } else { "" },
+            if v.has_audio == Some(false) { " no-audio" } else { "" },
+            if v.segments > 0 {
+                format!(" 📝{}{}", v.segments, v.language.as_deref().map(|l| format!(" {l}")).unwrap_or_default())
+            } else {
+                String::new()
+            },
+            if v.frames > 0 { format!(" 🖼{}", v.frames) } else { String::new() },
+            if v.copies > 1 { format!(" ×{}", v.copies) } else { String::new() }
+        );
         println!("  #{:<4} {:<8} {:>7} {:>9} {:<9}{} {}", v.id, v.status, dur, dims, fps, flags, v.path.display());
         if let Some(e) = v.error {
             println!("        {e}");
@@ -540,7 +606,11 @@ fn print_backend(name: &str, r: &Resolution) {
 
 fn print_report(r: &Report) {
     println!("GhostReel {}", r.version);
-    println!("  config  {}{}", r.config_file.display(), r.config_error.as_ref().map(|e| format!("  ✗ {e}")).unwrap_or_default());
+    println!(
+        "  config  {}{}",
+        r.config_file.display(),
+        r.config_error.as_ref().map(|e| format!("  ✗ {e}")).unwrap_or_default()
+    );
     println!("  data    {}", r.data_dir.display());
 
     println!("\nDatabase");
@@ -567,10 +637,7 @@ fn print_report(r: &Report) {
         println!("  - no NVIDIA GPU detected (local models would run on CPU)");
     }
     for g in &r.gpu {
-        println!(
-            "  ✓ {} — {} / {} MiB used, driver {}",
-            g.name, g.vram_used_mib, g.vram_total_mib, g.driver
-        );
+        println!("  ✓ {} — {} / {} MiB used, driver {}", g.name, g.vram_used_mib, g.vram_total_mib, g.driver);
     }
 
     println!("\nAI backends");

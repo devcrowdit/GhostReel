@@ -22,16 +22,11 @@ impl Paths {
     pub fn resolve() -> Result<Self, Error> {
         let config_file = match std::env::var_os("GHOSTREEL_CONFIG") {
             Some(p) => PathBuf::from(p),
-            None => dirs::config_dir()
-                .ok_or(Error::NoHomeDir("config"))?
-                .join("ghostreel")
-                .join("config.toml"),
+            None => dirs::config_dir().ok_or(Error::NoHomeDir("config"))?.join("ghostreel").join("config.toml"),
         };
         let data_dir = match std::env::var_os("GHOSTREEL_DATA") {
             Some(p) => PathBuf::from(p),
-            None => dirs::data_local_dir()
-                .ok_or(Error::NoHomeDir("data"))?
-                .join("ghostreel"),
+            None => dirs::data_local_dir().ok_or(Error::NoHomeDir("data"))?.join("ghostreel"),
         };
         Ok(Self { config_file, data_dir })
     }

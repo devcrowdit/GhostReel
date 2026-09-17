@@ -18,7 +18,12 @@ use crate::stt::Engine;
 pub enum SttSetup {
     Ready(Engine),
     /// Local whisper is chosen but the model file must be downloaded first.
-    NeedsModel { spec: ModelSpec, dir: PathBuf, asr_bin: PathBuf, language: String },
+    NeedsModel {
+        spec: ModelSpec,
+        dir: PathBuf,
+        asr_bin: PathBuf,
+        language: String,
+    },
     /// Can't transcribe now (jobs stay pending and are retried by a later run).
     Unavailable(String),
 }
@@ -38,6 +43,10 @@ pub struct Runtime {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
     pub stt: SttSetup,
+    /// Where frames and other derived files live.
+    pub data_dir: PathBuf,
+    /// Keyframe extraction settings; `None` disables the frames stage (tests).
+    pub frames: Option<crate::frames::FrameOptions>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,11 +76,18 @@ pub fn locate_asr() -> Option<PathBuf> {
 }
 
 pub async fn resolve(paths: &Paths, config: &Config) -> Result<Runtime, crate::Error> {
-    let ffmpeg = locate("ffmpeg").ok_or_else(|| crate::Error::Invalid("ffmpeg not found (see `ghostreel doctor`)".into()))?;
+    let ffmpeg =
+        locate("ffmpeg").ok_or_else(|| crate::Error::Invalid("ffmpeg not found (see `ghostreel doctor`)".into()))?;
     let ffprobe =
         locate("ffprobe").ok_or_else(|| crate::Error::Invalid("ffprobe not found (see `ghostreel doctor`)".into()))?;
     let stt = resolve_stt(paths, config).await;
-    Ok(Runtime { ffmpeg, ffprobe, stt })
+    Ok(Runtime {
+        ffmpeg,
+        ffprobe,
+        stt,
+        data_dir: paths.data_dir.clone(),
+        frames: Some(crate::frames::FrameOptions::default()),
+    })
 }
 
 async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {

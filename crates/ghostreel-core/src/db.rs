@@ -182,9 +182,7 @@ fn register_sqlite_vec() {
         // documented way to load a statically linked extension.
         unsafe {
             #[allow(clippy::missing_transmute_annotations)]
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())));
         }
     });
 }
@@ -250,8 +248,7 @@ impl Db {
                     params![EMBED_MODEL, EMBED_DIM.to_string()],
                 )?;
             }
-            let violations: i64 =
-                tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+            let violations: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
             if violations > 0 {
                 return Err(Error::Migration(format!("v{} left {violations} foreign key violations", i + 1)));
             }
@@ -261,10 +258,7 @@ impl Db {
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>, Error> {
-        Ok(self
-            .conn
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
-            .optional()?)
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
     /// sqlite-vec version string, proving the extension is loaded.
@@ -334,11 +328,7 @@ mod tests {
     fn fts_and_vector_search_work_together() {
         let db = Db::open_in_memory().unwrap();
         let c = &db.conn;
-        c.execute(
-            "INSERT INTO videos(content_hash, size) VALUES ('h', 1)",
-            [],
-        )
-        .unwrap();
+        c.execute("INSERT INTO videos(content_hash, size) VALUES ('h', 1)", []).unwrap();
         for (text, axis) in [("person unboxing a raspberry pi", 0usize), ("cat sleeping on a sofa", 1)] {
             c.execute(
                 "INSERT INTO chunks(video_id, kind, start_s, end_s, text) VALUES (1, 'moment', 0, 5, ?1)",
@@ -349,32 +339,27 @@ mod tests {
             let mut v = vec![0f32; EMBED_DIM];
             v[axis] = 1.0;
             let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-            c.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES (?1, ?2)", params![id, blob])
-                .unwrap();
+            c.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES (?1, ?2)", params![id, blob]).unwrap();
         }
 
-        let fts: i64 = c
-            .query_row("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'unboxing'", [], |r| r.get(0))
-            .unwrap();
+        let fts: i64 =
+            c.query_row("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'unboxing'", [], |r| r.get(0)).unwrap();
         assert_eq!(fts, 1);
 
         let mut q = vec![0f32; EMBED_DIM];
         q[1] = 1.0;
         let blob: Vec<u8> = q.iter().flat_map(|f| f.to_le_bytes()).collect();
         let nearest: i64 = c
-            .query_row(
-                "SELECT rowid FROM chunks_vec WHERE embedding MATCH ?1 ORDER BY distance LIMIT 1",
-                [blob],
-                |r| r.get(0),
-            )
+            .query_row("SELECT rowid FROM chunks_vec WHERE embedding MATCH ?1 ORDER BY distance LIMIT 1", [blob], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(nearest, 2);
 
         // Deleting a chunk keeps FTS in sync.
         c.execute("DELETE FROM chunks WHERE id = 1", []).unwrap();
-        let n: i64 = c
-            .query_row("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'unboxing'", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 =
+            c.query_row("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'unboxing'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
     }
 }

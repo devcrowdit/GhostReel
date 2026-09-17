@@ -120,9 +120,10 @@ pub async fn download(
     file.flush().await.map_err(|e| Error::Io(part.clone(), e))?;
     drop(file);
     if let Some(t) = total
-        && done != t {
-            return Err(Error::Download(format!("{}: incomplete ({done} of {t} bytes)", spec.url)));
-        }
+        && done != t
+    {
+        return Err(Error::Download(format!("{}: incomplete ({done} of {t} bytes)", spec.url)));
+    }
     tokio::fs::rename(&part, &dest).await.map_err(|e| Error::Io(dest.clone(), e))?;
     Ok(dest)
 }
@@ -165,15 +166,20 @@ mod tests {
                     let mut buf = vec![0u8; 4096];
                     let n = sock.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
-                    let from = req
-                        .lines()
-                        .find_map(|l| l.strip_prefix("range: bytes="))
-                        .and_then(|r| r.trim_end_matches('-').trim_end_matches("-\r").trim().trim_end_matches('-').parse::<usize>().ok());
+                    let from = req.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| {
+                        r.trim_end_matches('-')
+                            .trim_end_matches("-\r")
+                            .trim()
+                            .trim_end_matches('-')
+                            .parse::<usize>()
+                            .ok()
+                    });
                     let (status, slice) = match from {
                         Some(f) => ("206 Partial Content", &body[f..]),
                         None => ("200 OK", &body[..]),
                     };
-                    let head = format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", slice.len());
+                    let head =
+                        format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", slice.len());
                     let _ = sock.write_all(head.as_bytes()).await;
                     let _ = sock.write_all(slice).await;
                 });

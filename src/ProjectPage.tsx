@@ -13,7 +13,10 @@ import {
   removeFolder,
   removeProject,
   startIndex,
+  fileUrl,
+  videoFrames,
   videoTranscript,
+  type FrameRow,
   type IndexEvent,
   type TranscriptSegment,
   type VideoRow,
@@ -50,11 +53,15 @@ function TranscriptCell({ v }: { v: VideoRow }) {
 
 function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => void }) {
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
+  const [frames, setFrames] = useState<FrameRow[]>([]);
   const [filter, setFilter] = useState("");
   useEffect(() => {
     setSegments(null);
     videoTranscript(video.id).then(setSegments).catch(() => setSegments([]));
   }, [video.id, video.segments]);
+  useEffect(() => {
+    videoFrames(video.id).then(setFrames).catch(() => setFrames([]));
+  }, [video.id, video.frames]);
   const q = filter.trim().toLowerCase();
   const shown = (segments ?? []).filter((s) => !q || s.text.toLowerCase().includes(q));
   return (
@@ -68,6 +75,16 @@ function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => v
           Close
         </button>
       </div>
+      {frames.length > 0 && (
+        <div className="frame-strip">
+          {frames.map((f) => (
+            <figure key={f.id} title={f.description ?? `${clock(f.t_s)}`}>
+              <img src={fileUrl(f.path)} alt="" loading="lazy" />
+              <figcaption>{clock(f.t_s)}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
       {segments && segments.length > 0 && (
         <input placeholder="Find in transcript…" value={filter} onChange={(e) => setFilter(e.target.value)} />
       )}

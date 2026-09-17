@@ -10,9 +10,8 @@ use serde_json::Value;
 use crate::Error;
 
 /// File extensions treated as video.
-pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "mts", "m2ts", "ts", "mxf", "mpg", "mpeg", "3gp",
-];
+pub const VIDEO_EXTENSIONS: &[&str] =
+    &["mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "mts", "m2ts", "ts", "mxf", "mpg", "mpeg", "3gp"];
 
 pub fn is_video_path(path: &Path) -> bool {
     path.extension()

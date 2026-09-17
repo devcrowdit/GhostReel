@@ -50,10 +50,7 @@ impl NewProject {
 }
 
 pub fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
@@ -158,9 +155,10 @@ impl Db {
             params![path_str, recursive, now()],
         )?;
         let folder_id: i64 = tx.query_row("SELECT id FROM folders WHERE path = ?1", [&path_str], |r| r.get(0))?;
-        let n = tx.execute("INSERT OR IGNORE INTO project_folders(project_id, folder_id) VALUES (?1, ?2)", params![
-            project_id, folder_id
-        ])?;
+        let n = tx.execute(
+            "INSERT OR IGNORE INTO project_folders(project_id, folder_id) VALUES (?1, ?2)",
+            params![project_id, folder_id],
+        )?;
         if n == 0 && !existing.contains(&path_str) {
             return Err(Error::NotFound(format!("project #{project_id}")));
         }
