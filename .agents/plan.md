@@ -566,3 +566,15 @@ Built on Arch, CUDA 13 toolkit (`/opt/cuda`), `CMAKE_CUDA_ARCHITECTURES=89`.
 - **Still open for S0 on Windows (her 3070)**: CUDA build with MSVC, shipping cuBLAS DLLs,
   `dynamic-backends` CPU fallback when no NVIDIA driver, real VRAM with the Windows desktop,
   whisper large-v3-turbo.
+
+### 2026-09-17 — standalone run (no servers), RTX 4070, local helpers only
+Test library: 6 videos, 8 m 34 s. `ghostreel index` end to end: **1 m 14 s**, 0 failures.
+| stage | backend | notes |
+|---|---|---|
+| transcribe | local whisper large-v3-turbo (`ghostreel-asr`, CUDA) | peak **1994 MiB** VRAM |
+| frames | ffmpeg | 14 frames |
+| describe | local Bonsai-27B-Q1_0 + mmproj (`ghostreel-llm`, CUDA) | peak **5526 MiB** VRAM, ~4 s/frame |
+| embed | local embeddinggemma (`ghostreel-llm`, CPU) | load 0.34 s |
+- Helpers never overlap on the GPU (asr exits before llm starts) → max 5.5 GB, fits the 3070.
+- **Local vs highllama embeddings: cosine 0.999748** → indexes are portable between profiles (§2c).
+- Search results equivalent to the server profile ("wifi password" → Chapter 6, "fractal" → scenes).

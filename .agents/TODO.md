@@ -37,7 +37,7 @@
 ## Next
 - [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel
 - [ ] M6: player (asset protocol for project folders), seek to hit/segment/frame, transcript sync
-- [ ] Verify `ghostreel-llm` CUDA build end-to-end (describe + embed) and compare local vs server vectors
+- [x] Standalone run verified: local asr+llm, 1m14s for 8.5 min footage, peak VRAM 5.5 GB, embeddings cosine 0.9997 vs highllama
 
 ## Open / to review with Sergio
 - [ ] Visual check of M2 UI (monitors were asleep during the night run; app built fine, logic tested)
