@@ -28,5 +28,5 @@ targets=("$@")
 # One crate at a time: both vendor a large CUDA ggml build.
 for t in "${targets[@]}"; do
   echo "building ghostreel-$t ($profile) ${features:-cpu}"
-  cargo build -j 4 --profile "$profile" -p "ghostreel-$t" $features
+  cargo build -j "${JOBS:-4}" --profile "$profile" -p "ghostreel-$t" $features
 done

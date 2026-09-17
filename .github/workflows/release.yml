@@ -61,11 +61,11 @@ jobs:
   linux-x64:
     name: linux-x64
     needs: create-release
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    runs-on: blacksmith-16vcpu-ubuntu-2204
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CMAKE_BUILD_PARALLEL_LEVEL: "16"
       GHOSTREEL_GPU: cuda
     steps:
       - name: Free disk space
@@ -135,6 +135,8 @@ jobs:
       - name: Build native helpers
         if: steps.helpers.outputs.cache-hit != 'true'
         run: scripts/build-helpers.sh asr llm
+        env:
+          JOBS: "16"
 
       - name: Build CLI
         run: cargo build --release -p ghostreel-cli
@@ -205,11 +207,11 @@ jobs:
   windows-x64:
     name: windows-x64
     needs: create-release
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: blacksmith-16vcpu-windows-2025
     timeout-minutes: 240
     env:
       CMAKE_CUDA_ARCHITECTURES: "86;89"
-      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CMAKE_BUILD_PARALLEL_LEVEL: "16"
       GHOSTREEL_GPU: cuda
     steps:
       - name: Checkout repository
@@ -264,12 +266,12 @@ jobs:
       - name: Build helper ghostreel-asr
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 4 --release -p ghostreel-asr --features cuda
+        run: cargo build -j 16 --release -p ghostreel-asr --features cuda
 
       - name: Build helper ghostreel-llm
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
-        run: cargo build -j 4 --release -p ghostreel-llm --features cuda
+        run: cargo build -j 16 --release -p ghostreel-llm --features cuda
 
       - name: Build CLI
         shell: pwsh
