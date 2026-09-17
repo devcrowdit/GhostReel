@@ -60,6 +60,9 @@
 - [ ] In-app player UI for preview playback (M8c / M9)
 - [ ] VP9 / WebM proxy fallback if browser / webview lacks H.264 hardware support on specific Linux distributions
 - [ ] Gap items handling if script specifies silent/black gaps between clips
+- [ ] Proxy cache key has no encoder: proxies from nvenc and libx264 runs could be mixed in one `-c copy` concat
+- [ ] Every render inserts a new `exports` row (no dedupe); Tauri Preview/Export tasks not exercised in the running app yet
+- [ ] Audio of a proxy can end ~30 ms before its video (AAC framing); concat offsets by container duration so it doesn't accumulate
 
 ## Next
 - [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel

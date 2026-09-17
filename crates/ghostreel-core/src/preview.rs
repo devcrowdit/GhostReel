@@ -522,7 +522,8 @@ pub fn render_preview(
         let burn_out = burn_res.map_err(|e| Error::Preview(format!("failed to spawn burn pass: {e}")))?;
         if !burn_out.status.success() {
             let stderr = String::from_utf8_lossy(&burn_out.stderr);
-            let tail = stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let tail =
+                stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
             return Err(Error::Preview(format!("burn pass failed: {tail}")));
         }
     }
@@ -710,7 +711,10 @@ mod tests {
         assert_eq!(escape_filter_path(p_win), r"C\\:/Users/test/clip.srt");
 
         // Proxy names never contain ':' (content hashes are `b3e:<hex>`).
-        assert_eq!(proxy_file_name("b3e:ab12", 0.0, 1.0, Fps::new(25, 1), 960, 540), "b3e-ab12_0_1000_25_1_960x540.mp4");
+        assert_eq!(
+            proxy_file_name("b3e:ab12", 0.0, 1.0, Fps::new(25, 1), 960, 540),
+            "b3e-ab12_0_1000_25_1_960x540.mp4"
+        );
     }
 
     #[test]
@@ -867,21 +871,25 @@ mod tests {
 
         let script_id = script::save_version(&db, project.id, &script, None).unwrap();
 
+        // Awkward data dir so the filtergraph escaping of the title/SRT paths is exercised.
+        let data_dir = temp.path().join(if cfg!(windows) { "data it's [x],y" } else { "da:ta it's [x],y" });
+        std::fs::create_dir_all(&data_dir).unwrap();
+
         // First render (cold)
-        let res1 = render_preview(&db, temp.path(), &ffmpeg, script_id, &PreviewOptions::default(), |_, _| {}).unwrap();
+        let res1 = render_preview(&db, &data_dir, &ffmpeg, script_id, &PreviewOptions::default(), |_, _| {}).unwrap();
         assert_eq!(res1.segments, 2);
         assert_eq!(res1.proxies_built, 2);
         assert_eq!(res1.proxies_cached, 0);
         assert!(res1.path.is_file());
 
         // Second render (warm) - must report proxies_cached == 2, proxies_built == 0
-        let res2 = render_preview(&db, temp.path(), &ffmpeg, script_id, &PreviewOptions::default(), |_, _| {}).unwrap();
+        let res2 = render_preview(&db, &data_dir, &ffmpeg, script_id, &PreviewOptions::default(), |_, _| {}).unwrap();
         assert_eq!(res2.segments, 2);
         assert_eq!(res2.proxies_built, 0);
         assert_eq!(res2.proxies_cached, 2);
 
         // Third render with burn_titles + burn_narration
-        let burned_out = temp.path().join("burned.mp4");
+        let burned_out = data_dir.join("burned.mp4");
         let res3 = render_preview(
             &db,
             temp.path(),
