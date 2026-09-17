@@ -54,6 +54,7 @@ function TranscriptCell({ v }: { v: VideoRow }) {
 function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => void }) {
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
   const [frames, setFrames] = useState<FrameRow[]>([]);
+  const [activeFrame, setActiveFrame] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
   useEffect(() => {
     setSegments(null);
@@ -78,13 +79,64 @@ function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => v
       {frames.length > 0 && (
         <div className="frame-strip">
           {frames.map((f) => (
-            <figure key={f.id} title={f.description ?? `${clock(f.t_s)}`}>
+            <figure
+              key={f.id}
+              className={f.id === activeFrame ? "active" : ""}
+              onClick={() => setActiveFrame(f.id === activeFrame ? null : f.id)}
+            >
               <img src={fileUrl(f.path)} alt="" loading="lazy" />
-              <figcaption>{clock(f.t_s)}</figcaption>
+              <figcaption>
+                {clock(f.t_s)}
+                {f.description && !f.description.startsWith('{"error"') ? " ✓" : ""}
+              </figcaption>
             </figure>
           ))}
         </div>
       )}
+      {(() => {
+        const f = frames.find((x) => x.id === activeFrame);
+        if (!f) return null;
+        let d: { description?: string; objects?: string[]; setting?: string; shot?: string; tags?: string[]; error?: string } =
+          {};
+        try {
+          d = f.description ? JSON.parse(f.description) : {};
+        } catch {
+          d = {};
+        }
+        return (
+          <div className="frame-detail">
+            <div className="muted small">
+              {clock(f.t_s)}
+              {d.shot ? ` · ${d.shot}` : ""}
+              {d.setting ? ` · ${d.setting}` : ""}
+            </div>
+            {d.error ? (
+              <div className="bad-text small">{d.error}</div>
+            ) : d.description ? (
+              <>
+                <div>{d.description}</div>
+                {f.visible_text && (
+                  <div className="small">
+                    <span className="muted">On screen: </span>
+                    {f.visible_text.split("\n").join(" · ")}
+                  </div>
+                )}
+                {(d.tags?.length ?? 0) > 0 && (
+                  <div>
+                    {d.tags!.map((t) => (
+                      <span key={t} className="tag">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="muted small">Not described yet — press “Index now”.</div>
+            )}
+          </div>
+        );
+      })()}
       {segments && segments.length > 0 && (
         <input placeholder="Find in transcript…" value={filter} onChange={(e) => setFilter(e.target.value)} />
       )}

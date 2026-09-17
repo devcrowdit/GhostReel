@@ -72,6 +72,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Search a project's videos by meaning and keywords.
+    Search {
+        query: String,
+        #[arg(long, short)]
+        project: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Only these chunk kinds: moment, transcript, frame.
+        #[arg(long, value_delimiter = ',')]
+        kind: Option<Vec<String>>,
+        /// Keywords only (don't load an embedding model).
+        #[arg(long)]
+        keywords: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// List a video's keyframes (JPEG paths).
     Frames {
         video_id: i64,
@@ -179,6 +195,9 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Status { project, videos, json } => status_cmd(&paths, project.as_deref(), videos, json),
         Command::Transcript { video_id, srt, json } => transcript_cmd(&paths, video_id, srt, json),
+        Command::Search { query, project, limit, kind, keywords, json } => {
+            search_cmd(&paths, &query, project.as_deref(), limit, kind, keywords, json).await
+        }
         Command::Frames { video_id, json } => {
             let rows = index::frames(&open_db(&paths)?, &paths.data_dir, video_id)?;
             if json {
@@ -188,6 +207,18 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             } else {
                 for f in rows {
                     println!("[{}] {}", human_duration(f.t_s), f.path.display());
+                    if let Some(d) =
+                        f.description.as_deref().and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                    {
+                        if let Some(err) = d["error"].as_str() {
+                            println!("      ✗ {err}");
+                        } else {
+                            println!("      {}", d["description"].as_str().unwrap_or_default());
+                            if let Some(t) = f.visible_text.as_deref().filter(|t| !t.is_empty()) {
+                                println!("      on screen: {}", t.replace('\n', " · "));
+                            }
+                        }
+                    }
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -460,6 +491,10 @@ fn progress_line(p: &Progress) -> String {
         "download" => "downloading model",
         "transcribe_server" | "transcribe_local" => "transcribing",
         "frames" => "keyframes",
+        "download_vision" => "downloading vision model",
+        "describe_server" | "describe_local" => "describing frames",
+        "download_embed" => "downloading embedding model",
+        "embed" => "search index",
         other => other,
     };
     format!(
@@ -516,6 +551,51 @@ fn print_status(st: &index::Status) {
             c.stage, c.done, c.pending, c.running, c.failed
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_cmd(
+    paths: &Paths,
+    query: &str,
+    project: Option<&str>,
+    limit: usize,
+    kinds: Option<Vec<String>>,
+    keywords_only: bool,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    let db = open_db(paths)?;
+    let pid = project_id(&db, project)?;
+    let mut embedder = None;
+    if !keywords_only {
+        let config = Config::load(&paths.config_file)?;
+        let setup = runtime::resolve_embed(paths, &config).await;
+        match runtime::start_embedder(&setup, |_, _| {}).await {
+            Ok(e) => embedder = Some(e),
+            Err(why) => eprintln!("(meaning search unavailable: {why}; using keywords only)"),
+        }
+    }
+    let opts = ghostreel_core::search::SearchOptions { project_id: pid, limit, kinds };
+    let hits = ghostreel_core::search::search(&db, &paths.data_dir, query, embedder.as_mut(), &opts).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if hits.is_empty() {
+        println!("no matches");
+    }
+    for (i, h) in hits.iter().enumerate() {
+        let name = h.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        println!(
+            "{:>2}. {name} @ {}–{}  [{}; {}]",
+            i + 1,
+            human_duration(h.start_s),
+            human_duration(h.end_s),
+            h.kinds.join("+"),
+            h.matched_by.join("+")
+        );
+        println!("    {}", h.snippet.replace('\n', " · "));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn srt_time(s: f64) -> String {

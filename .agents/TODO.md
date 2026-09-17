@@ -25,11 +25,19 @@
 - [x] M3: keyframes — low-res scene detection pass + 20 s max gap fillers, 1280 px JPEGs, dHash dedupe
       with 60 s coverage floor, `frames` stage, `ghostreel frames <id>`, app frame strip (asset protocol)
 
-## Next — M4 (frame descriptions)
-- [ ] vision backend: `OpenAiServer` (highllama) with JSON-schema response_format, thinking off
-- [ ] local vision: decide helper process (`ghostreel-vlm`, llama-cpp-2 CUDA) vs in-process; model manager
-- [ ] `describe` stage (frame JSON: description, visible_text, objects, setting, shot, tags) with transcript context
-- [ ] app: descriptions under frames
+- [x] M4: frame descriptions — `ghostreel-llm` helper (llama-cpp-2 + mtmd, JSON lines, grammar-safe sampling:
+      sample free → check grammar → constrain only on rejection), vision runtime (highllama server with
+      JSON schema + thinking off, or local helper with Bonsai download), `describe` stage with ±15 s speech
+      context, per-frame error records, postpone on transport errors; app frame detail
+- [x] M5 (backend + CLI): chunks (transcript 30 s windows, moments, on-screen text), embeddinggemma via
+      highllama :8091 or local helper (CPU), `embed` stage (re-queued when transcript/descriptions change;
+      keyword-only chunks when no embedder), hybrid search (FTS5 w/ stopwords + sqlite-vec kNN, RRF,
+      project scope, moments ≤ 60 s), `ghostreel search`
+
+## Next
+- [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel
+- [ ] M6: player (asset protocol for project folders), seek to hit/segment/frame, transcript sync
+- [ ] Verify `ghostreel-llm` CUDA build end-to-end (describe + embed) and compare local vs server vectors
 
 ## Open / to review with Sergio
 - [ ] Visual check of M2 UI (monitors were asleep during the night run; app built fine, logic tested)

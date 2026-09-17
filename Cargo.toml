@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ghostreel-core", "crates/ghostreel-cli", "src-tauri", "crates/ghostreel-asr"]
+members = ["crates/ghostreel-core", "crates/ghostreel-cli", "src-tauri", "crates/ghostreel-asr", "crates/ghostreel-llm"]
 # spikes/ are throwaway experiments with their own workspace (and CUDA builds).
 exclude = ["spikes"]
 

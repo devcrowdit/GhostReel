@@ -3,9 +3,11 @@
 //! See `.agents/plan.md` for the architecture. M0 provides configuration, paths, the index
 //! database, AI server probing and the doctor report.
 
+pub mod chunks;
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod embed;
 pub mod frames;
 pub mod index;
 pub mod media;
@@ -15,7 +17,9 @@ pub mod probe;
 pub mod progress;
 pub mod projects;
 pub mod runtime;
+pub mod search;
 pub mod stt;
+pub mod vision;
 pub mod watch;
 
 use std::path::PathBuf;
@@ -40,6 +44,10 @@ pub enum Error {
     Probe(String),
     #[error("download failed: {0}")]
     Download(String),
+    #[error("embeddings: {0}")]
+    Embed(String),
+    #[error("vision: {0}")]
+    Vision(String),
     #[error("frames: {0}")]
     Frames(String),
     #[error("transcription: {0}")]

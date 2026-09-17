@@ -38,6 +38,72 @@ impl SttSetup {
     }
 }
 
+/// How frame descriptions will run this time.
+#[derive(Debug, Clone)]
+pub enum VisionSetup {
+    Server(crate::vision::ServerVision),
+    /// Local `ghostreel-llm`; `missing` model files are downloaded before the helper starts.
+    Local {
+        helper: PathBuf,
+        models_dir: PathBuf,
+        model: ModelSpec,
+        mmproj: ModelSpec,
+        found: Vec<PathBuf>,
+    },
+    Unavailable(String),
+}
+
+impl VisionSetup {
+    pub fn describe(&self) -> String {
+        match self {
+            VisionSetup::Server(s) => {
+                format!("{} @ {}", if s.model.is_empty() { "vision server" } else { &s.model }, s.url)
+            }
+            VisionSetup::Local { model, .. } => format!("local {}", model.file_name),
+            VisionSetup::Unavailable(why) => format!("unavailable: {why}"),
+        }
+    }
+}
+
+/// How text embeddings will be computed this time.
+#[derive(Debug, Clone)]
+pub enum EmbedSetup {
+    Server { url: String, model: String },
+    Local { helper: PathBuf, models_dir: PathBuf, spec: ModelSpec, found: Option<PathBuf> },
+    Unavailable(String),
+}
+
+impl EmbedSetup {
+    pub fn describe(&self) -> String {
+        match self {
+            EmbedSetup::Server { url, model } => format!("{model} @ {url}"),
+            EmbedSetup::Local { .. } => "local embeddinggemma (CPU)".into(),
+            EmbedSetup::Unavailable(why) => format!("unavailable: {why}"),
+        }
+    }
+}
+
+/// Start an embedder for `setup`, downloading the local model if needed.
+pub async fn start_embedder(
+    setup: &EmbedSetup,
+    on_download: impl FnMut(u64, Option<u64>),
+) -> Result<crate::embed::Embedder, String> {
+    use crate::embed::Embedder;
+    match setup {
+        EmbedSetup::Server { url, model } => Ok(Embedder::server(url, model)),
+        EmbedSetup::Unavailable(why) => Err(why.clone()),
+        EmbedSetup::Local { helper, models_dir, spec, found } => {
+            let path = match found {
+                Some(p) => p.clone(),
+                None => models::download(spec, models_dir, on_download).await.map_err(|e| e.to_string())?,
+            };
+            let models =
+                crate::vision::LocalModels { helper: helper.clone(), vision: None, embed: Some(path), cpu: true };
+            Embedder::local(&models).await.map_err(|e| e.to_string())
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Runtime {
     pub ffmpeg: PathBuf,
@@ -47,6 +113,8 @@ pub struct Runtime {
     pub data_dir: PathBuf,
     /// Keyframe extraction settings; `None` disables the frames stage (tests).
     pub frames: Option<crate::frames::FrameOptions>,
+    pub vision: VisionSetup,
+    pub embed: EmbedSetup,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,16 +129,20 @@ impl Runtime {
 }
 
 /// Find the local transcription helper. Dev builds also look in the sibling `release/` dir,
-/// because `scripts/build-asr.sh` builds it in release mode only.
+/// because `scripts/build-helpers.sh` builds it in release mode only.
 pub fn locate_asr() -> Option<PathBuf> {
-    locate("ghostreel-asr").or_else(|| {
+    locate_helper("ghostreel-asr")
+}
+
+pub fn locate_helper(name: &str) -> Option<PathBuf> {
+    locate(name).or_else(|| {
         if !cfg!(debug_assertions) {
             return None;
         }
         let exe = std::env::current_exe().ok()?;
         let target = exe.parent()?.parent()?;
-        let name = if cfg!(windows) { "ghostreel-asr.exe" } else { "ghostreel-asr" };
-        let p = target.join("release").join(name);
+        let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+        let p = target.join("release").join(file);
         p.is_file().then_some(p)
     })
 }
@@ -80,14 +152,64 @@ pub async fn resolve(paths: &Paths, config: &Config) -> Result<Runtime, crate::E
         locate("ffmpeg").ok_or_else(|| crate::Error::Invalid("ffmpeg not found (see `ghostreel doctor`)".into()))?;
     let ffprobe =
         locate("ffprobe").ok_or_else(|| crate::Error::Invalid("ffprobe not found (see `ghostreel doctor`)".into()))?;
-    let stt = resolve_stt(paths, config).await;
+    let (stt, vision, embed) =
+        tokio::join!(resolve_stt(paths, config), resolve_vision(paths, config), resolve_embed(paths, config));
     Ok(Runtime {
         ffmpeg,
         ffprobe,
         stt,
         data_dir: paths.data_dir.clone(),
         frames: Some(crate::frames::FrameOptions::default()),
+        vision,
+        embed,
     })
+}
+
+pub async fn resolve_embed(paths: &Paths, config: &Config) -> EmbedSetup {
+    let cfg = &config.embed;
+    let probe = match cfg.backend {
+        Backend::Local => None,
+        _ => Some(probe::embeddings(&probe::probe_client(), &cfg.url, &cfg.model).await),
+    };
+    let resolution = probe::resolve(cfg.backend, probe);
+    match resolution.target {
+        Target::Server => {
+            return EmbedSetup::Server { url: cfg.url.trim_end_matches('/').to_string(), model: cfg.model.clone() };
+        }
+        Target::Unavailable => return EmbedSetup::Unavailable(resolution.reason),
+        Target::Local => {}
+    }
+    let Some(helper) = locate_helper("ghostreel-llm") else {
+        return EmbedSetup::Unavailable("local model helper ghostreel-llm not found".into());
+    };
+    let spec = models::embeddinggemma();
+    let found = models::find(&models::search_roots(&paths.models_dir(), &config.models.search_paths), &spec.file_name);
+    EmbedSetup::Local { helper, models_dir: paths.models_dir(), spec, found }
+}
+
+async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
+    let cfg = &config.vision;
+    let probe = match cfg.backend {
+        Backend::Local => None,
+        _ => Some(probe::vision(&probe::probe_client(), &cfg.url, &cfg.model).await),
+    };
+    let model_id = probe.as_ref().and_then(|p| p.model.clone()).unwrap_or_default();
+    let resolution = probe::resolve(cfg.backend, probe);
+    match resolution.target {
+        Target::Server => {
+            let model = if cfg.model.is_empty() { model_id } else { cfg.model.clone() };
+            return VisionSetup::Server(crate::vision::ServerVision::new(&cfg.url, &model, &cfg.api_key));
+        }
+        Target::Unavailable => return VisionSetup::Unavailable(resolution.reason),
+        Target::Local => {}
+    }
+    let Some(helper) = locate_helper("ghostreel-llm") else {
+        return VisionSetup::Unavailable("local model helper ghostreel-llm not found".into());
+    };
+    let (model, mmproj) = models::bonsai_vision();
+    let roots = models::search_roots(&paths.models_dir(), &config.models.search_paths);
+    let found = [&model, &mmproj].iter().filter_map(|s| models::find(&roots, &s.file_name)).collect();
+    VisionSetup::Local { helper, models_dir: paths.models_dir(), model, mmproj, found }
 }
 
 async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {

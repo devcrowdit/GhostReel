@@ -450,3 +450,28 @@ tr.selected td {
   color: var(--muted);
   text-align: center;
 }
+
+.frame-strip figure {
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px;
+  border: 2px solid transparent;
+}
+
+.frame-strip figure.active {
+  border-color: var(--accent);
+}
+
+.frame-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--border) 35%, transparent);
+  line-height: 1.45;
+}
+
+.frame-detail .tag {
+  margin: 0 6px 0 0;
+}

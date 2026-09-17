@@ -28,6 +28,23 @@ pub fn whisper(model: &str) -> Result<ModelSpec, Error> {
     Ok(ModelSpec { file_name, url })
 }
 
+fn hf(repo: &str, file: &str) -> ModelSpec {
+    ModelSpec { file_name: file.to_string(), url: format!("https://huggingface.co/{repo}/resolve/main/{file}") }
+}
+
+/// Default local vision model: Bonsai-27B at 1-bit (~3.6 GB) + its image projector (S0).
+pub fn bonsai_vision() -> (ModelSpec, ModelSpec) {
+    (
+        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-Q1_0.gguf"),
+        hf("prism-ml/Bonsai-27B-gguf", "Bonsai-27B-mmproj-Q8_0.gguf"),
+    )
+}
+
+/// The one embedding model GhostReel uses everywhere (plan D5).
+pub fn embeddinggemma() -> ModelSpec {
+    hf("ggml-org/embeddinggemma-300M-GGUF", "embeddinggemma-300M-Q8_0.gguf")
+}
+
 /// Directories where other local apps keep compatible model files.
 pub fn well_known_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();

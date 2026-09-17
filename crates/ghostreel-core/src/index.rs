@@ -19,11 +19,20 @@ use crate::db::Db;
 use crate::media::{self, MediaInfo};
 use crate::progress::{Progress, Tracker};
 use crate::projects::now;
-use crate::runtime::{Runtime, SttSetup};
+use crate::runtime::{EmbedSetup, Runtime, SttSetup, VisionSetup};
 use crate::stt::{self, Engine};
 
 /// Pipeline stages in execution order.
-pub const STAGES: &[&str] = &["probe", "transcribe", "frames"];
+pub const STAGES: &[&str] = &["probe", "transcribe", "frames", "describe", "embed"];
+
+/// The stage whose completion a stage waits for.
+fn prerequisite(stage: &str) -> Option<&'static str> {
+    match stage {
+        "probe" => None,
+        "describe" => Some("frames"),
+        _ => Some("probe"),
+    }
+}
 
 /// A failed job is retried on later runs until it has failed this many times.
 pub const MAX_ATTEMPTS: i64 = 3;
@@ -135,6 +144,11 @@ const PHASES: &[(&str, f64)] = &[
     ("transcribe_server", 40.0),
     ("transcribe_local", 20.0),
     ("frames", 40.0),
+    ("download_vision", 20_000_000.0),
+    ("describe_server", 0.2),
+    ("describe_local", 0.2),
+    ("download_embed", 20_000_000.0),
+    ("embed", 30.0),
 ];
 
 /// Assumed length of a video whose duration isn't known yet (for the first estimate only).
@@ -209,6 +223,14 @@ pub async fn run(db: &mut Db, rt: &Runtime, opts: &Options, mut on_event: impl F
     summary.jobs_failed += failed;
 
     let (done, failed) = run_frame_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
+    summary.jobs_done += done;
+    summary.jobs_failed += failed;
+
+    let (done, failed) = run_describe_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
+    summary.jobs_done += done;
+    summary.jobs_failed += failed;
+
+    let (done, failed) = run_embed_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
@@ -412,11 +434,11 @@ fn claimable_jobs(db: &Db, stage: &str, opts: &Options) -> Result<Vec<(i64, Path
           FROM jobs j
          WHERE j.stage = ?1
            AND (j.state = 'pending' OR (j.state = 'failed' AND j.attempts < ?2))
-           AND (?1 = 'probe' OR EXISTS (SELECT 1 FROM jobs p WHERE p.video_id = j.video_id
-                                          AND p.stage = 'probe' AND p.state = 'done'))
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM jobs p WHERE p.video_id = j.video_id
+                                          AND p.stage = ?4 AND p.state = 'done'))
          ORDER BY j.video_id";
     let mut st = db.conn.prepare(sql)?;
-    let rows = st.query_map(params![stage, max_attempts, opts.project_id], |r| {
+    let rows = st.query_map(params![stage, max_attempts, opts.project_id, prerequisite(stage)], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
     })?;
     Ok(rows.filter_map(Result::ok).filter_map(|(id, path)| path.map(|p| (id, PathBuf::from(p)))).collect())
@@ -542,6 +564,7 @@ fn store_transcript(db: &mut Db, video_id: i64, t: &stt::Transcript) -> Result<(
         )?;
     }
     tx.execute("UPDATE videos SET language = ?1 WHERE id = ?2", params![t.language, video_id])?;
+    tx.execute("UPDATE jobs SET state = 'pending', attempts = 0 WHERE video_id = ?1 AND stage = 'embed'", [video_id])?;
     tx.execute(
         "UPDATE jobs SET state = 'done', last_error = NULL, updated_at = ?1 WHERE video_id = ?2 AND stage = 'transcribe'",
         params![now(), video_id],
@@ -785,6 +808,354 @@ async fn run_frame_jobs(
     Ok((done, failed))
 }
 
+// ---- describe -----------------------------------------------------------------------------
+
+fn describe_phase(setup: &VisionSetup) -> Option<&'static str> {
+    match setup {
+        VisionSetup::Server(_) => Some("describe_server"),
+        VisionSetup::Local { .. } => Some("describe_local"),
+        VisionSetup::Unavailable(_) => None,
+    }
+}
+
+/// Speech within ±15 s of `t_s`.
+fn speech_near(db: &Db, video_id: i64, t_s: f64) -> Result<String, Error> {
+    let mut st = db.conn.prepare(
+        "SELECT text FROM transcript_segments WHERE video_id = ?1 AND end_s >= ?2 AND start_s <= ?3 ORDER BY start_s",
+    )?;
+    let parts: Vec<String> =
+        st.query_map(params![video_id, t_s - 15.0, t_s + 15.0], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    Ok(parts.join(" "))
+}
+
+/// Frames of `video_id` still without a description: (frame id, t, absolute path).
+fn undescribed_frames(db: &Db, data_dir: &Path, video_id: i64) -> Result<Vec<(i64, f64, PathBuf)>, Error> {
+    let mut st = db.conn.prepare(
+        "SELECT id, t_s, thumb_path FROM frames WHERE video_id = ?1 AND description_json IS NULL ORDER BY t_s",
+    )?;
+    let rows = st.query_map([video_id], |r| Ok((r.get(0)?, r.get(1)?, data_dir.join(r.get::<_, String>(2)?))))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Start the describer: the server client, or download missing local models and launch the helper.
+async fn start_describer(
+    rt: &Runtime,
+    tracker: &mut Tracker,
+    on_event: &mut impl FnMut(Event),
+) -> Result<crate::vision::Describer, String> {
+    use crate::vision::{Describer, LocalLlm, LocalModels};
+    match &rt.vision {
+        VisionSetup::Server(s) => Ok(Describer::Server(s.clone())),
+        VisionSetup::Unavailable(why) => Err(why.clone()),
+        VisionSetup::Local { helper, models_dir, model, mmproj, found } => {
+            let mut paths = Vec::new();
+            for spec in [model, mmproj] {
+                if let Some(p) = found.iter().find(|p| p.file_name().is_some_and(|n| n == spec.file_name.as_str())) {
+                    paths.push(p.clone());
+                    continue;
+                }
+                on_event(Event::DownloadingModel { file: spec.file_name.clone() });
+                tracker.start("download_vision");
+                let mut last = 0u64;
+                let p = crate::models::download(spec, models_dir, |done, len| {
+                    if let Some(len) = len {
+                        tracker.set_total("download_vision", len);
+                    }
+                    tracker.advance("download_vision", done.saturating_sub(last));
+                    last = done;
+                    if tracker.should_emit() {
+                        on_event(Event::Progress(tracker.snapshot(None)));
+                    }
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                paths.push(p);
+            }
+            let models = LocalModels {
+                helper: helper.clone(),
+                vision: Some((paths[0].clone(), paths[1].clone())),
+                embed: None,
+                cpu: false,
+            };
+            LocalLlm::start(&models).await.map(|l| Describer::Local(Box::new(l))).map_err(|e| e.to_string())
+        }
+    }
+}
+
+async fn run_describe_jobs(
+    db: &mut Db,
+    rt: &Runtime,
+    opts: &Options,
+    tracker: &mut Tracker,
+    on_event: &mut impl FnMut(Event),
+) -> Result<(usize, usize), Error> {
+    const STAGE: &str = "describe";
+    let jobs = claimable_jobs(db, STAGE, opts)?;
+    let Some(phase) = describe_phase(&rt.vision) else {
+        if !jobs.is_empty()
+            && let VisionSetup::Unavailable(reason) = &rt.vision
+        {
+            on_event(Event::StageUnavailable { stage: STAGE.into(), reason: reason.clone() });
+        }
+        return Ok((0, 0));
+    };
+    let work: Vec<(i64, PathBuf, Vec<(i64, f64, PathBuf)>)> = jobs
+        .into_iter()
+        .map(|(id, path)| Ok((id, path, undescribed_frames(db, &rt.data_dir, id)?)))
+        .collect::<Result<_, Error>>()?;
+    let total: usize = work.iter().map(|w| w.2.len()).sum();
+    // Videos whose frames are all described already (e.g. interrupted after the last frame).
+    for (id, _, frames) in &work {
+        if frames.is_empty() {
+            set_job(db, *id, STAGE, "done", None)?;
+        }
+    }
+    if total == 0 {
+        tracker.set_total(phase, 0);
+        return Ok((0, 0));
+    }
+
+    let mut describer = match start_describer(rt, tracker, on_event).await {
+        Ok(d) => d,
+        Err(reason) => {
+            on_event(Event::StageUnavailable { stage: STAGE.into(), reason });
+            return Ok((0, 0));
+        }
+    };
+    on_event(Event::StageBackend { stage: STAGE.into(), backend: rt.vision.describe() });
+    tracker.set_total(phase, total as u64);
+    tracker.start(phase);
+    on_event(Event::Progress(tracker.snapshot(None)));
+
+    let (mut done, mut failed) = (0, 0);
+    'videos: for (video_id, path, frames) in work {
+        if frames.is_empty() {
+            continue;
+        }
+        set_job(db, video_id, STAGE, "running", None)?;
+        on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
+        for (frame_id, t_s, image) in frames {
+            let speech = speech_near(db, video_id, t_s)?;
+            let speech = (!speech.is_empty()).then_some(speech.as_str());
+            // One retry for a bad/unparseable answer; transport errors stop the stage.
+            let mut result = describer.describe(&image, speech).await;
+            if matches!(&result, Err(e) if !is_transport_error(e)) {
+                result = describer.describe(&image, speech).await;
+            }
+            match result {
+                Ok(d) => {
+                    let json = serde_json::to_string(&d).unwrap_or_default();
+                    db.conn.execute(
+                        "UPDATE frames SET description_json = ?1, visible_text = ?2 WHERE id = ?3",
+                        params![json, d.visible_text.join("\n"), frame_id],
+                    )?;
+                }
+                Err(e) if is_transport_error(&e) => {
+                    // Server gone / helper crashed: leave the rest pending for a later run.
+                    set_job(db, video_id, STAGE, "pending", Some(&e.to_string()))?;
+                    on_event(Event::StageUnavailable { stage: STAGE.into(), reason: e.to_string() });
+                    break 'videos;
+                }
+                Err(e) => {
+                    // This frame can't be described; record why and move on.
+                    let json = serde_json::json!({ "error": e.to_string() }).to_string();
+                    db.conn
+                        .execute("UPDATE frames SET description_json = ?1 WHERE id = ?2", params![json, frame_id])?;
+                }
+            }
+            tracker.advance(phase, 1);
+            if tracker.should_emit() {
+                on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
+            }
+        }
+        let ok: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM frames WHERE video_id = ?1 AND description_json NOT LIKE '{\"error\"%'",
+            [video_id],
+            |r| r.get(0),
+        )?;
+        if ok == 0 {
+            set_job(db, video_id, STAGE, "failed", Some("no frame could be described"))?;
+            on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: "no frame could be described".into() });
+            failed += 1;
+        } else {
+            set_job(db, video_id, STAGE, "done", None)?;
+            db.conn.execute(
+                "UPDATE jobs SET state = 'pending', attempts = 0 WHERE video_id = ?1 AND stage = 'embed'",
+                [video_id],
+            )?;
+            on_event(Event::JobDone { video_id, stage: STAGE.into() });
+            done += 1;
+        }
+    }
+    Ok((done, failed))
+}
+
+// ---- embed ----------------------------------------------------------------------------------
+
+/// Build the retrieval chunks for a video from its transcript and described frames.
+fn build_chunks(db: &Db, video_id: i64) -> Result<Vec<crate::chunks::Chunk>, Error> {
+    use crate::chunks::{DescribedFrame, Seg, frame_chunks, transcript_windows};
+    let segs: Vec<(f64, f64, String)> = {
+        let mut st = db
+            .conn
+            .prepare("SELECT start_s, end_s, text FROM transcript_segments WHERE video_id = ?1 ORDER BY start_s")?;
+        st.query_map([video_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?
+    };
+    let frames: Vec<(i64, f64, crate::vision::FrameDescription)> = {
+        let mut st = db.conn.prepare(
+            "SELECT id, t_s, description_json FROM frames WHERE video_id = ?1 AND description_json IS NOT NULL ORDER BY t_s",
+        )?;
+        st.query_map([video_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?)))?
+            .filter_map(|row| {
+                let (id, t, json) = row.ok()?;
+                let d: crate::vision::FrameDescription = serde_json::from_str(&json).ok()?;
+                (!d.description.is_empty()).then_some((id, t, d))
+            })
+            .collect()
+    };
+    let duration: f64 =
+        db.conn.query_row("SELECT COALESCE(duration_s, 0) FROM videos WHERE id = ?1", [video_id], |r| r.get(0))?;
+    let seg_refs: Vec<Seg> = segs.iter().map(|(s, e, t)| Seg { start: *s, end: *e, text: t }).collect();
+    let frame_refs: Vec<DescribedFrame> =
+        frames.iter().map(|(id, t, d)| DescribedFrame { id: *id, t_s: *t, description: d }).collect();
+    let mut chunks = transcript_windows(&seg_refs);
+    chunks.extend(frame_chunks(&frame_refs, &seg_refs, duration));
+    Ok(chunks)
+}
+
+/// Replace a video's chunks (FTS follows via triggers). With `vectors`, also stores embeddings.
+fn store_chunks(
+    db: &mut Db,
+    video_id: i64,
+    chunks: &[crate::chunks::Chunk],
+    vectors: Option<&[Vec<f32>]>,
+) -> Result<(), Error> {
+    let tx = db.conn.transaction()?;
+    tx.execute("DELETE FROM chunks_vec WHERE rowid IN (SELECT id FROM chunks WHERE video_id = ?1)", [video_id])?;
+    tx.execute("DELETE FROM chunks WHERE video_id = ?1", [video_id])?;
+    for (i, c) in chunks.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO chunks(video_id, kind, start_s, end_s, text, frame_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![video_id, c.kind, c.start_s, c.end_s, c.text, c.frame_id],
+        )?;
+        if let Some(v) = vectors {
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO chunks_vec(rowid, embedding) VALUES (?1, ?2)",
+                params![id, crate::embed::to_blob(&v[i])],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+async fn run_embed_jobs(
+    db: &mut Db,
+    rt: &Runtime,
+    opts: &Options,
+    tracker: &mut Tracker,
+    on_event: &mut impl FnMut(Event),
+) -> Result<(usize, usize), Error> {
+    const STAGE: &str = "embed";
+    const BATCH: usize = 32;
+    let jobs = claimable_jobs(db, STAGE, opts)?;
+    if jobs.is_empty() {
+        tracker.set_total(STAGE, 0);
+        return Ok((0, 0));
+    }
+    let mut work = Vec::with_capacity(jobs.len());
+    for (video_id, path) in jobs {
+        let chunks = build_chunks(db, video_id)?;
+        work.push((video_id, path, chunks));
+    }
+    let total: usize = work.iter().map(|w| w.2.len()).sum();
+
+    let mut embedder = if matches!(rt.embed, EmbedSetup::Unavailable(_)) || total == 0 {
+        None
+    } else {
+        let mut last = 0u64;
+        let started = crate::runtime::start_embedder(&rt.embed, |done, len| {
+            if let Some(len) = len {
+                tracker.set_total("download_embed", len);
+            }
+            tracker.start("download_embed");
+            tracker.advance("download_embed", done.saturating_sub(last));
+            last = done;
+        })
+        .await;
+        match started {
+            Ok(e) => Some(e),
+            Err(reason) => {
+                on_event(Event::StageUnavailable { stage: STAGE.into(), reason });
+                None
+            }
+        }
+    };
+    if let EmbedSetup::Unavailable(reason) = &rt.embed {
+        on_event(Event::StageUnavailable { stage: STAGE.into(), reason: reason.clone() });
+    }
+    match &embedder {
+        Some(e) => on_event(Event::StageBackend { stage: STAGE.into(), backend: e.label() }),
+        None => {
+            // Keyword search still works: store chunks without vectors, keep the job pending.
+            for (video_id, _, chunks) in &work {
+                store_chunks(db, *video_id, chunks, None)?;
+            }
+            tracker.set_total(STAGE, 0);
+            return Ok((0, 0));
+        }
+    }
+    tracker.set_total(STAGE, total as u64);
+    tracker.start(STAGE);
+    on_event(Event::Progress(tracker.snapshot(None)));
+
+    let (mut done, mut failed) = (0, 0);
+    for (video_id, path, chunks) in work {
+        set_job(db, video_id, STAGE, "running", None)?;
+        let texts: Vec<String> = chunks.iter().map(|c| crate::embed::doc_text(&c.text)).collect();
+        let mut vectors = Vec::with_capacity(texts.len());
+        let mut error = None;
+        for batch in texts.chunks(BATCH) {
+            match embedder.as_mut().expect("checked above").embed(batch).await {
+                Ok(v) => vectors.extend(v),
+                Err(e) => {
+                    error = Some(e.to_string());
+                    break;
+                }
+            }
+            tracker.advance(STAGE, batch.len() as u64);
+            if tracker.should_emit() {
+                on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
+            }
+        }
+        match error {
+            None => {
+                store_chunks(db, video_id, &chunks, Some(&vectors))?;
+                set_job(db, video_id, STAGE, "done", None)?;
+                on_event(Event::JobDone { video_id, stage: STAGE.into() });
+                done += 1;
+            }
+            Some(e) => {
+                store_chunks(db, video_id, &chunks, None)?;
+                set_job(db, video_id, STAGE, "failed", Some(&e))?;
+                on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: e });
+                failed += 1;
+            }
+        }
+    }
+    Ok((done, failed))
+}
+
+fn is_transport_error(e: &Error) -> bool {
+    let s = e.to_string();
+    s.contains("vision server at") && !s.contains("bad response")
+        || s.contains("helper exited")
+        || s.contains("helper write")
+        || s.contains("helper read")
+        || s.contains("timed out")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FrameRow {
     pub id: i64,
@@ -968,6 +1339,8 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             stt: SttSetup::Unavailable("not configured in this test".into()),
             data_dir: std::env::temp_dir(),
             frames: None,
+            vision: VisionSetup::Unavailable("not configured in this test".into()),
+            embed: EmbedSetup::Unavailable("not configured in this test".into()),
         }
     }
 
@@ -1178,6 +1551,8 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             stt: SttSetup::Unavailable("GhostPen down".into()),
             data_dir: tmp.path().join("data"),
             frames: None,
+            vision: VisionSetup::Unavailable("not configured in this test".into()),
+            embed: EmbedSetup::Unavailable("not configured in this test".into()),
         };
         let mut events = Vec::new();
         let s = run(&mut db, &unavailable, &opts, |e| events.push(e)).await.unwrap();
@@ -1216,8 +1591,49 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         assert_eq!(last.fraction, 1.0);
         assert!(events.iter().any(|e| matches!(e, Event::StageBackend { .. })));
 
-        // 3. Nothing left: another run does no work.
-        let s = run(&mut db, &local, &opts, |_| {}).await.unwrap();
+        // 3. Local vision helper describes every frame (speech context passed for the talking video).
+        let helper = tmp.path().join("llm");
+        let log = tmp.path().join("prompts.log");
+        std::fs::write(
+            &helper,
+            format!(
+                r#"#!/bin/sh
+echo '{{"ready":true,"vision":true,"embed_dim":null}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> {log}
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  printf '{{"id":%s,"ok":true,"content":"{{\\"description\\":\\"test pattern\\",\\"visible_text\\":[\\"PM5544\\"],\\"objects\\":[],\\"setting\\":\\"studio\\",\\"shot\\":\\"title card\\",\\"tags\\":[]}}"}}\n' "$id"
+done
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (model, mmproj) = crate::models::bonsai_vision();
+        let fake_model = tmp.path().join(&model.file_name);
+        let fake_mmproj = tmp.path().join(&mmproj.file_name);
+        std::fs::write(&fake_model, b"m").unwrap();
+        std::fs::write(&fake_mmproj, b"p").unwrap();
+        let with_vision = Runtime {
+            vision: VisionSetup::Local {
+                helper,
+                models_dir: tmp.path().join("models"),
+                model,
+                mmproj,
+                found: vec![fake_model, fake_mmproj],
+            },
+            ..local.clone()
+        };
+        let s = run(&mut db, &with_vision, &opts, |_| {}).await.unwrap();
+        assert_eq!((s.jobs_done, s.jobs_failed), (2, 0), "describe job per video");
+        let fr = frames(&db, &with_vision.data_dir, talk.id).unwrap();
+        assert!(fr.iter().all(|f| f.visible_text.as_deref() == Some("PM5544")));
+        let prompts = std::fs::read_to_string(&log).unwrap();
+        assert!(prompts.contains("hello world"), "speech context sent for the talking video");
+
+        // 4. Nothing left: another run does no work.
+        let s = run(&mut db, &with_vision, &opts, |_| {}).await.unwrap();
         assert_eq!(s.jobs_done, 0);
     }
 

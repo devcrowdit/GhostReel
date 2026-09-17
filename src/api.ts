@@ -186,6 +186,9 @@ export const PHASE_LABELS: Record<string, string> = {
   transcribe_server: "Transcribing (GhostPen)",
   transcribe_local: "Transcribing",
   frames: "Picking keyframes",
+  download_vision: "Downloading vision model",
+  describe_server: "Describing frames",
+  describe_local: "Describing frames",
 };
 
 /** "a few seconds", "42 s", "about 2 min", "about 1 h 20 min" — same wording as the CLI. */
