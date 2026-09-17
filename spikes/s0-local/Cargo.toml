@@ -1,0 +1,8 @@
+# S0 spike. Two binaries on purpose: llama-cpp-2 and whisper-rs each statically vendor
+# ggml, so linking both into one binary fails with duplicate symbols (D10, confirmed).
+[workspace]
+members = ["vlm", "asr"]
+resolver = "2"
+
+[profile.release]
+debug = false

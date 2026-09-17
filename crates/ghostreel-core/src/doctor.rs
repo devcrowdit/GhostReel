@@ -1,0 +1,290 @@
+//! `ghostreel doctor`: everything needed to index, checked in one report (app + CLI share it).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::Serialize;
+
+use crate::config::{Backend, Config};
+use crate::db::Db;
+use crate::paths::Paths;
+use crate::probe::{self, Resolution, Target};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Tool {
+    pub name: String,
+    pub path: Option<PathBuf>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Gpu {
+    pub name: String,
+    pub vram_total_mib: u64,
+    pub vram_used_mib: u64,
+    pub driver: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DbStatus {
+    pub path: PathBuf,
+    pub ok: bool,
+    pub schema_version: Option<u32>,
+    pub sqlite_vec: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelFile {
+    pub role: &'static str,
+    /// File name pattern searched for.
+    pub pattern: &'static str,
+    pub found: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+    pub version: &'static str,
+    pub config_file: PathBuf,
+    pub config_error: Option<String>,
+    pub data_dir: PathBuf,
+    pub db: DbStatus,
+    pub ffmpeg: Tool,
+    pub ffprobe: Tool,
+    pub gpu: Vec<Gpu>,
+    pub vision: Resolution,
+    pub embeddings: Resolution,
+    pub stt: Resolution,
+    pub models: Vec<ModelFile>,
+}
+
+impl Report {
+    /// Problems that block indexing (empty = ready).
+    pub fn blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.config_error {
+            out.push(format!("config: {e}"));
+        }
+        if !self.db.ok {
+            out.push(format!("database: {}", self.db.error.as_deref().unwrap_or("unavailable")));
+        }
+        for t in [&self.ffmpeg, &self.ffprobe] {
+            if t.path.is_none() {
+                out.push(format!("{} not found (bundled with installers; on dev boxes install it)", t.name));
+            }
+        }
+        for (name, r) in [("vision", &self.vision), ("embeddings", &self.embeddings), ("stt", &self.stt)] {
+            if r.target == Target::Unavailable {
+                out.push(format!("{name}: {}", r.reason));
+            }
+        }
+        out
+    }
+}
+
+/// Model files the local backends will need (download manager arrives in M4).
+const MODEL_FILES: &[(&str, &str)] = &[
+    ("vision (local)", "Bonsai-27B-Q1_0.gguf"),
+    ("vision projector (local)", "Bonsai-27B-mmproj-Q8_0.gguf"),
+    ("embeddings (local)", "embeddinggemma-300M-Q8_0.gguf"),
+    ("whisper (local)", "ggml-large-v3-turbo.bin"),
+];
+
+pub async fn run(paths: &Paths) -> Report {
+    let (config, config_error) = match Config::load(&paths.config_file) {
+        Ok(c) => (c, None),
+        Err(e) => (Config::default(), Some(e.to_string())),
+    };
+
+    let db = db_status(&paths.db_file());
+    let client = probe::probe_client();
+
+    let vision_probe = async {
+        match config.vision.backend {
+            Backend::Local => None,
+            _ => Some(probe::vision(&client, &config.vision.url, &config.vision.model).await),
+        }
+    };
+    let embed_probe = async {
+        match config.embed.backend {
+            Backend::Local => None,
+            _ => Some(probe::embeddings(&client, &config.embed.url, &config.embed.model).await),
+        }
+    };
+    let stt_probe = async {
+        match config.stt.backend {
+            Backend::Local => None,
+            _ => Some(probe::stt(&client, &config.stt.url).await),
+        }
+    };
+    let (ffmpeg, ffprobe, gpu, vp, ep, sp) =
+        tokio::join!(tool("ffmpeg"), tool("ffprobe"), nvidia_gpus(), vision_probe, embed_probe, stt_probe);
+
+    let mut search: Vec<PathBuf> = vec![paths.models_dir()];
+    search.extend(config.models.search_paths.iter().cloned());
+    let models = MODEL_FILES
+        .iter()
+        .map(|(role, pattern)| ModelFile { role, pattern, found: find_file(&search, pattern, 5) })
+        .collect();
+
+    Report {
+        version: env!("CARGO_PKG_VERSION"),
+        config_file: paths.config_file.clone(),
+        config_error,
+        data_dir: paths.data_dir.clone(),
+        db,
+        ffmpeg,
+        ffprobe,
+        gpu,
+        vision: probe::resolve(config.vision.backend, vp),
+        embeddings: probe::resolve(config.embed.backend, ep),
+        stt: probe::resolve(config.stt.backend, sp),
+        models,
+    }
+}
+
+fn db_status(path: &Path) -> DbStatus {
+    match Db::open(path) {
+        Ok(db) => DbStatus {
+            path: path.to_path_buf(),
+            ok: true,
+            schema_version: db.schema_version().ok(),
+            sqlite_vec: db.vec_version().ok(),
+            error: None,
+        },
+        Err(e) => DbStatus {
+            path: path.to_path_buf(),
+            ok: false,
+            schema_version: None,
+            sqlite_vec: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn exe_name(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// Locate a helper binary: `GHOSTREEL_<NAME>` env, next to our executable (bundled sidecar), `PATH`.
+pub fn locate(name: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(format!("GHOSTREEL_{}", name.to_uppercase())) {
+        let p = PathBuf::from(p);
+        return p.is_file().then_some(p);
+    }
+    let file = exe_name(name);
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        let p = dir.join(&file);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+async fn output(program: &Path, args: &[&str]) -> Option<String> {
+    let fut = tokio::process::Command::new(program).args(args).kill_on_drop(true).output();
+    let out = tokio::time::timeout(Duration::from_secs(5), fut).await.ok()?.ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn tool(name: &str) -> Tool {
+    let path = locate(name);
+    let version = match &path {
+        Some(p) => output(p, &["-version"]).await.and_then(|s| {
+            // "ffmpeg version n8.0 Copyright ..." → "n8.0"
+            s.lines().next().and_then(|l| l.split_whitespace().nth(2)).map(str::to_string)
+        }),
+        None => None,
+    };
+    Tool { name: name.into(), path, version }
+}
+
+async fn nvidia_gpus() -> Vec<Gpu> {
+    let Some(smi) = locate("nvidia-smi") else { return Vec::new() };
+    let Some(csv) = output(
+        &smi,
+        &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader,nounits"],
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    parse_nvidia_smi(&csv)
+}
+
+fn parse_nvidia_smi(csv: &str) -> Vec<Gpu> {
+    csv.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(',').map(str::trim).collect();
+            (f.len() == 4).then(|| Gpu {
+                name: f[0].to_string(),
+                vram_total_mib: f[1].parse().unwrap_or(0),
+                vram_used_mib: f[2].parse().unwrap_or(0),
+                driver: f[3].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Breadth-limited search for `file_name` under `roots` (model dirs are shallow trees).
+fn find_file(roots: &[PathBuf], file_name: &str, max_depth: usize) -> Option<PathBuf> {
+    fn walk(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut subdirs = Vec::new();
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                subdirs.push(p);
+            } else if e.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
+                return Some(p);
+            }
+        }
+        if depth == 0 {
+            return None;
+        }
+        subdirs.iter().find_map(|d| walk(d, name, depth - 1))
+    }
+    roots.iter().find_map(|r| walk(r, file_name, max_depth))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_nvidia_smi_csv() {
+        let gpus = parse_nvidia_smi("NVIDIA GeForce RTX 4070, 12282, 9504, 580.82\n");
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].vram_total_mib, 12282);
+        assert_eq!(gpus[0].driver, "580.82");
+        assert!(parse_nvidia_smi("garbage").is_empty());
+    }
+
+    #[test]
+    fn finds_nested_model_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("ggml-org/embeddinggemma-300M-GGUF");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("embeddinggemma-300M-Q8_0.gguf"), b"x").unwrap();
+        let roots = vec![dir.path().join("missing"), dir.path().to_path_buf()];
+        assert!(find_file(&roots, "embeddinggemma-300M-Q8_0.gguf", 3).is_some());
+        assert!(find_file(&roots, "embeddinggemma-300M-Q8_0.gguf", 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn report_with_everything_local_has_no_server_blockers() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths { config_file: dir.path().join("config.toml"), data_dir: dir.path().join("data") };
+        let mut cfg = Config::default();
+        cfg.vision.backend = Backend::Local;
+        cfg.embed.backend = Backend::Local;
+        cfg.stt.backend = Backend::Local;
+        cfg.save(&paths.config_file).unwrap();
+
+        let r = run(&paths).await;
+        assert!(r.db.ok, "{:?}", r.db.error);
+        assert_eq!(r.vision.target, Target::Local);
+        assert!(r.blockers().iter().all(|b| !b.starts_with("vision") && !b.starts_with("stt")));
+    }
+}

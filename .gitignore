@@ -1,0 +1,15 @@
+# Rust
+target/
+# Node / Vite
+node_modules/
+dist/
+*.local
+*.log
+# Tauri generated
+src-tauri/gen/
+# Editors / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+*.sw?

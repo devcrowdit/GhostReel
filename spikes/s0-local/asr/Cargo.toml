@@ -1,0 +1,9 @@
+[package]
+name = "s0-asr"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+whisper-rs = { version = "=0.16.0", features = ["cuda"] }
+anyhow = "1"
