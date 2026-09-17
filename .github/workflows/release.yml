@@ -191,9 +191,20 @@ jobs:
         env:
           NO_STRIP: "true"
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Fix AppImage (drop driver libs, dedupe CUDA libs, repack)
         run: scripts/fix-appimage.sh
+
+      # Repacking changes the file, so Tauri's signature from the build no longer matches: sign again.
+      - name: Re-sign the AppImage for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          shopt -s nullglob
+          for img in target/release/bundle/appimage/*.AppImage; do
+            npx tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" "$img"
+          done
 
       - name: Package CLI
         run: scripts/package-cli.sh
@@ -225,6 +236,37 @@ jobs:
               sleep 15
             done
           done
+          # Upload .sig files (updater signatures) as release assets.
+          shopt -s nullglob
+          for sig in target/release/bundle/appimage/*.AppImage.sig target/release/bundle/deb/*.deb.sig; do
+            gh release upload "$TAG" "$sig" --clobber --repo "$GITHUB_REPOSITORY" || true
+          done
+
+      - name: Write updater snippet
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          [ ${#appimages[@]} -gt 0 ] || { echo "::error::no AppImage found for updater snippet"; exit 1; }
+          appimage="${appimages[0]}"
+          assetName="$(basename "$appimage")"
+          sigFile="${appimage}.sig"
+          sig=""
+          if [ -f "$sigFile" ]; then
+            sig="$(cat "$sigFile")"
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${assetName}"
+          mkdir -p target/updater
+          jq -n --arg s "$sig" --arg u "$url" \
+            '{platform: "linux-x86_64", signature: $s, url: $u}' > target/updater/updater-linux.json
+          cat target/updater/updater-linux.json
+
+      - name: Upload updater snippet
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-linux
+          path: target/updater/updater-linux.json
 
   windows-x64:
     name: windows-x64
@@ -323,6 +365,8 @@ jobs:
 
       - name: Build Tauri NSIS bundle
         run: npx tauri build --config src-tauri/tauri.bundle.json --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Package Windows CLI zip
         shell: pwsh
@@ -373,6 +417,33 @@ jobs:
               Start-Sleep -Seconds 15
             }
           }
+          # Upload .sig files (updater signatures) as release assets.
+          Get-ChildItem -Path target/release/bundle/nsis/*.sig -ErrorAction SilentlyContinue | ForEach-Object {
+            gh release upload $env:TAG $_.FullName --clobber --repo $env:GITHUB_REPOSITORY
+          }
+
+      - name: Write updater snippet
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $exes = @(Get-ChildItem -Path target/release/bundle/nsis/*-setup.exe)
+          if ($exes.Count -eq 0) { throw "no NSIS installer found for updater snippet" }
+          $exe = $exes[0]
+          $sigFile = "$($exe.FullName).sig"
+          $sig = ""
+          if (Test-Path $sigFile) { $sig = Get-Content $sigFile -Raw | ForEach-Object { $_.Trim() } }
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:TAG/$($exe.Name)"
+          New-Item -ItemType Directory -Force -Path target/updater | Out-Null
+          $snippet = [ordered]@{ platform = "windows-x86_64"; signature = $sig; url = $url }
+          $snippet | ConvertTo-Json | Set-Content target/updater/updater-windows.json
+          Get-Content target/updater/updater-windows.json
+
+      - name: Upload updater snippet
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-windows
+          path: target/updater/updater-windows.json
 
   publish-release:
     name: Publish release
@@ -381,6 +452,50 @@ jobs:
     if: always() && needs.create-release.result == 'success' && (needs.linux-x64.result == 'success' || needs.windows-x64.result == 'success')
     runs-on: ubuntu-latest
     steps:
+      - name: Download Linux updater snippet
+        if: needs.linux-x64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: updater-linux
+          path: updater-snippets
+        continue-on-error: true
+
+      - name: Download Windows updater snippet
+        if: needs.windows-x64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: updater-windows
+          path: updater-snippets
+        continue-on-error: true
+
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          export version="${TAG#v}"
+          export pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export notes="GhostReel ${TAG}"
+          shopt -s nullglob
+          snippets=(updater-snippets/*.json)
+          platforms='{}'
+          if [ ${#snippets[@]} -gt 0 ]; then
+            platforms=$(jq -s 'map({(.platform): {signature: .signature, url: .url}}) | add' "${snippets[@]}")
+          fi
+          jq -n --arg v "$version" --arg n "$notes" --arg d "$pub_date" --argjson p "$platforms" \
+            '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
+          cat latest.json
+        shell: bash
+
+      - name: Upload latest.json to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
       - name: Flip draft to published
         uses: actions/github-script@v8
         env:
@@ -391,3 +506,4 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               release_id: Number(process.env.RELEASE_ID), draft: false,
             });
+

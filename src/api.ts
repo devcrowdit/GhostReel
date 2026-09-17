@@ -604,3 +604,5 @@ export interface ChatSettings {
 }
 export const getChatSettings = () => invoke<ChatSettings>("get_chat_settings");
 export const setChatSystemPrompt = (prompt: string) => invoke<ChatSettings>("set_chat_system_prompt", { prompt });
+
+export const appVersion = () => invoke<string>("app_version");

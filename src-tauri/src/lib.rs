@@ -748,6 +748,12 @@ fn apply_wayland_webkit_workaround() {
     }
 }
 
+/// Return the running app version (from Cargo.toml, baked in at compile time).
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -756,6 +762,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(SearchState::default())
         .manage(tokio::sync::OnceCell::<media::MediaServer>::new())
         .manage(queue::Queue::default())
@@ -823,6 +831,7 @@ pub fn run() {
             set_ai_settings,
             server_models,
             probe_backends,
+            app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

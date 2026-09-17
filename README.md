@@ -208,6 +208,19 @@ Everything lives in one folder: **`~/.ghostreel/`** (`%USERPROFILE%\.ghostreel\`
 
 ---
 
+## Updates
+
+GhostReel checks for new releases from [github.com/devcrowdit/GhostReel](https://github.com/devcrowdit/GhostReel/releases)
+on the **Status** page. Click **Check for updates** — if a newer version is available you will see
+the release notes and a **Download and install** button with a progress bar. Once the download
+finishes, **Restart to finish** applies the update immediately.
+
+Updates are signed with a minisign key; the public key is embedded in the app and the
+installer. The updater manifest (`latest.json`) is published to the GitHub release by CI
+and consumed over HTTPS — no external update server required.
+
+---
+
 ## Build from source
 
 Requirements: **Rust** (stable), **Node.js 22**, the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
