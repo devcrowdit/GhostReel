@@ -141,7 +141,14 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
       title: "Delete project",
       kind: "warning",
     });
-    if (ok) run(() => removeProject(projectId));
+    if (!ok) return;
+    // Second question: the index (keyframes, transcripts, previews) can be kept for reuse, since
+    // re-indexing the same footage is slow.
+    const purge = await ask(
+      "Also delete what was indexed for it — keyframes, preview renders, and the transcripts, descriptions and search index of footage no other project uses?\n\nKeep it if you may add this footage to another project later. Your video files are not touched either way.",
+      { title: "Delete the indexed data too?", kind: "warning", okLabel: "Delete indexed data", cancelLabel: "Keep it" },
+    );
+    run(() => removeProject(projectId, purge));
   };
 
   const onRename = async (e?: React.FormEvent) => {

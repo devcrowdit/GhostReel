@@ -218,6 +218,14 @@ fn tools() -> Vec<Value> {
             }), &["script_id", "out"]),
         }),
         json!({
+            "name": "delete_project",
+            "description": "Delete a project. With purge=true also delete its keyframes, preview renders and the transcripts/descriptions/vectors of footage no other project uses. Video files are never touched.",
+            "inputSchema": obj(json!({
+                "project": project,
+                "purge": { "type": "boolean", "description": "default false: keep the index for reuse" },
+            }), &["project"]),
+        }),
+        json!({
             "name": "set_video_role",
             "description": "Take a video out of a project's library: 'removed' (ignored everywhere) or 'reference' (a finished edit the script chat studies but never cuts from). 'footage' puts it back.",
             "inputSchema": obj(json!({
@@ -440,6 +448,14 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
             let out = PathBuf::from(arg_str(args, "out")?);
             let res = ghostreel_core::export::export_script(&db, &paths.data_dir, script_id, fmt, &out)?;
             Ok(json!({ "path": res.path, "format": format }))
+        }
+        "delete_project" => {
+            let mut db = open_db(paths)?;
+            let p = project(&db, args)?;
+            let purge = args.get("purge").and_then(|v| v.as_bool()).unwrap_or(false);
+            let stats = if purge { db.purge_project_data(&paths.data_dir, p.id)? } else { Default::default() };
+            db.remove_project(p.id)?;
+            Ok(json!({ "removed": p.name, "purged": stats }))
         }
         "set_video_role" => {
             let db = open_db(paths)?;

@@ -49,6 +49,29 @@ impl NewProject {
     }
 }
 
+/// What [`Db::purge_project_data`] removed. `videos` counts footage that only this project saw:
+/// its transcripts, keyframes, descriptions and search vectors go with it. Footage shared with
+/// another project is kept.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PurgeStats {
+    pub videos: i64,
+    pub files_deleted: usize,
+    pub bytes_freed: u64,
+}
+
+/// Total size of a directory tree (best effort).
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -167,6 +190,82 @@ impl Db {
         Ok(rows)
     }
 
+    /// Delete everything indexed for a project: keyframe images, preview renders and proxies, plus
+    /// the transcripts, descriptions and vectors of footage no other project uses. The video files
+    /// themselves are never touched. Call before [`remove_project`](Self::remove_project).
+    pub fn purge_project_data(&mut self, data_dir: &Path, project_id: i64) -> Result<PurgeStats, Error> {
+        let mut stats = PurgeStats::default();
+        let delete = |path: &Path, stats: &mut PurgeStats| {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let ok = if meta.is_dir() {
+                    std::fs::remove_dir_all(path).is_ok()
+                } else {
+                    std::fs::remove_file(path).is_ok()
+                };
+                if ok {
+                    stats.files_deleted += 1;
+                    stats.bytes_freed += if meta.is_dir() { dir_size(path) } else { meta.len() };
+                }
+            }
+        };
+
+        // Preview renders of this project's scripts (previews/script_<id>_v<n>.mp4).
+        let script_ids: Vec<i64> = {
+            let mut st = self.conn.prepare("SELECT id FROM scripts WHERE project_id = ?1")?;
+            st.query_map([project_id], |r| r.get(0))?.collect::<Result<_, _>>()?
+        };
+        let previews = data_dir.join("previews");
+        if let Ok(entries) = std::fs::read_dir(&previews) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if script_ids.iter().any(|id| name.starts_with(&format!("script_{id}_v"))) {
+                    let p = e.path();
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    if std::fs::remove_file(&p).is_ok() {
+                        stats.files_deleted += 1;
+                        stats.bytes_freed += size;
+                    }
+                }
+            }
+        }
+
+        // Footage only this project sees.
+        let videos: Vec<(i64, String)> = {
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT v.id, v.content_hash FROM videos v
+                   JOIN video_files vf ON vf.video_id = v.id
+                   JOIN project_folders pf ON pf.folder_id = vf.folder_id
+                  WHERE pf.project_id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM video_files vf2
+                                      JOIN project_folders pf2 ON pf2.folder_id = vf2.folder_id
+                                     WHERE vf2.video_id = v.id AND pf2.project_id <> ?1)",
+            )?;
+            st.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?
+        };
+        let proxies = data_dir.join("proxies");
+        for (video_id, hash) in &videos {
+            delete(&data_dir.join(crate::index::frames_rel_dir(hash)), &mut stats);
+            // Preview proxies are named after the content hash.
+            let prefix: String =
+                hash.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+            if let Ok(entries) = std::fs::read_dir(&proxies) {
+                for e in entries.flatten() {
+                    if e.file_name().to_string_lossy().starts_with(&prefix) {
+                        let p = e.path();
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        if std::fs::remove_file(&p).is_ok() {
+                            stats.files_deleted += 1;
+                            stats.bytes_freed += size;
+                        }
+                    }
+                }
+            }
+            // Cascades to video_files, jobs, transcripts, frames, chunks and vectors.
+            stats.videos += self.conn.execute("DELETE FROM videos WHERE id = ?1", [video_id])? as i64;
+        }
+        Ok(stats)
+    }
+
     /// Delete a project; folders no other project uses are removed with it.
     pub fn remove_project(&mut self, id: i64) -> Result<(), Error> {
         let tx = self.conn.transaction()?;
@@ -280,6 +379,64 @@ pub fn normalize_dir(path: &Path) -> Result<PathBuf, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purge_deletes_only_this_project_s_footage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let mut db = Db::open_in_memory().unwrap();
+        let solo = db.create_project(&NewProject::named("Solo")).unwrap();
+        let other = db.create_project(&NewProject::named("Other")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("b")).unwrap();
+        let f_solo = db.add_folder(solo.id, &tmp.path().join("a"), true).unwrap();
+        let f_shared = db.add_folder(solo.id, &tmp.path().join("b"), true).unwrap();
+        db.add_folder(other.id, &tmp.path().join("b"), true).unwrap();
+
+        // Two videos: one only in Solo, one in the folder both projects watch.
+        for (id, hash, folder) in [(1, "sha3:aa11", f_solo.id), (2, "sha3:bb22", f_shared.id)] {
+            db.conn
+                .execute("INSERT INTO videos(id, content_hash, size) VALUES (?1, ?2, 1)", params![id, hash])
+                .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen)
+                     VALUES (?1, ?2, ?3, 1, 0, 0)",
+                    params![id, folder, format!("{hash}.mp4")],
+                )
+                .unwrap();
+            let dir = data.join(crate::index::frames_rel_dir(hash));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("t000000000.jpg"), b"0123456789").unwrap();
+        }
+        db.conn
+            .execute("INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (1, 0, 1, 'hi')", [])
+            .unwrap();
+        // A preview render of a Solo script, and a proxy of its video.
+        std::fs::create_dir_all(data.join("previews")).unwrap();
+        std::fs::create_dir_all(data.join("proxies")).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO scripts(id, project_id, title, version, script_json, created_at)
+                 VALUES (7, ?1, 't', 1, '{}', 0)",
+                [solo.id],
+            )
+            .unwrap();
+        std::fs::write(data.join("previews/script_7_v1.mp4"), b"preview").unwrap();
+        std::fs::write(data.join("proxies/sha3-aa11_0_1000_25_1_960x540.mp4"), b"proxy").unwrap();
+
+        let stats = db.purge_project_data(&data, solo.id).unwrap();
+        assert_eq!(stats.videos, 1, "only the video no other project sees: {stats:?}");
+        assert!(stats.bytes_freed > 0);
+        assert!(!data.join(crate::index::frames_rel_dir("sha3:aa11")).exists());
+        assert!(data.join(crate::index::frames_rel_dir("sha3:bb22")).is_dir(), "shared footage keeps its keyframes");
+        assert!(!data.join("previews/script_7_v1.mp4").exists());
+        assert!(!data.join("proxies/sha3-aa11_0_1000_25_1_960x540.mp4").exists());
+        let segs: i64 = db.conn.query_row("SELECT COUNT(*) FROM transcript_segments", [], |r| r.get(0)).unwrap();
+        assert_eq!(segs, 0, "transcripts of the deleted video are gone");
+        db.remove_project(solo.id).unwrap();
+        assert_eq!(db.projects().unwrap().len(), 1);
+    }
 
     #[test]
     fn project_crud_and_unique_names() {

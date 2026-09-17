@@ -74,9 +74,15 @@ fn rename_project(project_id: i64, name: String) -> CmdResult<Project> {
     open_db()?.rename_project(project_id, &name).map_err(err)
 }
 
+/// `purge`: also delete keyframes, preview renders and the transcripts/descriptions/vectors of
+/// footage no other project uses. Video files are never touched.
 #[tauri::command]
-fn remove_project(project_id: i64) -> CmdResult<()> {
-    open_db()?.remove_project(project_id).map_err(err)
+fn remove_project(project_id: i64, purge: bool) -> CmdResult<ghostreel_core::projects::PurgeStats> {
+    let p = paths()?;
+    let mut db = open_db()?;
+    let stats = if purge { db.purge_project_data(&p.data_dir, project_id).map_err(err)? } else { Default::default() };
+    db.remove_project(project_id).map_err(err)?;
+    Ok(stats)
 }
 
 #[derive(Serialize)]

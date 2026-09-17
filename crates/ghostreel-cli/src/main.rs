@@ -248,8 +248,14 @@ enum ProjectAction {
     },
     /// Put an excluded video back into the library.
     Include { name: String, video: String },
-    /// Delete a project (indexed video data is kept for reuse).
-    Remove { name: String },
+    /// Delete a project. Indexed data is kept for reuse unless --purge is given.
+    Remove {
+        name: String,
+        /// Also delete what was indexed: keyframes, preview renders, and the transcripts,
+        /// descriptions and vectors of footage no other project uses. Video files are untouched.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -667,10 +673,19 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
             let renamed = db.rename_project(p.id, &new_name)?;
             println!("renamed project '{}' to '{}'", p.name, renamed.name);
         }
-        ProjectAction::Remove { name } => {
+        ProjectAction::Remove { name, purge } => {
             let p = db.require_project(&name)?;
+            if purge {
+                let s = db.purge_project_data(&paths.data_dir, p.id)?;
+                println!(
+                    "deleted indexed data: {} videos, {} files, {}",
+                    s.videos,
+                    s.files_deleted,
+                    human_size(s.bytes_freed as i64)
+                );
+            }
             db.remove_project(p.id)?;
-            println!("removed project '{}'", p.name);
+            println!("removed project '{}'{}", p.name, if purge { "" } else { " (indexed data kept)" });
         }
     }
     Ok(ExitCode::SUCCESS)

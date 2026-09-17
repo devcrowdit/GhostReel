@@ -306,7 +306,14 @@ export const createProject = (name: string, fpsNum: number, fpsDen: number, widt
   invoke<Project>("create_project", { name, fpsNum, fpsDen, width, height });
 export const renameProject = (projectId: number, name: string) =>
   invoke<Project>("rename_project", { projectId, name });
-export const removeProject = (projectId: number) => invoke<void>("remove_project", { projectId });
+export interface PurgeStats {
+  videos: number;
+  files_deleted: number;
+  bytes_freed: number;
+}
+/** `purge`: also delete keyframes, previews and the index of footage no other project uses. */
+export const removeProject = (projectId: number, purge = false) =>
+  invoke<PurgeStats>("remove_project", { projectId, purge });
 export const projectView = (projectId: number) => invoke<ProjectView>("project_view", { projectId });
 export const addFolder = (projectId: number, path: string, recursive = true) =>
   invoke<void>("add_folder", { projectId, path, recursive });

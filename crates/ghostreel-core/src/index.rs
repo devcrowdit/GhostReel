@@ -842,7 +842,7 @@ fn stage_work(db: &Db, stage: &str, opts: &Options) -> Result<(f64, i64), Error>
 }
 
 /// `frames/<2 hex>/<hash>/` under the data dir (relative, so the data dir can move).
-fn frames_rel_dir(content_hash: &str) -> PathBuf {
+pub fn frames_rel_dir(content_hash: &str) -> PathBuf {
     let hex = content_hash.rsplit(':').next().unwrap_or(content_hash);
     PathBuf::from("frames").join(&hex[..2.min(hex.len())]).join(hex)
 }
