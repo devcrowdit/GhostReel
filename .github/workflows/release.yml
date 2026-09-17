@@ -121,7 +121,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # The CUDA helpers take most of the build time: reuse them until their code, Cargo.lock,
+      # the CUDA version or the GPU architectures change.
+      - name: Restore CUDA helpers
+        id: helpers
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/release/ghostreel-asr
+            target/release/ghostreel-llm
+          key: helpers-linux-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'Cargo.lock', 'scripts/build-helpers.sh') }}
+
       - name: Build native helpers
+        if: steps.helpers.outputs.cache-hit != 'true'
         run: scripts/build-helpers.sh asr llm
 
       - name: Build CLI
@@ -239,11 +251,23 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Reuse the CUDA helpers until their code, Cargo.lock, CUDA or the GPU architectures change.
+      - name: Restore CUDA helpers
+        id: helpers
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/release/ghostreel-asr.exe
+            target/release/ghostreel-llm.exe
+          key: helpers-windows-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'Cargo.lock', 'scripts/build-helpers.sh') }}
+
       - name: Build helper ghostreel-asr
+        if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
         run: cargo build -j 4 --release -p ghostreel-asr --features cuda
 
       - name: Build helper ghostreel-llm
+        if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
         run: cargo build -j 4 --release -p ghostreel-llm --features cuda
 
