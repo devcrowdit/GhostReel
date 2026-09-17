@@ -1,6 +1,7 @@
 //! GhostReel desktop app. UI logic lives in the React frontend; everything else is
 //! `ghostreel-core`, shared with the CLI.
 
+mod media;
 mod queue;
 
 use std::path::PathBuf;
@@ -159,6 +160,13 @@ async fn search(
     Ok(SearchView { hits, note })
 }
 
+/// Base URL of the local media server (append `?path=<url-encoded absolute path>`).
+#[tauri::command]
+async fn media_base(server: State<'_, tokio::sync::OnceCell<media::MediaServer>>) -> CmdResult<String> {
+    let s = server.get_or_try_init(media::start).await?;
+    Ok(s.base.clone())
+}
+
 #[derive(Serialize)]
 struct SearchView {
     hits: Vec<ghostreel_core::search::Hit>,
@@ -240,6 +248,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(SearchState::default())
+        .manage(tokio::sync::OnceCell::<media::MediaServer>::new())
         .manage(queue::Queue::default())
         .setup(|app| {
             // Frames/thumbnails are served from the data dir via the asset protocol; scope it
@@ -274,6 +283,7 @@ pub fn run() {
             video_frames,
             search,
             open_external,
+            media_base,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

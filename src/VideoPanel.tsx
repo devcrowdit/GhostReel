@@ -3,6 +3,7 @@ import {
   clock,
   fileName,
   fileUrl,
+  mediaUrl,
   openExternal,
   videoFrames,
   videoTranscript,
@@ -45,6 +46,8 @@ export default function VideoPanel({
   const [filter, setFilter] = useState("");
   const [now, setNow] = useState(0);
   const [playError, setPlayError] = useState(false);
+  const [src, setSrc] = useState<string | null>(null);
+  const pendingSeek = useRef<number | null>(null);
 
   useEffect(() => {
     setSegments(null);
@@ -53,11 +56,19 @@ export default function VideoPanel({
   useEffect(() => {
     videoFrames(video.id).then(setFrames).catch(() => setFrames([]));
   }, [video.id, video.frames]);
-  useEffect(() => setPlayError(false), [video.id]);
+  useEffect(() => {
+    setPlayError(false);
+    setSrc(null);
+    mediaUrl(video.path).then(setSrc).catch(() => setPlayError(true));
+  }, [video.id, video.path]);
 
   const jump = (t: number) => {
     const v = player.current;
-    if (!v) return;
+    // Before metadata loads, remember the seek and apply it in onLoadedMetadata.
+    if (!v || v.readyState < 1) {
+      pendingSeek.current = t;
+      return;
+    }
     v.currentTime = t;
     v.play().catch(() => {});
   };
@@ -94,9 +105,16 @@ export default function VideoPanel({
       <div className="player-wrap">
         <video
           ref={player}
-          src={fileUrl(video.path)}
+          src={src ?? undefined}
           controls
           preload="metadata"
+          onLoadedMetadata={(e) => {
+            if (pendingSeek.current != null) {
+              e.currentTarget.currentTime = pendingSeek.current;
+              pendingSeek.current = null;
+              e.currentTarget.play().catch(() => {});
+            }
+          }}
           onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
           onError={() => setPlayError(true)}
         />

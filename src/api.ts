@@ -245,6 +245,12 @@ export interface Hit {
 
 export const search = (projectId: number, query: string, limit = 30) =>
   invoke<{ hits: Hit[]; note: string | null }>("search", { projectId, query, limit });
+let mediaBasePromise: Promise<string> | null = null;
+/** URL the player can stream (byte ranges) — WebKitGTK can't stream video from the asset protocol. */
+export const mediaUrl = async (path: string) => {
+  mediaBasePromise ??= invoke<string>("media_base");
+  return `${await mediaBasePromise}?path=${encodeURIComponent(path)}`;
+};
 export const openExternal = (path: string, t: number) => invoke<void>("open_external", { path, t });
 
 export const clock = (s: number) => {
