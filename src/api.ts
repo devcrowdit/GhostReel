@@ -138,7 +138,32 @@ export type IndexEvent =
   | { event: "scanned"; new: number; changed: number; unchanged: number; removed: number }
   | { event: "job_started"; video_id: number; stage: string; path: string }
   | { event: "job_done"; video_id: number; stage: string }
-  | { event: "job_failed"; video_id: number; stage: string; error: string };
+  | { event: "job_failed"; video_id: number; stage: string; error: string }
+  | ({ event: "progress" } & Progress);
+
+export interface Progress {
+  phase: string;
+  phase_done: number;
+  phase_total: number;
+  fraction: number;
+  eta_secs: number | null;
+  elapsed_secs: number;
+  current: string | null;
+}
+
+export const PHASE_LABELS: Record<string, string> = {
+  hash: "Reading new files",
+  probe: "Reading video details",
+};
+
+/** "a few seconds", "42 s", "about 2 min", "about 1 h 20 min" — same wording as the CLI. */
+export const etaText = (secs: number) => {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 10) return "a few seconds";
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `about ${Math.ceil(s / 60)} min`;
+  return `about ${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} min`;
+};
 
 export interface IndexFinished {
   project_id: number;

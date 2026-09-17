@@ -10,6 +10,7 @@ pub mod index;
 pub mod media;
 pub mod paths;
 pub mod probe;
+pub mod progress;
 pub mod projects;
 pub mod watch;
 

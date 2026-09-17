@@ -370,3 +370,22 @@ td.name {
 .danger-zone {
   margin-top: 28px;
 }
+
+.card.progress {
+  margin-top: 8px;
+}
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meter.big {
+  height: 10px;
+  border-radius: 5px;
+}
+
+.meter > div {
+  transition: width 0.25s ease-out;
+}

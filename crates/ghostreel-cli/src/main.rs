@@ -1,5 +1,6 @@
 //! `ghostreel` — headless GhostReel CLI.
 
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use ghostreel_core::doctor::{self, Report};
 use ghostreel_core::index::{self, Event, IndexLock};
 use ghostreel_core::paths::Paths;
 use ghostreel_core::probe::{Resolution, Target};
+use ghostreel_core::progress::{Progress, eta_text};
 use ghostreel_core::projects::NewProject;
 use ghostreel_core::watch::FolderWatcher;
 
@@ -291,12 +293,19 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
     let ffprobe = doctor::locate("ffprobe").context("ffprobe not found (run: ghostreel doctor)")?;
     let opts = index::Options { project_id: pid, retry_failed, settle_secs: if watch { 10 } else { 0 } };
 
-    let print = |e: Event| {
+    // On a terminal: one live progress line (per-video successes are implied by it).
+    let tty = !json && std::io::stderr().is_terminal();
+    let mut bar_visible = false;
+    let mut print = |e: Event| {
         if json {
             if let Ok(line) = serde_json::to_string(&e) {
                 println!("{line}");
             }
             return;
+        }
+        if bar_visible && !matches!(e, Event::Progress(_) | Event::JobDone { .. } | Event::JobStarted { .. }) {
+            eprint!("\r\x1b[2K");
+            bar_visible = false;
         }
         match e {
             Event::ScanFolder { path } => println!("scan  {}", path.display()),
@@ -305,8 +314,19 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
                 println!("  {new} new, {changed} changed, {unchanged} unchanged, {removed} removed")
             }
             Event::JobStarted { .. } => {}
-            Event::JobDone { video_id, stage } => println!("  ✓ {stage} #{video_id}"),
+            Event::JobDone { video_id, stage } => {
+                if !tty {
+                    println!("  ✓ {stage} #{video_id}")
+                }
+            }
             Event::JobFailed { video_id, stage, error } => println!("  ✗ {stage} #{video_id}: {error}"),
+            Event::Progress(p) => {
+                if tty {
+                    eprint!("\r\x1b[2K{}", progress_line(&p));
+                    let _ = std::io::stderr().flush();
+                    bar_visible = true;
+                }
+            }
         }
     };
 
@@ -327,8 +347,11 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
             }
             Err(e) => return Err(e.into()),
         };
-        let s = index::run(&mut db, &ffprobe, &opts, print).await?;
+        let s = index::run(&mut db, &ffprobe, &opts, &mut print).await?;
         drop(lock);
+        if tty {
+            eprint!("\r\x1b[2K");
+        }
         failed_total += s.jobs_failed;
         if !json {
             println!("done: {} jobs ok, {} failed{}", s.jobs_done, s.jobs_failed,
@@ -350,6 +373,35 @@ async fn index_cmd(paths: &Paths, project: Option<&str>, watch: bool, retry_fail
         }
     }
     Ok(if failed_total == 0 { ExitCode::SUCCESS } else { ExitCode::from(3) })
+}
+
+/// `[██████░░░░░░]  48%  probe 12/25  · about 2 min left · clip.mp4`
+fn progress_line(p: &Progress) -> String {
+    const WIDTH: usize = 24;
+    let filled = ((p.fraction * WIDTH as f64).round() as usize).min(WIDTH);
+    let eta = match p.eta_secs {
+        Some(s) if p.fraction < 1.0 => format!(" · {} left", eta_text(s)),
+        _ => String::new(),
+    };
+    let current = p
+        .current
+        .as_ref()
+        .and_then(|c| c.file_name())
+        .map(|n| format!(" · {}", n.to_string_lossy()))
+        .unwrap_or_default();
+    let phase = match p.phase.as_str() {
+        "hash" => "reading files",
+        "probe" => "video details",
+        other => other,
+    };
+    format!(
+        "[{}{}] {:>3.0}%  {phase} {}/{}{eta}{current}",
+        "█".repeat(filled),
+        "░".repeat(WIDTH - filled),
+        p.fraction * 100.0,
+        p.phase_done,
+        p.phase_total
+    )
 }
 
 /// Ctrl+C, or SIGTERM on Unix (systemd / `kill`).

@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use crate::Error;
 use crate::db::Db;
 use crate::media::{self, MediaInfo};
+use crate::progress::{Progress, Tracker};
 use crate::projects::now;
 
 /// Pipeline stages in execution order.
@@ -37,6 +38,8 @@ pub enum Event {
     JobStarted { video_id: i64, stage: String, path: PathBuf },
     JobDone { video_id: i64, stage: String },
     JobFailed { video_id: i64, stage: String, error: String },
+    /// Overall progress and time remaining (throttled to ~4 per second).
+    Progress(Progress),
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -86,23 +89,57 @@ impl IndexLock {
     }
 }
 
+/// Default speeds for a machine that has never indexed (units per second); replaced by measured
+/// rates after the first runs.
+const PHASES: &[(&str, f64)] = &[("hash", 40.0), ("probe", 15.0)];
+
 /// Scan + run all pending jobs. Callers hold an [`IndexLock`].
-pub async fn run(db: &mut Db, ffprobe_bin: &Path, opts: &Options, mut on_event: impl FnMut(Event)) -> Result<Summary, Error> {
+///
+/// Emits [`Event::Progress`] (throttled) with overall completion and time remaining.
+pub async fn run(
+    db: &mut Db,
+    ffprobe_bin: &Path,
+    opts: &Options,
+    mut on_event: impl FnMut(Event),
+) -> Result<Summary, Error> {
     let mut summary = Summary::default();
-    let folders = db.folders(opts.project_id)?;
-    for folder in folders.iter().filter(|f| f.enabled) {
+    let mut tracker = Tracker::new(PHASES);
+    tracker.load_rates(db)?;
+
+    // 1. Walk every folder first, so the run's totals are known before the slow work starts.
+    let mut pending = Vec::new();
+    for folder in db.folders(opts.project_id)?.into_iter().filter(|f| f.enabled) {
         on_event(Event::ScanFolder { path: folder.path.clone() });
         if !folder.path.is_dir() {
             // Unplugged drive / network share: keep the index, don't treat files as deleted.
             on_event(Event::FolderMissing { path: folder.path.clone() });
             continue;
         }
-        let s = scan_folder(db, folder.id, &folder.path, folder.recursive, opts.settle_secs).await?;
-        summary.new += s.new;
-        summary.changed += s.changed;
-        summary.unchanged += s.unchanged;
-        summary.removed += s.removed;
-        summary.unsettled += s.unsettled;
+        let w = walk_folder(db, folder.id, &folder.path, folder.recursive, opts.settle_secs).await?;
+        summary.unchanged += w.unchanged;
+        summary.unsettled += w.unsettled;
+        pending.push(w);
+    }
+
+    reset_interrupted(db)?;
+    let to_hash: Vec<ToHash> = pending.iter_mut().flat_map(|w| std::mem::take(&mut w.to_hash)).collect();
+    let hash_work = to_hash.iter().filter(|f| f.known_hash.is_none()).count() as u64;
+    let already_queued = claimable_jobs(db, "probe", opts)?.len() as u64;
+    tracker.set_total("hash", hash_work);
+    // Upper bound until hashing tells us which files are genuinely new content.
+    tracker.set_total("probe", already_queued + to_hash.len() as u64);
+
+    // 2. Hash new/changed files (all folders together).
+    tracker.start("hash");
+    on_event(Event::Progress(tracker.snapshot(None)));
+    let (new, changed) = hash_and_store(db, to_hash, &mut tracker, &mut on_event).await?;
+    summary.new = new;
+    summary.changed = changed;
+    for w in &pending {
+        summary.removed += db.conn.execute(
+            "DELETE FROM video_files WHERE folder_id = ?1 AND last_seen < ?2",
+            params![w.folder_id, w.seq],
+        )?;
     }
     on_event(Event::Scanned {
         new: summary.new,
@@ -111,20 +148,34 @@ pub async fn run(db: &mut Db, ffprobe_bin: &Path, opts: &Options, mut on_event: 
         removed: summary.removed,
     });
 
-    reset_interrupted(db)?;
-    let (done, failed) = run_probe_jobs(db, ffprobe_bin, opts, &mut on_event).await?;
+    // 3. Jobs.
+    let (done, failed) = run_probe_jobs(db, ffprobe_bin, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
+
+    tracker.finish();
+    tracker.save_rates(db)?;
+    on_event(Event::Progress(tracker.snapshot(None)));
     Ok(summary)
 }
 
-#[derive(Default)]
-struct ScanStats {
-    new: usize,
-    changed: usize,
+struct ToHash {
+    folder_id: i64,
+    seq: i64,
+    path: PathBuf,
+    size: i64,
+    mtime: i64,
+    existed: bool,
+    /// Identity already known through an overlapping folder (no hashing needed).
+    known_hash: Option<String>,
+}
+
+struct Walked {
+    folder_id: i64,
+    seq: i64,
     unchanged: usize,
-    removed: usize,
     unsettled: usize,
+    to_hash: Vec<ToHash>,
 }
 
 fn next_scan_seq(db: &Db) -> Result<i64, Error> {
@@ -146,15 +197,16 @@ fn mtime_secs(m: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-async fn scan_folder(
+/// List a folder's video files; mark unchanged/unsettled ones as seen and return the rest.
+async fn walk_folder(
     db: &mut Db,
     folder_id: i64,
     root: &Path,
     recursive: bool,
     settle_secs: i64,
-) -> Result<ScanStats, Error> {
+) -> Result<Walked, Error> {
     let seq = next_scan_seq(db)?;
-    let mut stats = ScanStats::default();
+    let mut w = Walked { folder_id, seq, unchanged: 0, unsettled: 0, to_hash: Vec::new() };
 
     // Walk (blocking IO) off the async threads.
     let root_owned = root.to_path_buf();
@@ -180,73 +232,87 @@ async fn scan_folder(
             .collect::<Result<_, _>>()?
     };
 
-    let mut to_hash = Vec::new();
     let settled_before = now() - settle_secs;
-    {
-        let tx = db.conn.transaction()?;
-        for (path, size, mtime) in files {
-            let key = path.to_string_lossy().to_string();
-            match known.get(&key) {
-                Some(&(s, m)) if s == size && m == mtime => {
-                    tx.execute(
-                        "UPDATE video_files SET last_seen = ?1 WHERE folder_id = ?2 AND path = ?3",
-                        params![seq, folder_id, key],
-                    )?;
-                    stats.unchanged += 1;
-                }
-                _ if settle_secs > 0 && mtime > settled_before => {
-                    // Still being written: keep any existing row alive, look again later.
-                    tx.execute(
-                        "UPDATE video_files SET last_seen = ?1 WHERE folder_id = ?2 AND path = ?3",
-                        params![seq, folder_id, key],
-                    )?;
-                    stats.unsettled += 1;
-                }
-                prev => {
-                    // Same file already hashed through an overlapping folder: reuse its identity.
-                    let hash: Option<String> = tx
-                        .query_row(
-                            "SELECT v.content_hash FROM video_files vf JOIN videos v ON v.id = vf.video_id
-                              WHERE vf.path = ?1 AND vf.size = ?2 AND vf.mtime = ?3 LIMIT 1",
-                            params![key, size, mtime],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    to_hash.push((path, size, mtime, prev.is_some(), hash))
-                }
+    let tx = db.conn.transaction()?;
+    for (path, size, mtime) in files {
+        let key = path.to_string_lossy().to_string();
+        match known.get(&key) {
+            Some(&(s, m)) if s == size && m == mtime => {
+                tx.execute(
+                    "UPDATE video_files SET last_seen = ?1 WHERE folder_id = ?2 AND path = ?3",
+                    params![seq, folder_id, key],
+                )?;
+                w.unchanged += 1;
+            }
+            _ if settle_secs > 0 && mtime > settled_before => {
+                // Still being written: keep any existing row alive, look again later.
+                tx.execute(
+                    "UPDATE video_files SET last_seen = ?1 WHERE folder_id = ?2 AND path = ?3",
+                    params![seq, folder_id, key],
+                )?;
+                w.unsettled += 1;
+            }
+            prev => {
+                // Same file already hashed through an overlapping folder: reuse its identity.
+                let known_hash: Option<String> = tx
+                    .query_row(
+                        "SELECT v.content_hash FROM video_files vf JOIN videos v ON v.id = vf.video_id
+                          WHERE vf.path = ?1 AND vf.size = ?2 AND vf.mtime = ?3 LIMIT 1",
+                        params![key, size, mtime],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                w.to_hash.push(ToHash { folder_id, seq, path, size, mtime, existed: prev.is_some(), known_hash });
             }
         }
-        tx.commit()?;
     }
+    tx.commit()?;
+    Ok(w)
+}
 
-    // Hash new/changed files concurrently.
+/// Hash files concurrently and record videos, file locations and their pending jobs.
+async fn hash_and_store(
+    db: &mut Db,
+    files: Vec<ToHash>,
+    tracker: &mut Tracker,
+    on_event: &mut impl FnMut(Event),
+) -> Result<(usize, usize), Error> {
     let sem = Arc::new(Semaphore::new(PARALLEL_HASH));
     let mut set = JoinSet::new();
-    for (path, size, mtime, existed, known_hash) in to_hash {
+    for mut f in files {
         let sem = sem.clone();
         set.spawn(async move {
-            if let Some(h) = known_hash {
-                return (path, size, mtime, existed, Ok(Ok(h)));
+            if let Some(h) = f.known_hash.take() {
+                return (f, false, Ok(h));
             }
             let _permit = sem.acquire_owned().await;
-            let p = path.clone();
-            let hash = tokio::task::spawn_blocking(move || media::content_hash(&p)).await;
-            (path, size, mtime, existed, hash)
+            let p = f.path.clone();
+            let hash = tokio::task::spawn_blocking(move || media::content_hash(&p))
+                .await
+                .unwrap_or_else(|e| Err(Error::Invalid(format!("hash task failed: {e}"))));
+            (f, true, hash)
         });
     }
+    let (mut new, mut changed) = (0, 0);
     while let Some(joined) = set.join_next().await {
-        let Ok((path, size, mtime, existed, hash)) = joined else { continue };
+        let Ok((f, hashed, hash)) = joined else { continue };
+        if hashed {
+            tracker.advance("hash", 1);
+            if tracker.should_emit() {
+                on_event(Event::Progress(tracker.snapshot(Some(f.path.clone()))));
+            }
+        }
         // A file that vanished or can't be read mid-scan is skipped; next scan retries it.
-        let Ok(Ok(hash)) = hash else { continue };
+        let Ok(hash) = hash else { continue };
         let tx = db.conn.transaction()?;
-        tx.execute("INSERT OR IGNORE INTO videos(content_hash, size) VALUES (?1, ?2)", params![hash, size])?;
+        tx.execute("INSERT OR IGNORE INTO videos(content_hash, size) VALUES (?1, ?2)", params![hash, f.size])?;
         let video_id: i64 = tx.query_row("SELECT id FROM videos WHERE content_hash = ?1", [&hash], |r| r.get(0))?;
         tx.execute(
             "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(folder_id, path) DO UPDATE SET video_id = excluded.video_id,
                  size = excluded.size, mtime = excluded.mtime, last_seen = excluded.last_seen",
-            params![video_id, folder_id, path.to_string_lossy(), size, mtime, seq],
+            params![video_id, f.folder_id, f.path.to_string_lossy(), f.size, f.mtime, f.seq],
         )?;
         for stage in STAGES {
             tx.execute(
@@ -255,14 +321,13 @@ async fn scan_folder(
             )?;
         }
         tx.commit()?;
-        if existed { stats.changed += 1 } else { stats.new += 1 }
+        if f.existed {
+            changed += 1
+        } else {
+            new += 1
+        }
     }
-
-    stats.removed = db.conn.execute(
-        "DELETE FROM video_files WHERE folder_id = ?1 AND last_seen < ?2",
-        params![folder_id, seq],
-    )?;
-    Ok(stats)
+    Ok((new, changed))
 }
 
 fn reset_interrupted(db: &Db) -> Result<(), Error> {
@@ -320,10 +385,14 @@ async fn run_probe_jobs(
     db: &mut Db,
     ffprobe_bin: &Path,
     opts: &Options,
+    tracker: &mut Tracker,
     on_event: &mut impl FnMut(Event),
 ) -> Result<(usize, usize), Error> {
     const STAGE: &str = "probe";
     let jobs = claimable_jobs(db, STAGE, opts)?;
+    tracker.set_total(STAGE, jobs.len() as u64);
+    tracker.start(STAGE);
+    on_event(Event::Progress(tracker.snapshot(None)));
     let sem = Arc::new(Semaphore::new(PARALLEL_PROBE));
     let mut set = JoinSet::new();
     for (video_id, path) in jobs {
@@ -332,12 +401,13 @@ async fn run_probe_jobs(
         let (sem, bin) = (sem.clone(), ffprobe_bin.to_path_buf());
         set.spawn(async move {
             let _permit = sem.acquire_owned().await;
-            (video_id, media::ffprobe(&bin, &path).await)
+            let result = media::ffprobe(&bin, &path).await;
+            (video_id, path, result)
         });
     }
     let (mut done, mut failed) = (0, 0);
     while let Some(joined) = set.join_next().await {
-        let Ok((video_id, result)) = joined else { continue };
+        let Ok((video_id, path, result)) = joined else { continue };
         match result {
             Ok(info) => {
                 store_media(db, video_id, &info)?;
@@ -352,6 +422,10 @@ async fn run_probe_jobs(
                 on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: msg });
                 failed += 1;
             }
+        }
+        tracker.advance(STAGE, 1);
+        if tracker.should_emit() {
+            on_event(Event::Progress(tracker.snapshot(Some(path))));
         }
     }
     Ok((done, failed))
@@ -547,6 +621,13 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         run(&mut db, &bin, &opts, |_| {}).await.unwrap();
         assert_eq!(status(&db, Some(p.id)).unwrap().videos, 2);
         assert!(events.iter().any(|e| matches!(e, Event::JobFailed { .. })));
+        let last = events.iter().rev().find_map(|e| match e {
+            Event::Progress(p) => Some(p.clone()),
+            _ => None,
+        });
+        let last = last.expect("progress events emitted");
+        assert_eq!(last.fraction, 1.0);
+        assert_eq!(last.phase_done, last.phase_total);
     }
 
     #[cfg(unix)]

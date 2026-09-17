@@ -3,16 +3,19 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   addFolder,
+  etaText,
   fpsLabel,
   humanDuration,
   humanSize,
   isIndexing,
+  PHASE_LABELS,
   projectView,
   removeFolder,
   removeProject,
   startIndex,
   type IndexEvent,
   type IndexFinished,
+  type Progress,
   type ProjectView,
 } from "./api";
 
@@ -23,6 +26,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
   const [error, setError] = useState<string | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [progress, setProgress] = useState<string>("");
+  const [bar, setBar] = useState<Progress | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -36,6 +40,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
   useEffect(() => {
     setView(null);
     setProgress("");
+    setBar(null);
     refresh();
     isIndexing().then(setIndexing);
   }, [refresh]);
@@ -43,6 +48,8 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
   useEffect(() => {
     let done = 0;
     let failed = 0;
+    // Refresh the table while indexing so videos appear as they are processed (at most every 2 s).
+    let lastRefresh = 0;
     const unlisten = [
       listen<IndexEvent>("index-event", ({ payload: e }) => {
         switch (e.event) {
@@ -62,10 +69,20 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
           case "job_failed":
             failed += 1;
             break;
+          case "progress": {
+            const { event: _event, ...p } = e;
+            setBar(p);
+            if (Date.now() - lastRefresh > 2000) {
+              lastRefresh = Date.now();
+              refresh();
+            }
+            break;
+          }
         }
       }),
       listen<IndexFinished>("index-finished", ({ payload }) => {
         setIndexing(false);
+        setBar(null);
         done = 0;
         failed = 0;
         if (payload.error) setProgress(`Indexing failed: ${payload.error}`);
@@ -142,7 +159,31 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
       </header>
 
       {error && <div className="banner bad">{error}</div>}
-      {progress && <div className="banner info">{progress}</div>}
+      {indexing && bar ? (
+        <div className="card progress">
+          <div className="progress-head">
+            <span className="label">
+              {PHASE_LABELS[bar.phase] ?? bar.phase}
+              {bar.phase_total > 0 && (
+                <span className="muted">
+                  {" "}
+                  · {bar.phase_done} of {bar.phase_total}
+                </span>
+              )}
+            </span>
+            <span className="muted">
+              {Math.round(bar.fraction * 100)}%
+              {bar.eta_secs != null && bar.fraction < 1 && ` · ${etaText(bar.eta_secs)} left`}
+            </span>
+          </div>
+          <div className="meter big">
+            <div style={{ width: `${Math.max(2, bar.fraction * 100)}%` }} />
+          </div>
+          <div className="muted small path">{bar.current ? fileName(bar.current) : progress}</div>
+        </div>
+      ) : (
+        progress && <div className="banner info">{progress}</div>
+      )}
 
       <h2>Folders</h2>
       <section className="card list">
