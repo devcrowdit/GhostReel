@@ -239,7 +239,7 @@ static ENCODER_CACHE: OnceLock<Encoder> = OnceLock::new();
 
 /// Test whether ffmpeg has working `h264_nvenc` support.
 fn check_nvenc(ffmpeg: &Path) -> bool {
-    let Ok(encoders_output) = std::process::Command::new(ffmpeg).args(["-hide_banner", "-encoders"]).output() else {
+    let Ok(encoders_output) = crate::proc::std_command(ffmpeg).args(["-hide_banner", "-encoders"]).output() else {
         return false;
     };
     let stdout = String::from_utf8_lossy(&encoders_output.stdout);
@@ -247,7 +247,7 @@ fn check_nvenc(ffmpeg: &Path) -> bool {
         return false;
     }
 
-    let Ok(status) = std::process::Command::new(ffmpeg)
+    let Ok(status) = crate::proc::std_command(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -363,7 +363,7 @@ pub fn render_preview(
             let dur_str = format!("{:.3}", seg_dur);
             let tmp_path = p_path.with_extension(format!("tmp.{}.mp4", std::process::id()));
 
-            let mut cmd = std::process::Command::new(ffmpeg);
+            let mut cmd = crate::proc::std_command(ffmpeg);
             cmd.arg("-y").arg("-ss").arg(&in_str).arg("-t").arg(&dur_str).arg("-i").arg(&seg.path);
 
             if !seg.mute && seg.has_audio {
@@ -440,7 +440,7 @@ pub fn render_preview(
 
     on_progress(0.86, "Concatenating segments…");
 
-    let concat_res = std::process::Command::new(ffmpeg)
+    let concat_res = crate::proc::std_command(ffmpeg)
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&concat_list_path)
         .args(["-c", "copy", "-movflags", "+faststart"])
@@ -502,7 +502,7 @@ pub fn render_preview(
             filters.join(",")
         };
         let burn = |graph: String| {
-            let mut cmd = std::process::Command::new(ffmpeg);
+            let mut cmd = crate::proc::std_command(ffmpeg);
             cmd.args(["-y", "-i"]).arg(&concat_output).args(["-vf", &graph]);
             cmd.args(&encoder.args);
             cmd.args(["-c:a", "copy", "-movflags", "+faststart"]).arg(&out_path);
@@ -733,7 +733,7 @@ mod tests {
         let vid_b = temp.path().join("vid_b.mp4");
 
         // Generate A: testsrc2 3 s 1280x720 30fps with sine audio
-        let gen_a = std::process::Command::new(&ffmpeg)
+        let gen_a = crate::proc::std_command(&ffmpeg)
             .args([
                 "-y",
                 "-hide_banner",
@@ -763,7 +763,7 @@ mod tests {
         assert!(gen_a.success(), "failed to generate vid_a");
 
         // Generate B: testsrc 2 s 640x480 25fps WITHOUT audio
-        let gen_b = std::process::Command::new(&ffmpeg)
+        let gen_b = crate::proc::std_command(&ffmpeg)
             .args([
                 "-y",
                 "-hide_banner",
@@ -904,7 +904,7 @@ mod tests {
 
         // Probe both outputs with ffprobe
         for file in [&res1.path, &burned_out] {
-            let probe_out = std::process::Command::new(&ffprobe)
+            let probe_out = crate::proc::std_command(&ffprobe)
                 .args([
                     "-v",
                     "error",

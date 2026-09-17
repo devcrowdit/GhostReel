@@ -196,7 +196,7 @@ fn chunk_bounds(duration_s: f64, chunk_secs: f64, silences: &[(f64, f64)]) -> Ve
 /// `(start, end)` of silences ≥ 0.4 s in the audio track (one fast decode pass). Empty on failure:
 /// chunking then falls back to fixed boundaries.
 async fn detect_silences(ffmpeg: &Path, video: &Path) -> Vec<(f64, f64)> {
-    let out = tokio::process::Command::new(ffmpeg)
+    let out = crate::proc::command(ffmpeg)
         .args(["-nostdin", "-hide_banner", "-nostats", "-i"])
         .arg(video)
         .args(["-vn", "-ac", "1", "-ar", "16000", "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"])
@@ -285,7 +285,7 @@ fn merge_chunk(
 
 /// Cut `[start, start+len]` of the audio as mono 16 kHz Opus in Ogg (small uploads).
 async fn extract_opus(ffmpeg: &Path, video: &Path, start: f64, len: f64) -> Result<Vec<u8>, Error> {
-    let out = tokio::process::Command::new(ffmpeg)
+    let out = crate::proc::command(ffmpeg)
         .args(["-nostdin", "-v", "error", "-ss", &format!("{start:.3}"), "-t", &format!("{len:.3}"), "-i"])
         .arg(video)
         .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", "-"])
@@ -335,7 +335,7 @@ async fn transcribe_local(
     duration_s: f64,
     on_progress: &mut impl FnMut(f64),
 ) -> Result<Transcript, Error> {
-    let mut decoder = tokio::process::Command::new(ffmpeg)
+    let mut decoder = crate::proc::command(ffmpeg)
         .args(["-nostdin", "-v", "error", "-i"])
         .arg(video)
         .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"])
@@ -351,7 +351,7 @@ async fn transcribe_local(
         .try_into()
         .map_err(|e| Error::Stt(format!("pipe ffmpeg → asr: {e}")))?;
 
-    let mut cmd = tokio::process::Command::new(asr_bin);
+    let mut cmd = crate::proc::command(asr_bin);
     cmd.arg("--model").arg(model).args(["--language", language]);
     if cpu {
         cmd.arg("--cpu");
@@ -507,7 +507,7 @@ mod tests {
     }
 
     fn have(bin: &str) -> bool {
-        std::process::Command::new(bin).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+        crate::proc::std_command(bin).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
     }
 
     #[cfg(unix)]
@@ -520,7 +520,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let video = tmp.path().join("v.mp4");
-        let ok = std::process::Command::new("ffmpeg")
+        let ok = crate::proc::std_command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=2", "-c:a", "aac"])
             .arg(&video)
             .status()
@@ -558,7 +558,7 @@ echo '{"type":"done","language":"en","audio_s":2.0}'
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let video = tmp.path().join("v.mp4");
-        std::process::Command::new("ffmpeg")
+        crate::proc::std_command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "aac"])
             .arg(&video)
             .status()
@@ -581,7 +581,7 @@ echo '{"type":"done","language":"en","audio_s":2.0}'
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let video = tmp.path().join("v.mp4");
-        std::process::Command::new("ffmpeg")
+        crate::proc::std_command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "aac"])
             .arg(&video)
             .status()
@@ -616,7 +616,7 @@ esac
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let tmp = tempfile::tempdir().unwrap();
         let video = tmp.path().join("v.mp4");
-        std::process::Command::new("ffmpeg")
+        crate::proc::std_command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "sine=d=25", "-c:a", "aac"])
             .arg(&video)
             .status()

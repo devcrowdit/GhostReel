@@ -76,7 +76,7 @@ pub async fn scene_times(
     mut on_progress: impl FnMut(f64),
 ) -> Result<Vec<f64>, Error> {
     let filter = "fps=4,scale=256:-2,select='gte(scene\\,0)',metadata=print:key=lavfi.scene_score";
-    let mut child = tokio::process::Command::new(ffmpeg)
+    let mut child = crate::proc::command(ffmpeg)
         .args(["-nostdin", "-hide_banner", "-nostats"])
         .args(hwaccel_args())
         .arg("-i")
@@ -175,7 +175,7 @@ pub async fn extract(ffmpeg: &Path, video: &Path, t_s: f64, out: &Path, long_sid
         tokio::fs::create_dir_all(dir).await.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
     }
     let scale = format!("scale='if(gt(iw,ih),min({long_side},iw),-2)':'if(gt(iw,ih),-2,min({long_side},ih))'");
-    let output = tokio::process::Command::new(ffmpeg)
+    let output = crate::proc::command(ffmpeg)
         .args(["-nostdin", "-v", "error", "-y", "-ss", &format!("{t_s:.3}"), "-i"])
         .arg(video)
         .args(["-frames:v", "1", "-an", "-vf", &scale, "-q:v", "3"])
@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn have_ffmpeg() -> bool {
-        std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+        crate::proc::std_command("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
     }
 
     #[tokio::test]
@@ -329,7 +329,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let video = tmp.path().join("scenes.mp4");
         // 8 s bars, 30 s static red, 6 s testsrc (moving), 6 s blue.
-        let ok = std::process::Command::new("ffmpeg")
+        let ok = crate::proc::std_command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "smptebars=size=640x360:rate=10:d=8"])
             .args(["-f", "lavfi", "-i", "color=c=red:size=640x360:rate=10:d=30"])
             .args(["-f", "lavfi", "-i", "testsrc=size=640x360:rate=10:d=6"])

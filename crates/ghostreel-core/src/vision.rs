@@ -188,7 +188,7 @@ pub struct LocalModels {
 
 impl LocalLlm {
     pub async fn start(m: &LocalModels) -> Result<Self, Error> {
-        let mut cmd = tokio::process::Command::new(&m.helper);
+        let mut cmd = crate::proc::command(&m.helper);
         if let Some((model, mmproj)) = &m.vision {
             cmd.arg("--model").arg(model).arg("--mmproj").arg(mmproj);
         }

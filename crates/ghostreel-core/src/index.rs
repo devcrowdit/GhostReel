@@ -1630,9 +1630,8 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
     #[cfg(unix)]
     #[tokio::test]
     async fn transcribe_stage_end_to_end() {
-        let have = |b: &str| {
-            std::process::Command::new(b).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
-        };
+        let have =
+            |b: &str| crate::proc::std_command(b).arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
         if !have("ffmpeg") || !have("ffprobe") {
             eprintln!("skipping: ffmpeg/ffprobe not installed");
             return;
@@ -1642,7 +1641,7 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         let media = tmp.path().join("media");
         std::fs::create_dir_all(&media).unwrap();
         let make = |args: &[&str], out: &str| {
-            let ok = std::process::Command::new("ffmpeg")
+            let ok = crate::proc::std_command("ffmpeg")
                 .args(["-v", "error"])
                 .args(args)
                 .arg(media.join(out))

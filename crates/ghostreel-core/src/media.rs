@@ -158,7 +158,7 @@ pub fn parse_ffprobe(json: &str) -> Result<MediaInfo, Error> {
 
 /// Run ffprobe on `file` (bounded: a corrupt file must not hang indexing).
 pub async fn ffprobe(ffprobe_bin: &Path, file: &Path) -> Result<MediaInfo, Error> {
-    let fut = tokio::process::Command::new(ffprobe_bin)
+    let fut = crate::proc::command(ffprobe_bin)
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
         .arg(file)
         .kill_on_drop(true)

@@ -18,6 +18,7 @@ pub mod otio;
 pub mod paths;
 pub mod preview;
 pub mod probe;
+pub mod proc;
 pub mod progress;
 pub mod projects;
 pub mod runtime;

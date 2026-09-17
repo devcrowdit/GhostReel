@@ -184,7 +184,7 @@ pub fn export_script(
 
             let sidecar = locate_sidecar().ok_or_else(|| Error::Export("ghostreel-otio sidecar not found".into()))?;
 
-            let mut cmd = std::process::Command::new(&sidecar.program);
+            let mut cmd = crate::proc::std_command(&sidecar.program);
             cmd.args(&sidecar.prefix_args);
             cmd.arg("convert").arg(&tmp_otio).arg(out_path).arg("--adapter").arg("fcp_xml");
 
@@ -211,7 +211,7 @@ pub fn export_script(
 pub fn validate_export(path: &Path) -> Result<serde_json::Value, Error> {
     let sidecar = locate_sidecar().ok_or_else(|| Error::Export("ghostreel-otio sidecar not found".into()))?;
 
-    let mut cmd = std::process::Command::new(&sidecar.program);
+    let mut cmd = crate::proc::std_command(&sidecar.program);
     cmd.args(&sidecar.prefix_args);
     cmd.arg("validate").arg(path);
 

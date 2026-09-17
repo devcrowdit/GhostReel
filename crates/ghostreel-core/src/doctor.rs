@@ -193,7 +193,7 @@ pub fn locate(name: &str) -> Option<PathBuf> {
 }
 
 async fn output(program: &Path, args: &[&str]) -> Option<String> {
-    let fut = tokio::process::Command::new(program).args(args).kill_on_drop(true).output();
+    let fut = crate::proc::command(program).args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(Duration::from_secs(5), fut).await.ok()?.ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
