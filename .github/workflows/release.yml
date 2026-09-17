@@ -85,6 +85,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libfuse2 \
             patchelf \
             build-essential \
             curl \
@@ -123,6 +124,13 @@ jobs:
 
       # The CUDA helpers take most of the build time: reuse them until their code, Cargo.lock,
       # the CUDA version or the GPU architectures change.
+      # Only the llama.cpp / whisper.cpp crate versions matter for the helpers, not the whole
+      # Cargo.lock (a version bump of the workspace would otherwise rebuild them every release).
+      - name: Helper dependency hash
+        id: helper-deps
+        shell: bash
+        run: echo "hash=$(grep -A1 -E '^name = "(llama-cpp-2|llama-cpp-sys-2|whisper-rs|whisper-rs-sys)"$' Cargo.lock | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - name: Restore CUDA helpers
         id: helpers
         uses: actions/cache@v4
@@ -130,7 +138,7 @@ jobs:
           path: |
             target/release/ghostreel-asr
             target/release/ghostreel-llm
-          key: helpers-linux-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'Cargo.lock', 'scripts/build-helpers.sh') }}
+          key: helpers-linux-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'scripts/build-helpers.sh') }}-${{ steps.helper-deps.outputs.hash }}
 
       - name: Build native helpers
         if: steps.helpers.outputs.cache-hit != 'true'
@@ -154,9 +162,10 @@ jobs:
           readelf -d src-tauri/binaries/ghostreel-llm-x86_64-unknown-linux-gnu | grep RUNPATH
 
       - name: Build Tauri bundles
-        run: npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb,rpm
+        run: npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb,rpm --verbose
         env:
           NO_STRIP: "true"
+          APPIMAGE_EXTRACT_AND_RUN: "1"
 
       - name: Fix AppImage (drop driver libs, dedupe CUDA libs, repack)
         run: scripts/fix-appimage.sh
@@ -254,6 +263,13 @@ jobs:
         run: npm ci
 
       # Reuse the CUDA helpers until their code, Cargo.lock, CUDA or the GPU architectures change.
+      # Only the llama.cpp / whisper.cpp crate versions matter for the helpers, not the whole
+      # Cargo.lock (a version bump of the workspace would otherwise rebuild them every release).
+      - name: Helper dependency hash
+        id: helper-deps
+        shell: bash
+        run: echo "hash=$(grep -A1 -E '^name = "(llama-cpp-2|llama-cpp-sys-2|whisper-rs|whisper-rs-sys)"$' Cargo.lock | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - name: Restore CUDA helpers
         id: helpers
         uses: actions/cache@v4
@@ -261,7 +277,7 @@ jobs:
           path: |
             target/release/ghostreel-asr.exe
             target/release/ghostreel-llm.exe
-          key: helpers-windows-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'Cargo.lock', 'scripts/build-helpers.sh') }}
+          key: helpers-windows-x64-cuda12.8.1-${{ env.CMAKE_CUDA_ARCHITECTURES }}-${{ hashFiles('crates/ghostreel-asr/**', 'crates/ghostreel-llm/**', 'scripts/build-helpers.sh') }}-${{ steps.helper-deps.outputs.hash }}
 
       - name: Build helper ghostreel-asr
         if: steps.helpers.outputs.cache-hit != 'true'
