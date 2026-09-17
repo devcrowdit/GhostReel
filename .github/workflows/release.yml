@@ -51,7 +51,7 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               tag_name: tag, target_commitish: context.sha, name: `GhostReel ${tag}`,
               body: [
-                "**Windows:** `GhostReel_*_x64-setup.exe` · **Linux:** `.AppImage`, `.deb` or `.rpm` · **CLI only:** `ghostreel-cli-*`.",
+                "**Windows:** `GhostReel_*_x64-setup.exe` · **Linux:** `.AppImage` or `.deb` · **CLI only:** `ghostreel-cli-*`.",
                 "",
                 "GPU acceleration needs an NVIDIA driver 570+ (CUDA 12.8 runtime is bundled). On first start open **Models** and download the models.",
               ].join("\n"),
@@ -92,7 +92,6 @@ jobs:
             wget \
             file \
             xz-utils \
-            rpm
 
       # Jimver pin v0.2.24 checked to exist; CUDA 12.8 ships .so.12 / 64_12.dll runtimes
       - name: Install CUDA Toolkit
@@ -181,7 +180,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cuda-stub"
           ln -sf "$stub" "$RUNNER_TEMP/cuda-stub/libcuda.so.1"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb,rpm --verbose
+          npx tauri build --config src-tauri/tauri.bundle.json --bundles appimage,deb --verbose
         env:
           NO_STRIP: "true"
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -199,7 +198,6 @@ jobs:
           path: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
-            target/release/bundle/rpm/*.rpm
             target/dist/*.tar.gz
 
       # One file at a time with retries (large parallel uploads time out). CLI tarball stays in artifacts.
@@ -209,7 +207,7 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           shopt -s nullglob
-          files=(target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm)
+          files=(target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no bundles found"; exit 1; }
           for f in "${files[@]}"; do
             for i in 1 2 3; do
