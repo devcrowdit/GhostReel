@@ -378,7 +378,7 @@ async fn index_cmd(
     let mut db = open_db(paths)?;
     let pid = project_id(&db, project)?;
     let config = Config::load(&paths.config_file)?;
-    let opts = index::Options { project_id: pid, retry_failed, settle_secs: if watch { 10 } else { 0 } };
+    let opts = index::Options { project_id: pid, retry_failed, settle_secs: if watch { 10 } else { 0 }, cancel: None };
 
     // On a terminal: one live progress line (per-video successes are implied by it).
     let tty = !json && std::io::stderr().is_terminal();

@@ -475,3 +475,120 @@ tr.selected td {
 .frame-detail .tag {
   margin: 0 6px 0 0;
 }
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card.task {
+  margin-top: 8px;
+}
+
+.card.task.failed {
+  border-color: var(--bad);
+}
+
+.nav-item .count.busy {
+  color: var(--accent-2);
+  font-weight: 700;
+}
+
+form.search {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0 6px;
+}
+
+form.search input {
+  font-size: 15px;
+  padding: 9px 12px;
+}
+
+.hits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.card.hit {
+  flex-direction: row;
+  gap: 12px;
+  cursor: pointer;
+  padding: 10px;
+}
+
+.card.hit:hover {
+  border-color: var(--accent);
+}
+
+.card.hit img,
+.card.hit .noframe {
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  background: var(--border);
+}
+
+.hit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hit-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.hit-head .time {
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}
+
+mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.card.video-panel {
+  margin-top: 14px;
+}
+
+.player-wrap {
+  position: relative;
+}
+
+.player-wrap video {
+  width: 100%;
+  max-height: 440px;
+  background: #000;
+  border-radius: 8px;
+}
+
+.play-error {
+  padding: 8px 0;
+  color: var(--warn);
+}
+
+.segment {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.segment:hover {
+  background: color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.segment.current {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}

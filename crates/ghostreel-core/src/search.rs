@@ -75,11 +75,33 @@ struct ChunkInfo {
     frame_id: Option<i64>,
 }
 
+/// Search with an optional embedder (convenience for single-threaded callers like the CLI).
 pub async fn search(
     db: &Db,
     data_dir: &Path,
     query: &str,
     embedder: Option<&mut Embedder>,
+    opts: &SearchOptions,
+) -> Result<Vec<Hit>, Error> {
+    let vector = match embedder {
+        Some(e) => Some(query_vector(e, query).await?),
+        None => None,
+    };
+    search_with_vector(db, data_dir, query, vector.as_deref(), opts)
+}
+
+/// Embed a search query (embeddinggemma query prompt).
+pub async fn query_vector(embedder: &mut Embedder, query: &str) -> Result<Vec<f32>, Error> {
+    Ok(embedder.embed(&[query_text(query)]).await?.remove(0))
+}
+
+/// Rank and group results; `vector` is the query embedding (keyword-only when `None`). Synchronous so
+/// callers can embed first and keep the database handle off async boundaries.
+pub fn search_with_vector(
+    db: &Db,
+    data_dir: &Path,
+    query: &str,
+    vector: Option<&[f32]>,
     opts: &SearchOptions,
 ) -> Result<Vec<Hit>, Error> {
     let limit = if opts.limit == 0 { 20 } else { opts.limit };
@@ -102,11 +124,10 @@ pub async fn search(
             st.query_map(params![fq, CANDIDATES as i64], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
     }
     let mut semantic: Vec<i64> = Vec::new();
-    if let Some(e) = embedder {
-        let v = e.embed(&[query_text(query)]).await?;
+    if let Some(v) = vector {
         let mut st =
             db.conn.prepare("SELECT rowid FROM chunks_vec WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;
-        semantic = st.query_map(params![to_blob(&v[0]), CANDIDATES as i64], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        semantic = st.query_map(params![to_blob(v), CANDIDATES as i64], |r| r.get(0))?.collect::<Result<_, _>>()?;
     }
 
     let mut ids: Vec<i64> = keyword.iter().map(|(id, _)| *id).chain(semantic.iter().copied()).collect();

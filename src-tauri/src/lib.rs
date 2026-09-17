@@ -1,18 +1,19 @@
 //! GhostReel desktop app. UI logic lives in the React frontend; everything else is
 //! `ghostreel-core`, shared with the CLI.
 
+mod queue;
+
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use ghostreel_core::config::Config;
 use ghostreel_core::db::Db;
 use ghostreel_core::doctor::{self, Report};
-use ghostreel_core::index::{self, FrameRow, IndexLock, Status, TranscriptSegment, VideoRow};
+use ghostreel_core::index::{self, FrameRow, Status, TranscriptSegment, VideoRow};
 use ghostreel_core::paths::Paths;
 use ghostreel_core::projects::{Folder, NewProject, Project};
 use ghostreel_core::runtime;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -27,10 +28,6 @@ fn paths() -> CmdResult<Paths> {
 fn open_db() -> CmdResult<Db> {
     Db::open(&paths()?.db_file()).map_err(err)
 }
-
-/// Whether this app instance is currently indexing (the CLI may hold the lock too).
-#[derive(Default)]
-struct Indexing(AtomicBool);
 
 /// Doctor report + the blockers list the UI shows at the top.
 #[derive(Serialize)]
@@ -107,8 +104,81 @@ fn project_view(project_id: i64) -> CmdResult<ProjectView> {
 }
 
 #[tauri::command]
-fn add_folder(project_id: i64, path: PathBuf, recursive: bool) -> CmdResult<Folder> {
-    open_db()?.add_folder(project_id, &path, recursive).map_err(err)
+fn add_folder(app: AppHandle, project_id: i64, path: PathBuf, recursive: bool) -> CmdResult<Folder> {
+    let folder = open_db()?.add_folder(project_id, &path, recursive).map_err(err)?;
+    allow_media_dir(&app, &folder.path);
+    Ok(folder)
+}
+
+/// Let the webview load videos from a watched folder (player).
+fn allow_media_dir(app: &AppHandle, dir: &std::path::Path) {
+    use tauri::Manager;
+    let _ = app.asset_protocol_scope().allow_directory(dir, true);
+}
+
+/// Cached embedder for search (a local helper takes ~1 s to start; reuse it across queries).
+#[derive(Default)]
+struct SearchState(tokio::sync::Mutex<Option<ghostreel_core::embed::Embedder>>);
+
+#[tauri::command]
+async fn search(
+    state: State<'_, SearchState>,
+    project_id: i64,
+    query: String,
+    limit: Option<usize>,
+) -> CmdResult<SearchView> {
+    let p = paths()?;
+    let mut cached = state.0.lock().await;
+    let mut note = None;
+    if cached.is_none() {
+        let config = Config::load(&p.config_file).map_err(err)?;
+        let setup = runtime::resolve_embed(&p, &config).await;
+        match runtime::start_embedder(&setup, |_, _| {}).await {
+            Ok(e) => *cached = Some(e),
+            Err(why) => note = Some(format!("Keyword search only ({why})")),
+        }
+    }
+    let opts =
+        ghostreel_core::search::SearchOptions { project_id: Some(project_id), limit: limit.unwrap_or(30), kinds: None };
+    let vector = match cached.as_mut() {
+        Some(e) => match ghostreel_core::search::query_vector(e, &query).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                // A dead server/helper: drop the cache and fall back to keywords for this query.
+                *cached = None;
+                note = Some(format!("Keyword search only ({e})"));
+                None
+            }
+        },
+        None => None,
+    };
+    drop(cached);
+    let db = Db::open(&p.db_file()).map_err(err)?;
+    let hits =
+        ghostreel_core::search::search_with_vector(&db, &p.data_dir, &query, vector.as_deref(), &opts).map_err(err)?;
+    Ok(SearchView { hits, note })
+}
+
+#[derive(Serialize)]
+struct SearchView {
+    hits: Vec<ghostreel_core::search::Hit>,
+    note: Option<String>,
+}
+
+/// Open a video in the system player at `t` seconds (mpv/VLC when installed, else the default app).
+#[tauri::command]
+fn open_external(app: AppHandle, path: PathBuf, t: Option<f64>) -> CmdResult<()> {
+    let t = t.unwrap_or(0.0).max(0.0);
+    if let Some(mpv) = doctor::locate("mpv") {
+        std::process::Command::new(mpv).arg(format!("--start={t:.1}")).arg(&path).spawn().map_err(err)?;
+        return Ok(());
+    }
+    if let Some(vlc) = doctor::locate("vlc") {
+        std::process::Command::new(vlc).arg(format!("--start-time={t:.1}")).arg(&path).spawn().map_err(err)?;
+        return Ok(());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(err)
 }
 
 #[tauri::command]
@@ -116,54 +186,25 @@ fn remove_folder(project_id: i64, path: PathBuf) -> CmdResult<()> {
     open_db()?.remove_folder(project_id, &path).map_err(err)
 }
 
-#[derive(Clone, Serialize)]
-struct IndexFinished {
-    project_id: i64,
-    summary: Option<index::Summary>,
-    error: Option<String>,
+#[tauri::command]
+async fn enqueue_index(app: AppHandle, queue: State<'_, queue::Queue>, project_id: i64) -> CmdResult<u64> {
+    let name = open_db()?.project(project_id).map_err(err)?.name;
+    Ok(queue.enqueue(&app, queue::TaskKind::Index { project_id }, format!("Index “{name}”")).await)
 }
 
-/// Start indexing a project in the background. Progress arrives as `index-event`
-/// (core `index::Event`), completion as `index-finished`.
 #[tauri::command]
-fn start_index(app: AppHandle, state: State<'_, Indexing>, project_id: i64) -> CmdResult<()> {
-    if state.0.swap(true, Ordering::SeqCst) {
-        return Err("indexing is already running".into());
-    }
-    let started = (|| -> CmdResult<(Db, Paths, Config, IndexLock)> {
-        let p = paths()?;
-        let config = Config::load(&p.config_file).map_err(err)?;
-        let lock = IndexLock::acquire(&p.data_dir).map_err(err)?;
-        Ok((Db::open(&p.db_file()).map_err(err)?, p, config, lock))
-    })();
-    let (mut db, p, config, lock) = match started {
-        Ok(v) => v,
-        Err(e) => {
-            state.0.store(false, Ordering::SeqCst);
-            return Err(e);
-        }
-    };
-    tauri::async_runtime::spawn(async move {
-        let opts = index::Options { project_id: Some(project_id), ..Default::default() };
-        let events = app.clone();
-        let result = match runtime::resolve(&p, &config).await {
-            Ok(rt) => {
-                index::run(&mut db, &rt, &opts, move |e| {
-                    let _ = events.emit("index-event", e);
-                })
-                .await
-            }
-            Err(e) => Err(e),
-        };
-        drop(lock);
-        let finished = match result {
-            Ok(summary) => IndexFinished { project_id, summary: Some(summary), error: None },
-            Err(e) => IndexFinished { project_id, summary: None, error: Some(e.to_string()) },
-        };
-        let _ = app.emit("index-finished", finished);
-        use tauri::Manager;
-        app.state::<Indexing>().0.store(false, Ordering::SeqCst);
-    });
+async fn queue_list(queue: State<'_, queue::Queue>) -> CmdResult<Vec<queue::Task>> {
+    Ok(queue.snapshot().await)
+}
+
+#[tauri::command]
+async fn cancel_task(app: AppHandle, queue: State<'_, queue::Queue>, id: u64) -> CmdResult<bool> {
+    Ok(queue.cancel(&app, id).await)
+}
+
+#[tauri::command]
+async fn clear_finished_tasks(app: AppHandle, queue: State<'_, queue::Queue>) -> CmdResult<()> {
+    queue.clear_finished(&app).await;
     Ok(())
 }
 
@@ -176,11 +217,6 @@ fn video_transcript(video_id: i64) -> CmdResult<Vec<TranscriptSegment>> {
 fn video_frames(video_id: i64) -> CmdResult<Vec<FrameRow>> {
     let p = paths()?;
     index::frames(&Db::open(&p.db_file()).map_err(err)?, &p.data_dir, video_id).map_err(err)
-}
-
-#[tauri::command]
-fn is_indexing(state: State<'_, Indexing>) -> bool {
-    state.0.load(Ordering::SeqCst)
 }
 
 /// WebKitGTK's DMABUF renderer dies with "Error 71 (Protocol error) dispatching to Wayland
@@ -202,7 +238,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Indexing::default())
+        .plugin(tauri_plugin_opener::init())
+        .manage(SearchState::default())
+        .manage(queue::Queue::default())
         .setup(|app| {
             // Frames/thumbnails are served from the data dir via the asset protocol; scope it
             // at runtime because GHOSTREEL_DATA can move it.
@@ -210,7 +248,14 @@ pub fn run() {
             if let Ok(p) = Paths::resolve() {
                 let _ = std::fs::create_dir_all(&p.data_dir);
                 app.asset_protocol_scope().allow_directory(&p.data_dir, true)?;
+                // Watched folders, so the player can load the videos.
+                if let Ok(db) = Db::open(&p.db_file()) {
+                    for f in db.folders(None).unwrap_or_default() {
+                        let _ = app.asset_protocol_scope().allow_directory(&f.path, true);
+                    }
+                }
             }
+            tauri::async_runtime::spawn(queue::worker(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -221,10 +266,14 @@ pub fn run() {
             project_view,
             add_folder,
             remove_folder,
-            start_index,
-            is_indexing,
+            enqueue_index,
+            queue_list,
+            cancel_task,
+            clear_finished_tasks,
             video_transcript,
             video_frames,
+            search,
+            open_external,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GhostReel");

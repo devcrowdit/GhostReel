@@ -200,11 +200,62 @@ export const etaText = (secs: number) => {
   return `about ${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} min`;
 };
 
-export interface IndexFinished {
-  project_id: number;
-  summary: { new: number; changed: number; removed: number; jobs_done: number; jobs_failed: number } | null;
-  error: string | null;
+export interface IndexSummary {
+  new: number;
+  changed: number;
+  unchanged: number;
+  removed: number;
+  jobs_done: number;
+  jobs_failed: number;
+  unsettled: number;
+  cancelled: boolean;
 }
+
+export type TaskState = "queued" | "running" | "done" | "failed" | "cancelled";
+
+export interface Task {
+  id: number;
+  kind: { type: "index"; project_id: number };
+  label: string;
+  state: TaskState;
+  progress: Progress | null;
+  note: string | null;
+  summary: IndexSummary | null;
+  error: string | null;
+  created_at: number;
+  finished_at: number | null;
+}
+
+export const enqueueIndex = (projectId: number) => invoke<number>("enqueue_index", { projectId });
+export const queueList = () => invoke<Task[]>("queue_list");
+export const cancelTask = (id: number) => invoke<boolean>("cancel_task", { id });
+export const clearFinishedTasks = () => invoke<void>("clear_finished_tasks");
+
+export interface Hit {
+  video_id: number;
+  path: string;
+  start_s: number;
+  end_s: number;
+  score: number;
+  kinds: string[];
+  matched_by: string[];
+  snippet: string;
+  frame: string | null;
+}
+
+export const search = (projectId: number, query: string, limit = 30) =>
+  invoke<{ hits: Hit[]; note: string | null }>("search", { projectId, query, limit });
+export const openExternal = (path: string, t: number) => invoke<void>("open_external", { path, t });
+
+export const clock = (s: number) => {
+  const t = Math.max(0, Math.floor(s));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = String(t % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+};
+
+export const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 export const listProjects = () => invoke<ProjectSummary[]>("list_projects");
 export const createProject = (name: string, fpsNum: number, fpsDen: number, width: number, height: number) =>
@@ -214,8 +265,7 @@ export const projectView = (projectId: number) => invoke<ProjectView>("project_v
 export const addFolder = (projectId: number, path: string, recursive = true) =>
   invoke<void>("add_folder", { projectId, path, recursive });
 export const removeFolder = (projectId: number, path: string) => invoke<void>("remove_folder", { projectId, path });
-export const startIndex = (projectId: number) => invoke<void>("start_index", { projectId });
-export const isIndexing = () => invoke<boolean>("is_indexing");
+
 
 export const FPS_PRESETS: { label: string; num: number; den: number }[] = [
   { label: "23.976", num: 24000, den: 1001 },

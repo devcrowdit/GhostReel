@@ -1,49 +1,34 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   addFolder,
-  etaText,
+  clock,
+  enqueueIndex,
+  fileName,
+  fileUrl,
   fpsLabel,
   humanDuration,
   humanSize,
-  isIndexing,
-  PHASE_LABELS,
   projectView,
   removeFolder,
   removeProject,
-  startIndex,
-  fileUrl,
-  videoFrames,
-  videoTranscript,
-  type FrameRow,
-  type IndexEvent,
-  type TranscriptSegment,
-  type VideoRow,
-  type IndexFinished,
-  type Progress,
+  search,
+  type Hit,
   type ProjectView,
+  type VideoRow,
 } from "./api";
+import TaskCard from "./TaskCard";
+import { useQueue } from "./useQueue";
+import VideoPanel from "./VideoPanel";
 
-const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
-
-const clock = (s: number) => {
-  const t = Math.floor(s);
-  const h = Math.floor(t / 3600);
-  const m = Math.floor((t % 3600) / 60);
-  const sec = String(t % 60).padStart(2, "0");
-  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
-};
-
-function TranscriptCell({ v }: { v: VideoRow }) {
+function SpeechCell({ v }: { v: VideoRow }) {
   if (v.segments > 0) return <span className="good-text">{v.language ? v.language.toUpperCase() : "✓"}</span>;
   switch (v.transcribe) {
     case "skipped":
       return <span className="muted">no audio</span>;
     case "failed":
       return <span className="bad-text">failed</span>;
-    case "running":
-      return <span>…</span>;
     case "done":
       return <span className="muted">no speech</span>;
     default:
@@ -51,124 +36,29 @@ function TranscriptCell({ v }: { v: VideoRow }) {
   }
 }
 
-function TranscriptPanel({ video, onClose }: { video: VideoRow; onClose: () => void }) {
-  const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
-  const [frames, setFrames] = useState<FrameRow[]>([]);
-  const [activeFrame, setActiveFrame] = useState<number | null>(null);
-  const [filter, setFilter] = useState("");
-  useEffect(() => {
-    setSegments(null);
-    videoTranscript(video.id).then(setSegments).catch(() => setSegments([]));
-  }, [video.id, video.segments]);
-  useEffect(() => {
-    videoFrames(video.id).then(setFrames).catch(() => setFrames([]));
-  }, [video.id, video.frames]);
-  const q = filter.trim().toLowerCase();
-  const shown = (segments ?? []).filter((s) => !q || s.text.toLowerCase().includes(q));
+/** "…the [compute] module…" → highlighted spans. */
+function Snippet({ text }: { text: string }) {
+  const parts = text.split(/(\[[^\]]+\])/g);
   return (
-    <section className="card transcript">
-      <div className="card-head">
-        <span className="label">
-          {fileName(video.path)}
-          {video.language && <span className="tag">{video.language.toUpperCase()}</span>}
-        </span>
-        <button className="ghost small" onClick={onClose}>
-          Close
-        </button>
-      </div>
-      {frames.length > 0 && (
-        <div className="frame-strip">
-          {frames.map((f) => (
-            <figure
-              key={f.id}
-              className={f.id === activeFrame ? "active" : ""}
-              onClick={() => setActiveFrame(f.id === activeFrame ? null : f.id)}
-            >
-              <img src={fileUrl(f.path)} alt="" loading="lazy" />
-              <figcaption>
-                {clock(f.t_s)}
-                {f.description && !f.description.startsWith('{"error"') ? " ✓" : ""}
-              </figcaption>
-            </figure>
-          ))}
-        </div>
+    <span>
+      {parts.map((p, i) =>
+        p.startsWith("[") && p.endsWith("]") ? <mark key={i}>{p.slice(1, -1)}</mark> : <span key={i}>{p}</span>,
       )}
-      {(() => {
-        const f = frames.find((x) => x.id === activeFrame);
-        if (!f) return null;
-        let d: { description?: string; objects?: string[]; setting?: string; shot?: string; tags?: string[]; error?: string } =
-          {};
-        try {
-          d = f.description ? JSON.parse(f.description) : {};
-        } catch {
-          d = {};
-        }
-        return (
-          <div className="frame-detail">
-            <div className="muted small">
-              {clock(f.t_s)}
-              {d.shot ? ` · ${d.shot}` : ""}
-              {d.setting ? ` · ${d.setting}` : ""}
-            </div>
-            {d.error ? (
-              <div className="bad-text small">{d.error}</div>
-            ) : d.description ? (
-              <>
-                <div>{d.description}</div>
-                {f.visible_text && (
-                  <div className="small">
-                    <span className="muted">On screen: </span>
-                    {f.visible_text.split("\n").join(" · ")}
-                  </div>
-                )}
-                {(d.tags?.length ?? 0) > 0 && (
-                  <div>
-                    {d.tags!.map((t) => (
-                      <span key={t} className="tag">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="muted small">Not described yet — press “Index now”.</div>
-            )}
-          </div>
-        );
-      })()}
-      {segments && segments.length > 0 && (
-        <input placeholder="Find in transcript…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-      )}
-      {segments === null ? (
-        <div className="muted">Loading…</div>
-      ) : segments.length === 0 ? (
-        <div className="muted">
-          {video.transcribe === "skipped" ? "This video has no audio." : "No transcript yet — press “Index now”."}
-        </div>
-      ) : (
-        <div className="segments">
-          {shown.map((s, i) => (
-            <div key={i} className="segment">
-              <span className="time">{clock(s.start)}</span>
-              <span>{s.text}</span>
-            </div>
-          ))}
-          {shown.length === 0 && <div className="muted">No match.</div>}
-        </div>
-      )}
-    </section>
+    </span>
   );
 }
 
 export default function ProjectPage({ projectId, onChanged }: { projectId: number; onChanged: () => void }) {
   const [view, setView] = useState<ProjectView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [indexing, setIndexing] = useState(false);
-  const [progress, setProgress] = useState<string>("");
-  const [bar, setBar] = useState<Progress | null>(null);
-  const [notice, setNotice] = useState<string>("");
   const [selected, setSelected] = useState<number | null>(null);
+  const [seek, setSeek] = useState<{ t: number; nonce: number } | null>(null);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<Hit[] | null>(null);
+  const [searchNote, setSearchNote] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const tasks = useQueue();
 
   const refresh = useCallback(async () => {
     try {
@@ -181,77 +71,29 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
 
   useEffect(() => {
     setView(null);
-    setProgress("");
-    setBar(null);
-    setNotice("");
     setSelected(null);
+    setHits(null);
+    setQuery("");
     refresh();
-    isIndexing().then(setIndexing);
   }, [refresh]);
 
+  // Keep the table fresh while this project's task runs, and once it finishes.
+  const myTasks = tasks.filter((t) => t.kind.type === "index" && t.kind.project_id === projectId);
+  const running = myTasks.find((t) => t.state === "running");
+  const queued = myTasks.find((t) => t.state === "queued");
+  const lastFinished = [...myTasks].reverse().find((t) => t.state !== "running" && t.state !== "queued");
   useEffect(() => {
-    let done = 0;
-    let failed = 0;
-    // Refresh the table while indexing so videos appear as they are processed (at most every 2 s).
-    let lastRefresh = 0;
-    const unlisten = [
-      listen<IndexEvent>("index-event", ({ payload: e }) => {
-        switch (e.event) {
-          case "scan_folder":
-            setProgress(`Scanning ${e.path}…`);
-            break;
-          case "folder_missing":
-            setProgress(`Folder not available (index kept): ${e.path}`);
-            break;
-          case "scanned":
-            setProgress(`Found ${e.new} new, ${e.changed} changed, ${e.removed} removed — reading video details…`);
-            break;
-          case "job_done":
-            done += 1;
-            setProgress(`Read details of ${done} video${done === 1 ? "" : "s"}${failed ? `, ${failed} failed` : ""}…`);
-            break;
-          case "job_failed":
-            failed += 1;
-            break;
-          case "stage_backend":
-            setNotice(`${e.stage === "transcribe" ? "Transcription" : e.stage}: ${e.backend}`);
-            break;
-          case "stage_unavailable":
-            setNotice(`${e.stage === "transcribe" ? "Transcription" : e.stage} postponed: ${e.reason}`);
-            break;
-          case "downloading_model":
-            setNotice(`Downloading ${e.file} (once)…`);
-            break;
-          case "progress": {
-            const { event: _event, ...p } = e;
-            setBar(p);
-            if (Date.now() - lastRefresh > 2000) {
-              lastRefresh = Date.now();
-              refresh();
-            }
-            break;
-          }
-        }
-      }),
-      listen<IndexFinished>("index-finished", ({ payload }) => {
-        setIndexing(false);
-        setBar(null);
-        done = 0;
-        failed = 0;
-        if (payload.error) setProgress(`Indexing failed: ${payload.error}`);
-        else if (payload.summary) {
-          const s = payload.summary;
-          setProgress(
-            `Done: ${s.new} new, ${s.changed} changed, ${s.removed} removed · ${s.jobs_done} processed` +
-              (s.jobs_failed ? ` · ${s.jobs_failed} failed` : ""),
-          );
-        }
-        refresh();
-        onChanged();
-      }),
-    ];
+    if (!running) return;
+    const id = setInterval(refresh, 2500);
+    return () => clearInterval(id);
+  }, [running?.id, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const un = listen<number>("task-finished", () => {
+      refresh();
+      onChanged();
+    });
     return () => {
-      unlisten.forEach((u) => u.then((f) => f()));
+      un.then((f) => f());
     };
   }, [refresh, onChanged]);
 
@@ -270,18 +112,6 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     if (typeof dir === "string") run(() => addFolder(projectId, dir));
   };
 
-  const onIndex = async () => {
-    setError(null);
-    setProgress("Starting…");
-    try {
-      await startIndex(projectId);
-      setIndexing(true);
-    } catch (e) {
-      setProgress("");
-      setError(String(e));
-    }
-  };
-
   const onDelete = async () => {
     if (!view) return;
     const ok = await ask(`Delete project "${view.project.name}"? Your video files are not touched.`, {
@@ -291,11 +121,35 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
     if (ok) run(() => removeProject(projectId));
   };
 
+  const onSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    if (!q) {
+      setHits(null);
+      return;
+    }
+    setSearching(true);
+    try {
+      const r = await search(projectId, q);
+      setHits(r.hits);
+      setSearchNote(r.note);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const openAt = (videoId: number, t: number) => {
+    setSelected(videoId);
+    setSeek({ t, nonce: Date.now() });
+    setTimeout(() => panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  };
+
   if (!view) return <main>{error ? <div className="banner bad">{error}</div> : <p className="muted">Loading…</p>}</main>;
 
   const { project: p, status: st } = view;
-  const probe = st.stages.find((s) => s.stage === "probe");
-  const transcribe = st.stages.find((s) => s.stage === "transcribe");
+  const stage = (name: string) => st.stages.find((s) => s.stage === name);
   const selectedVideo = view.videos.find((v) => v.id === selected) ?? null;
 
   return (
@@ -308,43 +162,62 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
             {humanDuration(st.total_duration_s)} · {humanSize(st.total_size)}
           </p>
         </div>
-        <button onClick={onIndex} disabled={indexing || view.folders.length === 0}>
-          {indexing ? "Indexing…" : "Index now"}
+        <button onClick={() => run(() => enqueueIndex(projectId))} disabled={!!queued || view.folders.length === 0}>
+          {running ? "Index again" : queued ? "Queued…" : "Index now"}
         </button>
       </header>
 
       {error && <div className="banner bad">{error}</div>}
-      {indexing && bar ? (
-        <div className="card progress">
-          <div className="progress-head">
-            <span className="label">
-              {PHASE_LABELS[bar.phase] ?? bar.phase}
-              {bar.phase_total > 0 && (
-                <span className="muted">
-                  {" "}
-                  · {bar.phase_done} of {bar.phase_total}
-                </span>
-              )}
-            </span>
-            <span className="muted">
-              {Math.round(bar.fraction * 100)}%
-              {bar.eta_secs != null && bar.fraction < 1 && ` · ${etaText(bar.eta_secs)} left`}
-            </span>
-          </div>
-          <div className="meter big">
-            <div style={{ width: `${Math.max(2, bar.fraction * 100)}%` }} />
-          </div>
-          <div className="muted small path">{bar.current ? fileName(bar.current) : progress}</div>
-          {notice && <div className="muted small">{notice}</div>}
-        </div>
-      ) : (
-        (progress || notice) && (
-          <div className="banner info">
-            {progress}
-            {notice && <div className="muted small">{notice}</div>}
-          </div>
-        )
+      {running && <TaskCard task={running} compact />}
+      {!running && queued && <TaskCard task={queued} compact />}
+      {!running && !queued && lastFinished && lastFinished.state !== "done" && <TaskCard task={lastFinished} compact />}
+
+      <form className="search" onSubmit={onSearch}>
+        <input
+          placeholder="Search this project: “unboxing the board”, “wifi password”, on-screen text…"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            if (!e.target.value.trim()) setHits(null);
+          }}
+        />
+        <button type="submit" disabled={searching || !query.trim()}>
+          {searching ? "Searching…" : "Search"}
+        </button>
+      </form>
+      {searchNote && <div className="muted small">{searchNote}</div>}
+      {hits && (
+        <section className="hits">
+          {hits.length === 0 && <div className="muted">No matches.</div>}
+          {hits.map((h, i) => (
+            <div key={i} className="card hit" onClick={() => openAt(h.video_id, h.start_s)}>
+              {h.frame ? <img src={fileUrl(h.frame)} alt="" loading="lazy" /> : <div className="noframe" />}
+              <div className="hit-body">
+                <div className="hit-head">
+                  <span className="label">{fileName(h.path)}</span>
+                  <span className="time">
+                    {clock(h.start_s)}–{clock(h.end_s)}
+                  </span>
+                </div>
+                <div className="small">
+                  <Snippet text={h.snippet} />
+                </div>
+                <div>
+                  {h.kinds.map((k) => (
+                    <span key={k} className="tag">
+                      {k === "moment" ? "picture" : k === "frame" ? "on screen" : "speech"}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </section>
       )}
+
+      <div ref={panelRef}>
+        {selectedVideo && <VideoPanel video={selectedVideo} seek={seek} onClose={() => setSelected(null)} />}
+      </div>
 
       <h2>Folders</h2>
       <section className="card list">
@@ -370,15 +243,12 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
 
       <h2>
         Videos
-        {probe && (
-          <span className="muted small normal">
-            {" "}
-            · {probe.done} ready{probe.pending ? ` · ${probe.pending} waiting` : ""}
-            {probe.failed ? ` · ${probe.failed} failed` : ""}
-            {transcribe && transcribe.done ? ` · ${transcribe.done} transcribed` : ""}
-            {st.vfr_videos ? ` · ${st.vfr_videos} variable frame rate` : ""}
-          </span>
-        )}
+        <span className="muted small normal">
+          {" "}
+          · {stage("probe")?.done ?? 0} ready · {stage("transcribe")?.done ?? 0} transcribed ·{" "}
+          {stage("describe")?.done ?? 0} described · {stage("embed")?.done ?? 0} searchable
+          {st.vfr_videos ? ` · ${st.vfr_videos} variable frame rate` : ""}
+        </span>
       </h2>
       <section className="card">
         {view.videos.length === 0 ? (
@@ -392,6 +262,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                 <th>Size</th>
                 <th>Format</th>
                 <th>Speech</th>
+                <th>Frames</th>
                 <th>State</th>
               </tr>
             </thead>
@@ -401,7 +272,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                   key={v.id}
                   title={v.path}
                   className={`clickable ${v.id === selected ? "selected" : ""}`}
-                  onClick={() => setSelected(v.id === selected ? null : v.id)}
+                  onClick={() => (v.id === selected ? setSelected(null) : openAt(v.id, 0))}
                 >
                   <td className="name">
                     {fileName(v.path)}
@@ -421,8 +292,9 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                     {v.vcodec ? ` · ${v.vcodec}` : ""}
                   </td>
                   <td>
-                    <TranscriptCell v={v} />
+                    <SpeechCell v={v} />
                   </td>
+                  <td className="muted">{v.frames || "–"}</td>
                   <td>
                     {v.status === "error" ? (
                       <span className="bad-text" title={v.error ?? ""}>
@@ -440,8 +312,6 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
           </table>
         )}
       </section>
-
-      {selectedVideo && <TranscriptPanel video={selectedVideo} onClose={() => setSelected(null)} />}
 
       <p className="danger-zone">
         <button className="ghost small danger" onClick={onDelete}>

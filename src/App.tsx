@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { createProject, FPS_PRESETS, listProjects, type ProjectSummary } from "./api";
+import ActivityPage from "./ActivityPage";
 import ProjectPage from "./ProjectPage";
 import StatusPage from "./StatusPage";
+import { isActive, useQueue } from "./useQueue";
 
-type Page = { kind: "status" } | { kind: "project"; id: number };
+type Page = { kind: "status" } | { kind: "activity" } | { kind: "project"; id: number };
 
 function NewProject({ onCreated, onCancel }: { onCreated: (id: number) => void; onCancel: () => void }) {
   const [name, setName] = useState("");
@@ -56,6 +58,9 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [page, setPage] = useState<Page>({ kind: "status" });
   const [creating, setCreating] = useState(false);
+  const tasks = useQueue();
+  const activeCount = tasks.filter(isActive).length;
+  const runningTask = tasks.find((t) => t.state === "running");
 
   const refresh = useCallback(async () => {
     const list = await listProjects().catch(() => []);
@@ -105,6 +110,18 @@ export default function App() {
         )}
         <div className="spacer" />
         <button
+          className={`nav-item ${page.kind === "activity" ? "active" : ""}`}
+          onClick={() => setPage({ kind: "activity" })}
+          title={runningTask?.label}
+        >
+          <span>Activity</span>
+          {activeCount > 0 && (
+            <span className="count busy">
+              {runningTask?.progress ? `${Math.round(runningTask.progress.fraction * 100)}%` : activeCount}
+            </span>
+          )}
+        </button>
+        <button
           className={`nav-item ${page.kind === "status" ? "active" : ""}`}
           onClick={() => setPage({ kind: "status" })}
         >
@@ -114,6 +131,8 @@ export default function App() {
       <div className="content">
         {page.kind === "status" ? (
           <StatusPage />
+        ) : page.kind === "activity" ? (
+          <ActivityPage />
         ) : (
           <ProjectPage key={page.id} projectId={page.id} onChanged={refresh} />
         )}

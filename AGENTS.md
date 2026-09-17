@@ -18,7 +18,7 @@ S0 findings §11). Progress: [`.agents/TODO.md`](.agents/TODO.md).
 |---|---|
 | `crates/ghostreel-core` | config, paths, SQLite+FTS5+sqlite-vec DB, server probing, doctor, projects, media (hash/ffprobe), index (scan + jobs), watch |
 | `crates/ghostreel-cli` | `ghostreel` binary (`doctor`, `config`, `project`, `folder`, `index [--watch]`, `status`) |
-| `src-tauri` | desktop app (`ghostreel` app binary, lib `ghostreel_lib`) |
+| `src-tauri` | desktop app (package `ghostreel-app` → `target/*/ghostreel-app`, bundled as `GhostReel`; lib `ghostreel_lib`). Never name it `ghostreel`: it would overwrite the CLI binary in `target/` |
 | `src/` | React + TS frontend (Vite) |
 | `spikes/s0-local` | throwaway S0 spike (separate workspace, CUDA builds) |
 

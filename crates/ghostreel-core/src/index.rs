@@ -96,6 +96,8 @@ pub struct Summary {
     pub jobs_failed: usize,
     /// Files skipped because they were modified less than `settle_secs` ago (still copying).
     pub unsettled: usize,
+    /// The run was stopped early by [`Options::cancel`].
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -107,6 +109,15 @@ pub struct Options {
     /// Skip files modified within this many seconds (a copy in progress would hash garbage).
     /// The watcher uses ~10 s and re-runs later; one-shot `index` uses 0.
     pub settle_secs: i64,
+    /// Set to stop the run at the next safe point (between videos/frames); unfinished work stays
+    /// pending for a later run.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Options {
+    pub fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Exclusive indexer lock (`<data>/indexer.lock`): the app and the CLI may both be open, but only
@@ -214,22 +225,42 @@ pub async fn run(db: &mut Db, rt: &Runtime, opts: &Options, mut on_event: impl F
     });
 
     // 3. Jobs, stage by stage.
+    if opts.cancelled() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
     let (done, failed) = run_probe_jobs(db, &rt.ffprobe, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
+    if opts.cancelled() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
     let (done, failed) = run_transcribe_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
+    if opts.cancelled() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
     let (done, failed) = run_frame_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
+    if opts.cancelled() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
     let (done, failed) = run_describe_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
 
+    if opts.cancelled() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
     let (done, failed) = run_embed_jobs(db, rt, opts, &mut tracker, &mut on_event).await?;
     summary.jobs_done += done;
     summary.jobs_failed += failed;
@@ -645,6 +676,9 @@ async fn run_transcribe_jobs(
 
     let (mut done, mut failed) = (0, 0);
     for (video_id, path) in jobs {
+        if opts.cancelled() {
+            break;
+        }
         let duration = durations.get(&video_id).copied().unwrap_or(0.0);
         set_job(db, video_id, STAGE, "running", None)?;
         on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
@@ -769,6 +803,9 @@ async fn run_frame_jobs(
 
     let (mut done, mut failed) = (0, 0);
     for (video_id, path) in jobs {
+        if opts.cancelled() {
+            break;
+        }
         let Some((duration, hash)) = info.get(&video_id).cloned() else { continue };
         set_job(db, video_id, STAGE, "running", None)?;
         on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
@@ -828,8 +865,11 @@ fn speech_near(db: &Db, video_id: i64, t_s: f64) -> Result<String, Error> {
     Ok(parts.join(" "))
 }
 
-/// Frames of `video_id` still without a description: (frame id, t, absolute path).
-fn undescribed_frames(db: &Db, data_dir: &Path, video_id: i64) -> Result<Vec<(i64, f64, PathBuf)>, Error> {
+/// A frame awaiting description: (frame id, t, absolute path).
+type PendingFrame = (i64, f64, PathBuf);
+
+/// Frames of `video_id` still without a description.
+fn undescribed_frames(db: &Db, data_dir: &Path, video_id: i64) -> Result<Vec<PendingFrame>, Error> {
     let mut st = db.conn.prepare(
         "SELECT id, t_s, thumb_path FROM frames WHERE video_id = ?1 AND description_json IS NULL ORDER BY t_s",
     )?;
@@ -899,7 +939,7 @@ async fn run_describe_jobs(
         }
         return Ok((0, 0));
     };
-    let work: Vec<(i64, PathBuf, Vec<(i64, f64, PathBuf)>)> = jobs
+    let work: Vec<(i64, PathBuf, Vec<PendingFrame>)> = jobs
         .into_iter()
         .map(|(id, path)| Ok((id, path, undescribed_frames(db, &rt.data_dir, id)?)))
         .collect::<Result<_, Error>>()?;
@@ -935,6 +975,10 @@ async fn run_describe_jobs(
         set_job(db, video_id, STAGE, "running", None)?;
         on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
         for (frame_id, t_s, image) in frames {
+            if opts.cancelled() {
+                set_job(db, video_id, STAGE, "pending", None)?;
+                break 'videos;
+            }
             let speech = speech_near(db, video_id, t_s)?;
             let speech = (!speech.is_empty()).then_some(speech.as_str());
             // One retry for a bad/unparseable answer; transport errors stop the stage.
@@ -1112,6 +1156,9 @@ async fn run_embed_jobs(
 
     let (mut done, mut failed) = (0, 0);
     for (video_id, path, chunks) in work {
+        if opts.cancelled() {
+            break;
+        }
         set_job(db, video_id, STAGE, "running", None)?;
         let texts: Vec<String> = chunks.iter().map(|c| crate::embed::doc_text(&c.text)).collect();
         let mut vectors = Vec::with_capacity(texts.len());
@@ -1635,6 +1682,26 @@ done
         // 4. Nothing left: another run does no work.
         let s = run(&mut db, &with_vision, &opts, |_| {}).await.unwrap();
         assert_eq!(s.jobs_done, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_stops_before_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let media = tmp.path().join("media");
+        write(&media.join("a.mp4"), b"video-a");
+        let bin = fake_ffprobe(tmp.path());
+        let mut db = Db::open_in_memory().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        db.add_folder(p.id, &media, true).unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let opts = Options { project_id: Some(p.id), cancel: Some(flag.clone()), ..Default::default() };
+        let s = run(&mut db, &rt(&bin), &opts, |_| {}).await.unwrap();
+        assert!(s.cancelled);
+        assert_eq!((s.new, s.jobs_done), (1, 0), "scan happened, jobs did not");
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        let s = run(&mut db, &rt(&bin), &opts, |_| {}).await.unwrap();
+        assert_eq!((s.cancelled, s.jobs_done), (false, 1), "resumes on the next run");
     }
 
     #[test]
