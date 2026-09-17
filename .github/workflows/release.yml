@@ -203,7 +203,8 @@ jobs:
         run: |
           shopt -s nullglob
           for img in target/release/bundle/appimage/*.AppImage; do
-            npx tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" "$img"
+            # -p "": the key has no password, and without this the CLI tries to prompt.
+            npx tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$img"
           done
 
       - name: Package CLI
