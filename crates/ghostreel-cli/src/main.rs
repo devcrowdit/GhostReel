@@ -1,5 +1,7 @@
 //! `ghostreel` — headless GhostReel CLI.
 
+mod mcp;
+
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,6 +32,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve the MCP tools (projects, indexing, search, scripts) on stdio for an AI agent.
+    Mcp,
     /// Check ffmpeg, GPU, database, models and the AI backends GhostReel would use.
     Doctor {
         /// Machine-readable output.
@@ -342,6 +346,10 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     }
                 }
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Mcp => {
+            mcp::serve(paths).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Script { action } => script_cmd(&paths, action).await,

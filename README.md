@@ -130,6 +130,64 @@ ghostreel config set frames.max_interval_s 5 && ghostreel index -p "Greet Mag" -
 
 ---
 
+## For AI agents (MCP)
+
+`ghostreel mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) on stdio, so an
+agent can index footage, search it and build an edit. Register it once:
+
+```json
+{
+  "mcpServers": {
+    "ghostreel": { "command": "ghostreel", "args": ["mcp"] }
+  }
+}
+```
+
+(Claude Code: `claude mcp add ghostreel -- ghostreel mcp`. Add `"env": {"GHOSTREEL_HOME": "/path"}`
+to work on a different library.)
+
+| Tool | What it does |
+|---|---|
+| `doctor` | ffmpeg, GPU, database, models and which AI backends would be used |
+| `list_projects` · `create_project` | projects with their indexing progress; create one (fps/size = export timeline) |
+| `add_folder` | watch a footage folder (whole tree; editor render/cache folders are skipped) |
+| `index` · `index_status` | run pending indexing for up to `max_seconds` (resumable — call again while work is pending), or just report progress |
+| `search` | hybrid keyword + meaning search; returns moments with `video_id` and timestamps |
+| `get_transcript` · `get_video` | what people say, and what each keyframe shows |
+| `list_scripts` · `get_script` | script versions of a project |
+| `draft_script` | let GhostReel's editing model draft or revise a script from the footage (minutes) |
+| `save_script` | save your own script JSON as a new version; returns the issues found |
+| `export_script` | write `fcp_xml` (Premiere Pro) or `otio` |
+| `set_video_role` | take a video out of the library (`removed`) or keep it as a `reference` edit |
+
+Typical run: `create_project` → `add_folder` → `index` until nothing is pending → `search` /
+`get_transcript` / `get_video` to learn the footage → `draft_script` or `save_script` →
+`export_script`. Clips must lie inside footage the tools reported: `save_script` returns an
+`error` issue per clip that doesn't (and still saves the version, so it can be fixed).
+
+A script is plain JSON:
+
+```json
+{
+  "title": "NW Hills promo",
+  "target_duration_s": 60,
+  "beats": [
+    {
+      "id": "hook",
+      "purpose": "Open with a resident on why the neighbourhood is special",
+      "narration": "",
+      "on_screen_text": "Northwest Hills",
+      "clips": [{ "video_id": 8, "in_s": 12.4, "out_s": 28.9, "audio": "source" }]
+    }
+  ]
+}
+```
+
+`audio` is `source` (someone speaking) or `mute` (b-roll under narration). `narration` is the
+voice-over for that beat — about 2.5 words per second of its clips.
+
+---
+
 ## Configuration & privacy
 
 Everything lives in one folder: **`~/.ghostreel/`** (`%USERPROFILE%\.ghostreel\` on Windows).
