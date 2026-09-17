@@ -276,6 +276,7 @@ pub fn validate(db: &Db, project_id: i64, script: &Script) -> Result<Vec<Issue>,
                      JOIN folders f ON f.id = vf.folder_id
                      JOIN project_folders pf ON pf.folder_id = f.id
                      WHERE pf.project_id = ?1 AND v.id = ?2
+                       AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)
                      LIMIT 1",
                     params![project_id, clip.video_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),

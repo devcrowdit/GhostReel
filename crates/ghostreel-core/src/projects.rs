@@ -132,6 +132,41 @@ impl Db {
         self.project(id)
     }
 
+    /// Take a video out of a project's library. `role` is `removed` (ignored, not indexed) or
+    /// `reference` (a finished edit the script chat learns from; still indexed, never used as
+    /// footage). The file isn't touched; other projects that see the same file keep it.
+    pub fn exclude_video(&self, project_id: i64, video_id: i64, role: &str) -> Result<(), Error> {
+        if role != "removed" && role != "reference" {
+            return Err(Error::Invalid(format!("unknown role '{role}' (removed or reference)")));
+        }
+        self.conn.execute(
+            "INSERT INTO project_exclusions(project_id, video_id, role, excluded_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, video_id) DO UPDATE SET role = excluded.role",
+            params![project_id, video_id, role, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Put a removed video back into the project's library.
+    pub fn include_video(&self, project_id: i64, video_id: i64) -> Result<(), Error> {
+        self.conn.execute(
+            "DELETE FROM project_exclusions WHERE project_id = ?1 AND video_id = ?2",
+            params![project_id, video_id],
+        )?;
+        Ok(())
+    }
+
+    /// Videos taken out of a project: `(video_id, role, one path)`.
+    pub fn excluded_videos(&self, project_id: i64) -> Result<Vec<(i64, String, String)>, Error> {
+        let mut st = self.conn.prepare(
+            "SELECT x.video_id, x.role,
+                    COALESCE((SELECT MIN(vf.path) FROM video_files vf WHERE vf.video_id = x.video_id), '')
+               FROM project_exclusions x WHERE x.project_id = ?1 ORDER BY x.excluded_at DESC",
+        )?;
+        let rows = st.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Delete a project; folders no other project uses are removed with it.
     pub fn remove_project(&mut self, id: i64) -> Result<(), Error> {
         let tx = self.conn.transaction()?;

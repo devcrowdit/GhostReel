@@ -155,7 +155,19 @@ export interface ProjectView {
   folders: FolderView[];
   status: Status;
   videos: VideoRow[];
+  excluded: ExcludedVideo[];
 }
+
+export type ExclusionRole = "removed" | "reference";
+export interface ExcludedVideo {
+  video_id: number;
+  role: ExclusionRole;
+  path: string;
+}
+export const excludeVideo = (projectId: number, videoId: number, role: ExclusionRole) =>
+  invoke<void>("exclude_video", { projectId, videoId, role });
+export const includeVideo = (projectId: number, videoId: number) =>
+  invoke<void>("include_video", { projectId, videoId });
 
 export type IndexEvent =
   | { event: "scan_folder"; path: string }

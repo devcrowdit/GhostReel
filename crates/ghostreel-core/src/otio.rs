@@ -420,7 +420,8 @@ pub fn resolve_media_for_script(
                  JOIN folders f ON f.id = vf.folder_id
                  JOIN project_folders pf ON pf.folder_id = f.id
                  JOIN videos v ON v.id = vf.video_id
-                 WHERE pf.project_id = ?1 AND v.id = ?2",
+                 WHERE pf.project_id = ?1 AND v.id = ?2
+                   AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)",
             )?;
 
             let rows = st.query_map(params![project_id, clip.video_id], |r| {

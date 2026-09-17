@@ -108,7 +108,8 @@ pub fn search_with_vector(
     let allowed: HashSet<i64> = {
         let mut st = db.conn.prepare(
             "SELECT DISTINCT vf.video_id FROM video_files vf JOIN project_folders pf ON pf.folder_id = vf.folder_id
-              WHERE ?1 IS NULL OR pf.project_id = ?1",
+              WHERE (?1 IS NULL OR pf.project_id = ?1)
+                AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)",
         )?;
         st.query_map([opts.project_id], |r| r.get(0))?.collect::<Result<_, _>>()?
     };

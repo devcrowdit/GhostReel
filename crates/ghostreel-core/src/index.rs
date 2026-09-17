@@ -481,7 +481,8 @@ pub fn reset_stages(
             "SELECT DISTINCT j.video_id FROM jobs j
               JOIN video_files vf ON vf.video_id = j.video_id
               JOIN project_folders pf ON pf.folder_id = vf.folder_id
-             WHERE pf.project_id = ?1",
+             WHERE pf.project_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id AND x.role = 'removed')",
         )?;
         st.query_map([pid], |r| r.get(0))?.collect::<Result<_, _>>()?
     } else {
@@ -537,6 +538,7 @@ fn claimable_jobs(db: &Db, stage: &str, opts: &Options) -> Result<Vec<(i64, Path
         SELECT j.video_id, (SELECT vf.path FROM video_files vf
                              JOIN project_folders pf ON pf.folder_id = vf.folder_id
                             WHERE vf.video_id = j.video_id AND (?3 IS NULL OR pf.project_id = ?3)
+                              AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id AND x.role = 'removed')
                             ORDER BY vf.id LIMIT 1) AS path
           FROM jobs j
          WHERE j.stage = ?1
@@ -655,7 +657,8 @@ fn transcribe_work(db: &Db, opts: &Options) -> Result<(f64, i64), Error> {
           WHERE j.stage = 'transcribe' AND COALESCE(v.has_audio, 1) = 1
             AND (j.state = 'pending' OR (j.state = 'failed' AND j.attempts < ?1))
             AND EXISTS (SELECT 1 FROM video_files vf JOIN project_folders pf ON pf.folder_id = vf.folder_id
-                         WHERE vf.video_id = j.video_id AND (?2 IS NULL OR pf.project_id = ?2))",
+                         WHERE vf.video_id = j.video_id AND (?2 IS NULL OR pf.project_id = ?2)
+                           AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id AND x.role = 'removed'))",
         params![max_attempts, opts.project_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -824,7 +827,8 @@ fn stage_work(db: &Db, stage: &str, opts: &Options) -> Result<(f64, i64), Error>
           WHERE j.stage = ?1
             AND (j.state = 'pending' OR (j.state = 'failed' AND j.attempts < ?2))
             AND EXISTS (SELECT 1 FROM video_files vf JOIN project_folders pf ON pf.folder_id = vf.folder_id
-                         WHERE vf.video_id = j.video_id AND (?3 IS NULL OR pf.project_id = ?3))",
+                         WHERE vf.video_id = j.video_id AND (?3 IS NULL OR pf.project_id = ?3)
+                           AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id AND x.role = 'removed'))",
         params![stage, max_attempts, opts.project_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -1357,6 +1361,7 @@ const SCOPE: &str = "
     SELECT vf.video_id, MIN(vf.path) AS path, COUNT(DISTINCT vf.path) AS copies
       FROM video_files vf JOIN project_folders pf ON pf.folder_id = vf.folder_id
      WHERE (?1 IS NULL OR pf.project_id = ?1)
+       AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)
      GROUP BY vf.video_id";
 
 pub fn status(db: &Db, project_id: Option<i64>) -> Result<Status, Error> {

@@ -34,10 +34,13 @@ export default function VideoPanel({
   video,
   seek,
   onClose,
+  onExclude,
 }: {
   video: VideoRow;
   seek: { t: number; nonce: number } | null;
   onClose: () => void;
+  /** Take the video out of the project's library (removed, or kept as a reference edit). */
+  onExclude?: (role: "removed" | "reference") => void;
 }) {
   const player = useRef<HTMLVideoElement>(null);
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
@@ -96,6 +99,24 @@ export default function VideoPanel({
           <button className="ghost small" onClick={() => openExternal(video.path, player.current?.currentTime ?? 0)}>
             Open in player
           </button>
+          {onExclude && (
+            <>
+              <button
+                className="ghost small"
+                title="A finished edit made by a person: the script chat studies it but never uses it as footage"
+                onClick={() => onExclude("reference")}
+              >
+                Use as reference edit
+              </button>
+              <button
+                className="ghost small danger"
+                title="Stop using this video in search and scripts (the file is not deleted)"
+                onClick={() => onExclude("removed")}
+              >
+                Remove from library
+              </button>
+            </>
+          )}
           <button className="ghost small" onClick={onClose}>
             Close
           </button>

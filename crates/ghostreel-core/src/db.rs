@@ -213,6 +213,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX exports_script ON exports(script_id);
     "#,
+    // v4 — videos taken out of a project's library (the files stay where they are). `removed`:
+    // ignored entirely; `reference`: a finished human edit the script chat learns from, never footage.
+    r#"
+    CREATE TABLE project_exclusions (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        role TEXT NOT NULL DEFAULT 'removed' CHECK (role IN ('removed', 'reference')),
+        excluded_at INTEGER NOT NULL,
+        PRIMARY KEY (project_id, video_id)
+    );
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -383,7 +394,6 @@ mod tests {
         }
 
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as u32);
 
         let (pname, pcreated): (String, i64) = db

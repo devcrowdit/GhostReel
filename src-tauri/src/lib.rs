@@ -85,6 +85,15 @@ struct ProjectView {
     folders: Vec<FolderView>,
     status: Status,
     videos: Vec<VideoRow>,
+    /// Videos taken out of the library: removed, or kept as reference edits for the script chat.
+    excluded: Vec<ExcludedView>,
+}
+
+#[derive(Serialize)]
+struct ExcludedView {
+    video_id: i64,
+    role: String,
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -108,7 +117,24 @@ fn project_view(project_id: i64) -> CmdResult<ProjectView> {
         folders,
         status: index::status(&db, Some(project_id)).map_err(err)?,
         videos: index::videos(&db, Some(project_id)).map_err(err)?,
+        excluded: db
+            .excluded_videos(project_id)
+            .map_err(err)?
+            .into_iter()
+            .map(|(video_id, role, path)| ExcludedView { video_id, role, path })
+            .collect(),
     })
+}
+
+/// `role`: `removed` (ignored) or `reference` (a finished edit the script chat learns from).
+#[tauri::command]
+fn exclude_video(project_id: i64, video_id: i64, role: String) -> CmdResult<()> {
+    open_db()?.exclude_video(project_id, video_id, &role).map_err(err)
+}
+
+#[tauri::command]
+fn include_video(project_id: i64, video_id: i64) -> CmdResult<()> {
+    open_db()?.include_video(project_id, video_id).map_err(err)
 }
 
 #[tauri::command]
@@ -755,6 +781,8 @@ pub fn run() {
             list_projects,
             create_project,
             rename_project,
+            exclude_video,
+            include_video,
             remove_project,
             project_view,
             add_folder,

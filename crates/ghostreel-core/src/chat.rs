@@ -460,6 +460,66 @@ pub fn local_final_action_schema() -> Value {
     })
 }
 
+/// The project's reference edits (finished videos made by a person) as a study guide for the model:
+/// length, keyframe timeline and transcript. Empty when there are none.
+pub fn reference_edits_text(db: &Db, project_id: i64, max_chars: usize) -> String {
+    let Ok(refs) = db.excluded_videos(project_id) else { return String::new() };
+    let refs: Vec<_> = refs.into_iter().filter(|(_, role, _)| role == "reference").collect();
+    if refs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\nREFERENCE EDITS\nFinished videos a person edited for this project. They are NOT footage: never put their \
+         video ids in a script. Study them and match their quality: total length, how long shots are held (keyframe \
+         times show where the picture changes), how interviews and scenery alternate, and how the story opens and ends.\n",
+    );
+    let per_ref = max_chars / refs.len();
+    for (video_id, _, path) in refs {
+        let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path);
+        let duration = db
+            .conn
+            .query_row("SELECT duration_s FROM videos WHERE id = ?1", [video_id], |r| r.get::<_, Option<f64>>(0))
+            .ok()
+            .flatten()
+            .unwrap_or(0.0);
+        let mut block = format!("\n\"{name}\" ({duration:.0} s)\nPicture:\n");
+        if let Ok(mut st) = db.conn.prepare("SELECT t_s, description_json FROM frames WHERE video_id = ?1 ORDER BY t_s")
+        {
+            let rows = st.query_map([video_id], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?)));
+            for (t, d) in rows.into_iter().flatten().flatten() {
+                let desc: String = d
+                    .and_then(|j| serde_json::from_str::<Value>(&j).ok())
+                    .and_then(|v| v.get("description").and_then(|x| x.as_str()).map(str::to_string))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(110)
+                    .collect();
+                block.push_str(&format!("  {t:.1}s {desc}\n"));
+            }
+        }
+        block.push_str("Speech:\n");
+        if let Ok(mut st) =
+            db.conn.prepare("SELECT start_s, end_s, text FROM transcript_segments WHERE video_id = ?1 ORDER BY start_s")
+        {
+            let rows =
+                st.query_map([video_id], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?)));
+            for (a, b, t) in rows.into_iter().flatten().flatten() {
+                block.push_str(&format!("  {a:.1}-{b:.1}s {}\n", t.trim()));
+            }
+        }
+        if block.len() > per_ref {
+            let mut cut = per_ref;
+            while !block.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            block.truncate(cut);
+            block.push_str("…\n");
+        }
+        out.push_str(&block);
+    }
+    out
+}
+
 /// Check whether a video belongs to a project.
 pub fn is_video_in_project(db: &Db, project_id: i64, video_id: i64) -> bool {
     let res: Result<i64, _> = db.conn.query_row(
@@ -467,6 +527,7 @@ pub fn is_video_in_project(db: &Db, project_id: i64, video_id: i64) -> bool {
          JOIN folders f ON f.id = vf.folder_id
          JOIN project_folders pf ON pf.folder_id = f.id
          WHERE pf.project_id = ?1 AND vf.video_id = ?2
+           AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)
          LIMIT 1",
         params![project_id, video_id],
         |r| r.get(0),
@@ -761,6 +822,7 @@ pub fn dispatch_tool_limited(
                  JOIN folders f ON f.id = vf.folder_id
                  JOIN project_folders pf ON pf.folder_id = f.id
                  WHERE pf.project_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM project_exclusions x WHERE x.project_id = pf.project_id AND x.video_id = vf.video_id)
                  ORDER BY v.id",
             ) {
                 Ok(s) => s,
@@ -1410,7 +1472,12 @@ pub async fn run_turn(
         latest_script_json = stored_json;
     }
 
-    let sys_prompt = build_system_prompt(&project, latest_script_json.as_deref(), ctx.system_prompt.as_deref());
+    let mut sys_prompt = build_system_prompt(&project, latest_script_json.as_deref(), ctx.system_prompt.as_deref());
+    let reference_chars = match ctx.backend {
+        ChatBackend::Server { .. } => 6000,
+        ChatBackend::Local { .. } => 1200,
+    };
+    sys_prompt.push_str(&reference_edits_text(&ctx.db, project_id, reference_chars));
     // A length the user states ("60 second promo", "2 minutos") wins over whatever the model sets.
     let requested_s = requested_duration_s(message);
     // Only a first draft (or an explicit length) is squeezed to its target; revisions follow feedback.
@@ -1899,6 +1966,51 @@ mod tests {
         assert!(!applied.is_empty());
         assert!(s.beats[0].clips.iter().all(|c| c.out_s - c.in_s <= TRIMMED_CLIP_S + 1e-9));
         assert!(s.total_duration_s() <= 20.0 * TARGET_OVERSHOOT);
+    }
+
+    #[test]
+    fn removed_and_reference_videos_leave_the_library() {
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        for (id, name) in [(1, "a.mp4"), (2, "wife-edit.mp4"), (3, "c.mp4")] {
+            db.conn
+                .execute(
+                    "INSERT INTO videos(id, content_hash, size, duration_s) VALUES (?1, ?2, 1, 30.0)",
+                    params![id, name],
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen) VALUES (?1, ?2, ?3, 1, 0, 0)",
+                    params![id, folder.id, name],
+                )
+                .unwrap();
+        }
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (2, 0.0, 4.0, 'we love it')",
+                [],
+            )
+            .unwrap();
+        db.exclude_video(p.id, 2, "reference").unwrap();
+        db.exclude_video(p.id, 3, "removed").unwrap();
+        assert!(db.exclude_video(p.id, 1, "bogus").is_err());
+
+        assert!(is_video_in_project(&db, p.id, 1));
+        assert!(!is_video_in_project(&db, p.id, 2), "a reference edit is never footage");
+        assert!(!is_video_in_project(&db, p.id, 3));
+        let st = crate::index::status(&db, Some(p.id)).unwrap();
+        assert_eq!(st.videos, 1);
+
+        let text = reference_edits_text(&db, p.id, 6000);
+        assert!(text.contains("wife-edit.mp4") && text.contains("we love it"), "{text}");
+        assert!(!text.contains("c.mp4"));
+
+        db.include_video(p.id, 2).unwrap();
+        assert!(is_video_in_project(&db, p.id, 2));
+        assert!(reference_edits_text(&db, p.id, 6000).is_empty());
     }
 
     #[test]

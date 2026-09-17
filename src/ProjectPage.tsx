@@ -15,6 +15,8 @@ import {
   redoProjectStage,
   getAiSettings,
   removeProject,
+  excludeVideo,
+  includeVideo,
   renameProject,
   search,
   type Hit,
@@ -300,7 +302,25 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
       )}
 
       <div ref={panelRef}>
-        {selectedVideo && <VideoPanel video={selectedVideo} seek={seek} onClose={() => setSelected(null)} />}
+        {selectedVideo && (
+          <VideoPanel
+            video={selectedVideo}
+            seek={seek}
+            onClose={() => setSelected(null)}
+            onExclude={async (role) => {
+              const name = fileName(selectedVideo.path);
+              const ok = await ask(
+                role === "reference"
+                  ? `Use "${name}" as a reference edit? The script chat will study it (length, pacing, structure) but never use it as footage. It disappears from search.`
+                  : `Remove "${name}" from this project's library? It won't be searched, indexed or used in scripts. The file is not deleted.`,
+                { title: role === "reference" ? "Reference edit" : "Remove from library", kind: "warning" },
+              );
+              if (!ok) return;
+              setSelected(null);
+              run(() => excludeVideo(projectId, selectedVideo.id, role));
+            }}
+          />
+        )}
       </div>
 
       <h2>Folders</h2>
@@ -396,6 +416,23 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
           </table>
         )}
       </section>
+
+      {view.excluded.length > 0 && (
+        <>
+          <h2>Not in the library</h2>
+          <section className="card list">
+            {view.excluded.map((x) => (
+              <div key={x.video_id} className="row folder">
+                <span className="tag">{x.role === "reference" ? "reference edit" : "removed"}</span>
+                <span className="path">{fileName(x.path)}</span>
+                <button className="ghost small" onClick={() => run(() => includeVideo(projectId, x.video_id))}>
+                  Put back
+                </button>
+              </div>
+            ))}
+          </section>
+        </>
+      )}
 
       <p className="danger-zone">
         <button className="ghost small danger" onClick={onDelete}>

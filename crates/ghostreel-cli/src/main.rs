@@ -234,6 +234,16 @@ enum ProjectAction {
     },
     /// Rename a project.
     Rename { name: String, new_name: String },
+    /// Take a video out of the project's library (by video id or file name). With --reference the
+    /// script chat studies it as a finished edit instead of ignoring it.
+    Exclude {
+        name: String,
+        video: String,
+        #[arg(long)]
+        reference: bool,
+    },
+    /// Put an excluded video back into the library.
+    Include { name: String, video: String },
     /// Delete a project (indexed video data is kept for reuse).
     Remove { name: String },
 }
@@ -526,6 +536,20 @@ async fn models_cmd(paths: &Paths, action: ModelsAction) -> anyhow::Result<ExitC
     }
 }
 
+/// A video by id ("8") or by file name / path suffix ("NW Hills.mp4").
+fn find_video(db: &ghostreel_core::db::Db, key: &str) -> anyhow::Result<i64> {
+    if let Ok(id) = key.parse::<i64>() {
+        return Ok(id);
+    }
+    let mut st = db.conn.prepare("SELECT DISTINCT video_id FROM video_files WHERE path LIKE '%' || ?1")?;
+    let ids: Vec<i64> = st.query_map([key], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    match ids.as_slice() {
+        [id] => Ok(*id),
+        [] => bail!("no video matches '{key}'"),
+        _ => bail!("'{key}' matches {} videos; use the video id", ids.len()),
+    }
+}
+
 /// "25", "29.97", "23.976", "30000/1001" → (num, den).
 fn parse_fps(s: &str) -> anyhow::Result<(i64, i64)> {
     if let Some((n, d)) = s.split_once('/') {
@@ -616,6 +640,19 @@ fn project_cmd(paths: &Paths, action: ProjectAction) -> anyhow::Result<ExitCode>
                 }
                 print_status(&st);
             }
+        }
+        ProjectAction::Exclude { name, video, reference } => {
+            let p = db.require_project(&name)?;
+            let id = find_video(&db, &video)?;
+            let role = if reference { "reference" } else { "removed" };
+            db.exclude_video(p.id, id, role)?;
+            println!("video #{id} is now '{role}' in project '{}'", p.name);
+        }
+        ProjectAction::Include { name, video } => {
+            let p = db.require_project(&name)?;
+            let id = find_video(&db, &video)?;
+            db.include_video(p.id, id)?;
+            println!("video #{id} is back in project '{}'", p.name);
         }
         ProjectAction::Rename { name, new_name } => {
             let p = db.require_project(&name)?;
