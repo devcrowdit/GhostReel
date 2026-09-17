@@ -219,7 +219,8 @@ jobs:
           for f in "${files[@]}"; do
             for i in 1 2 3; do
               echo "uploading $(basename "$f") ($(du -m "$f" | cut -f1) MB), attempt $i"
-              gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY" && break
+              # A stalled upload otherwise hangs the job for hours instead of retrying.
+              timeout 20m gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY" && break
               [ "$i" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
               sleep 15
             done
@@ -364,8 +365,10 @@ jobs:
           foreach ($f in $files) {
             for ($i = 1; $i -le 3; $i++) {
               Write-Host "uploading $($f.Name) ($([math]::Round($f.Length/1MB)) MB), attempt $i"
-              gh release upload $env:TAG $f.FullName --clobber --repo $env:GITHUB_REPOSITORY
-              if ($LASTEXITCODE -eq 0) { break }
+              $job = Start-Job { gh release upload $using:env:TAG $using:f.FullName --clobber --repo $using:env:GITHUB_REPOSITORY }
+              if (-not (Wait-Job $job -Timeout 1200)) { Stop-Job $job; Write-Host "upload timed out" }
+              Receive-Job $job | Out-Host
+              if ($job.State -eq "Completed") { break }
               if ($i -eq 3) { throw "upload of $($f.Name) failed" }
               Start-Sleep -Seconds 15
             }
