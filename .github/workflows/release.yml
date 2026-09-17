@@ -202,17 +202,23 @@ jobs:
             target/release/bundle/rpm/*.rpm
             target/dist/*.tar.gz
 
-      # gh streams the upload and finds the draft release by tag; --clobber replaces old assets.
+      # One file at a time with retries (large parallel uploads time out). CLI tarball stays in artifacts.
       - name: Upload bundles to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           shopt -s nullglob
-          files=(target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/dist/*.tar.gz)
+          files=(target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no bundles found"; exit 1; }
-          ls -la "${files[@]}"
-          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          for f in "${files[@]}"; do
+            for i in 1 2 3; do
+              echo "uploading $(basename "$f") ($(du -m "$f" | cut -f1) MB), attempt $i"
+              gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY" && break
+              [ "$i" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
+              sleep 15
+            done
+          done
 
   windows-x64:
     name: windows-x64
@@ -340,18 +346,25 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/dist/ghostreel-cli-windows-x64.zip
 
-      # gh streams the upload (a 700 MB installer times out through the REST client) and finds
-      # the draft release by tag. --clobber replaces assets from an earlier attempt.
-      - name: Upload bundles to the release
+      # One file at a time with retries: parallel 700 MB uploads from the runner time out (HTTP 400).
+      # The CLI zip (same CUDA DLLs again) stays in the run's artifacts, not the release.
+      - name: Upload installer to the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          $files = @(Get-ChildItem -Path target/release/bundle/nsis/*-setup.exe) + @(Get-ChildItem -Path target/dist/*.zip)
-          if ($files.Count -eq 0) { throw "no bundles found" }
-          foreach ($f in $files) { Write-Host "uploading $($f.Name) ($([math]::Round($f.Length/1MB)) MB)" }
-          gh release upload $env:TAG @($files | ForEach-Object { $_.FullName }) --clobber --repo $env:GITHUB_REPOSITORY
+          $files = @(Get-ChildItem -Path target/release/bundle/nsis/*-setup.exe)
+          if ($files.Count -eq 0) { throw "no installer found" }
+          foreach ($f in $files) {
+            for ($i = 1; $i -le 3; $i++) {
+              Write-Host "uploading $($f.Name) ($([math]::Round($f.Length/1MB)) MB), attempt $i"
+              gh release upload $env:TAG $f.FullName --clobber --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -eq 0) { break }
+              if ($i -eq 3) { throw "upload of $($f.Name) failed" }
+              Start-Sleep -Seconds 15
+            }
+          }
 
   publish-release:
     name: Publish release
