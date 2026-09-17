@@ -18,6 +18,7 @@ pub struct ResolvedMedia {
     pub duration_s: f64,
     pub has_audio: bool,
     pub fps: Fps,
+    pub content_hash: String,
 }
 
 /// Convert a local file path to a file:// URL with proper percent-encoding.
@@ -414,7 +415,7 @@ pub fn resolve_media_for_script(
 
             // Query paths belonging to project folders
             let mut st = db.conn.prepare(
-                "SELECT vf.path, v.duration_s, v.has_audio, v.fps
+                "SELECT vf.path, v.duration_s, v.has_audio, v.fps, v.content_hash
                  FROM video_files vf
                  JOIN folders f ON f.id = vf.folder_id
                  JOIN project_folders pf ON pf.folder_id = f.id
@@ -428,6 +429,7 @@ pub fn resolve_media_for_script(
                     r.get::<_, Option<f64>>(1)?,
                     r.get::<_, Option<i64>>(2)?,
                     r.get::<_, Option<f64>>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })?;
 
@@ -441,7 +443,7 @@ pub fn resolve_media_for_script(
             }
 
             // Prefer a path that exists on disk
-            let chosen = candidates.iter().find(|(p, _, _, _)| Path::new(p).exists()).unwrap_or(&candidates[0]);
+            let chosen = candidates.iter().find(|(p, _, _, _, _)| Path::new(p).exists()).unwrap_or(&candidates[0]);
 
             let path = PathBuf::from(&chosen.0);
             let duration_s = chosen.1.unwrap_or(0.0);
@@ -450,9 +452,12 @@ pub fn resolve_media_for_script(
                 Some(f) if f > 0.0 => Fps::from_f64(f),
                 _ => project_fps,
             };
+            let content_hash = chosen.4.clone();
 
-            resolved_map
-                .insert(clip.video_id, ResolvedMedia { video_id: clip.video_id, path, duration_s, has_audio, fps });
+            resolved_map.insert(
+                clip.video_id,
+                ResolvedMedia { video_id: clip.video_id, path, duration_s, has_audio, fps, content_hash },
+            );
         }
     }
 
@@ -504,6 +509,7 @@ mod tests {
                 duration_s: 10.0,
                 has_audio: true,
                 fps: Fps::new(25, 1),
+                content_hash: "hash1".into(),
             },
         );
         media.insert(
@@ -514,6 +520,7 @@ mod tests {
                 duration_s: 5.0,
                 has_audio: false,
                 fps: Fps::new(30000, 1001),
+                content_hash: "hash2".into(),
             },
         );
 

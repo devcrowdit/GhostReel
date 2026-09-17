@@ -146,6 +146,16 @@ enum ScriptAction {
         #[arg(long, short = 'o', alias = "output")]
         out: PathBuf,
     },
+    /// Render a preview MP4 of a script timeline.
+    Preview {
+        id: i64,
+        #[arg(long, short = 'o', alias = "output")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        burn_titles: bool,
+        #[arg(long)]
+        burn_narration: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -265,7 +275,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Script { action } => script_cmd(&paths, action),
+        Command::Script { action } => script_cmd(&paths, action).await,
         Command::Config { action } => {
             match action {
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
@@ -411,7 +421,7 @@ fn folder_cmd(paths: &Paths, action: FolderAction) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitCode> {
+async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitCode> {
     let db = open_db(paths)?;
     match action {
         ScriptAction::Import { file, project, force } => {
@@ -513,6 +523,33 @@ fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitCode> {
                     Err(e) => eprintln!("warning: validation failed: {e}"),
                 }
             }
+        }
+        ScriptAction::Preview { id, out, burn_titles, burn_narration } => {
+            let ffmpeg = doctor::locate("ffmpeg").context("ffmpeg not found")?;
+            let opts = ghostreel_core::preview::PreviewOptions { burn_titles, burn_narration, out, cancel: None };
+            let t0 = std::time::Instant::now();
+            let is_tty = std::io::stderr().is_terminal();
+            let res = ghostreel_core::preview::render_preview(&db, &paths.data_dir, &ffmpeg, id, &opts, |pct, msg| {
+                if is_tty {
+                    eprint!("\r\x1b[2K[{:>3.0}%] {}", pct * 100.0, msg);
+                    let _ = std::io::stderr().flush();
+                } else {
+                    eprintln!("[{:>3.0}%] {}", pct * 100.0, msg);
+                }
+            })?;
+            if is_tty {
+                eprint!("\r\x1b[2K");
+            }
+            println!(
+                "preview: {} ({:.1} s, {} segments, {} built / {} cached, {}) in {:.1} s",
+                res.path.display(),
+                res.duration_s,
+                res.segments,
+                res.proxies_built,
+                res.proxies_cached,
+                res.encoder,
+                t0.elapsed().as_secs_f64()
+            );
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -38,6 +38,28 @@
       module (OpenTimelineIO .otio timeline builder with V1/A1/V2 tracks, markers, rational timebases),
       `ghostreel-otio` sidecar (OpenTimelineIO + otio-fcp-adapter FCP7 XML converter and validator), `export`
       module, and CLI `ghostreel script import|list|show|export`
+- [x] M8b: timeline preview — `preview` module (sequence-fps frame snapping, proxy caching per clip with
+      content-hash/in/out/fps/dimensions keys, nvenc hardware acceleration with libx264 fallback, concat
+      demuxing, title burning via drawtext with Sans fallback, narration subtitles via SRT burning,
+      previews recorded in exports table as preview_mp4), CLI `ghostreel script preview <id> [--burn-titles] [--burn-narration] [-o <path>]`,
+      Tauri commands (`enqueue_preview`, `enqueue_export`, `preview_plan`), queue integration with live progress
+      forwarding and cancel support, media server scope allowance for `/previews` and `/proxies`, and TypeScript
+      client API bindings (`enqueuePreview`, `enqueueExport`, `previewPlan`).
+
+## M8b timeline preview
+- [x] Proxy segment caching (`<data_dir>/proxies/<hash>_<in_ms>_<out_ms>_<fps>_<w>x<h>.mp4`, 540p even width, 1s GOP, stereo AAC)
+- [x] Fast proxy concat demuxing (stream copy, +faststart, sub-second concatenation)
+- [x] Hardware encoding auto-detection (`h264_nvenc` test encode with silent probe, fallback to `libx264`)
+- [x] Frame snapping: `dur = round(raw * fps) / fps` preventing audio/video frame skew
+- [x] Optional overlay burning: drawtext for beat titles with semi-transparent backings, SRT generation and subtitles filter for narration
+- [x] Database tracking in `exports` table with `format = 'preview_mp4'`
+- [x] CLI `ghostreel script preview <id>` with progress reporting and performance summary
+- [x] Tauri background queue tasks (`RenderPreview`, `Export`) with cancellation and progress reporting
+- [x] Asset / media server allowance for `<data_dir>/previews` and `<data_dir>/proxies`
+- [x] TypeScript bindings in `src/api.ts`
+- [ ] In-app player UI for preview playback (M8c / M9)
+- [ ] VP9 / WebM proxy fallback if browser / webview lacks H.264 hardware support on specific Linux distributions
+- [ ] Gap items handling if script specifies silent/black gaps between clips
 
 ## Next
 - [ ] M5 app: search box + results (thumbnail, file, time, snippet) → open video panel

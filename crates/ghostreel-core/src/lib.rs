@@ -15,6 +15,7 @@ pub mod media;
 pub mod models;
 pub mod otio;
 pub mod paths;
+pub mod preview;
 pub mod probe;
 pub mod progress;
 pub mod projects;
@@ -57,6 +58,8 @@ pub enum Error {
     Stt(String),
     #[error("export: {0}")]
     Export(String),
+    #[error("preview: {0}")]
+    Preview(String),
     #[error("another GhostReel process is already indexing ({0})")]
     Busy(String),
     #[error("cannot determine the user's {0} directory")]

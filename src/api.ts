@@ -213,20 +213,42 @@ export interface IndexSummary {
 
 export type TaskState = "queued" | "running" | "done" | "failed" | "cancelled";
 
+export type TaskKind =
+  | { type: "index"; project_id: number }
+  | { type: "render_preview"; script_id: number; burn_titles: boolean; burn_narration: boolean }
+  | { type: "export"; script_id: number; format: string; path: string };
+
 export interface Task {
   id: number;
-  kind: { type: "index"; project_id: number };
+  kind: TaskKind;
   label: string;
   state: TaskState;
   progress: Progress | null;
   note: string | null;
   summary: IndexSummary | null;
+  output: string | null;
   error: string | null;
   created_at: number;
   finished_at: number | null;
 }
 
+export interface PlannedSegment {
+  video_id: number;
+  path: string;
+  in_s: number;
+  out_s: number;
+  timeline_start_s: number;
+  beat_id: string;
+  mute: boolean;
+  has_audio: boolean;
+}
+
 export const enqueueIndex = (projectId: number) => invoke<number>("enqueue_index", { projectId });
+export const enqueuePreview = (scriptId: number, burnTitles: boolean, burnNarration: boolean) =>
+  invoke<number>("enqueue_preview", { scriptId, burnTitles, burnNarration });
+export const enqueueExport = (scriptId: number, format: string, path: string) =>
+  invoke<number>("enqueue_export", { scriptId, format, path });
+export const previewPlan = (scriptId: number) => invoke<PlannedSegment[]>("preview_plan", { scriptId });
 export const queueList = () => invoke<Task[]>("queue_list");
 export const cancelTask = (id: number) => invoke<boolean>("cancel_task", { id });
 export const clearFinishedTasks = () => invoke<void>("clear_finished_tasks");

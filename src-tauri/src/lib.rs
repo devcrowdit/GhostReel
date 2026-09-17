@@ -201,6 +201,40 @@ async fn enqueue_index(app: AppHandle, queue: State<'_, queue::Queue>, project_i
 }
 
 #[tauri::command]
+async fn enqueue_preview(
+    app: AppHandle,
+    queue: State<'_, queue::Queue>,
+    script_id: i64,
+    burn_titles: bool,
+    burn_narration: bool,
+) -> CmdResult<u64> {
+    let db = open_db()?;
+    let stored = ghostreel_core::script::load(&db, script_id).map_err(err)?;
+    let label = format!("Preview “{}” v{}", stored.title, stored.version);
+    Ok(queue.enqueue(&app, queue::TaskKind::RenderPreview { script_id, burn_titles, burn_narration }, label).await)
+}
+
+#[tauri::command]
+async fn enqueue_export(
+    app: AppHandle,
+    queue: State<'_, queue::Queue>,
+    script_id: i64,
+    format: String,
+    path: String,
+) -> CmdResult<u64> {
+    let db = open_db()?;
+    let stored = ghostreel_core::script::load(&db, script_id).map_err(err)?;
+    let label = format!("Export “{}” → {}", stored.title, format);
+    Ok(queue.enqueue(&app, queue::TaskKind::Export { script_id, format, path }, label).await)
+}
+
+#[tauri::command]
+fn preview_plan(script_id: i64) -> CmdResult<Vec<ghostreel_core::preview::PlannedSegment>> {
+    let db = open_db()?;
+    ghostreel_core::preview::preview_plan(&db, script_id).map_err(err)
+}
+
+#[tauri::command]
 async fn queue_list(queue: State<'_, queue::Queue>) -> CmdResult<Vec<queue::Task>> {
     Ok(queue.snapshot().await)
 }
@@ -257,6 +291,12 @@ pub fn run() {
             if let Ok(p) = Paths::resolve() {
                 let _ = std::fs::create_dir_all(&p.data_dir);
                 app.asset_protocol_scope().allow_directory(&p.data_dir, true)?;
+                let previews_dir = p.data_dir.join("previews");
+                let _ = std::fs::create_dir_all(&previews_dir);
+                let _ = app.asset_protocol_scope().allow_directory(&previews_dir, true);
+                let proxies_dir = p.data_dir.join("proxies");
+                let _ = std::fs::create_dir_all(&proxies_dir);
+                let _ = app.asset_protocol_scope().allow_directory(&proxies_dir, true);
                 // Watched folders, so the player can load the videos.
                 if let Ok(db) = Db::open(&p.db_file()) {
                     for f in db.folders(None).unwrap_or_default() {
@@ -276,6 +316,9 @@ pub fn run() {
             add_folder,
             remove_folder,
             enqueue_index,
+            enqueue_preview,
+            enqueue_export,
+            preview_plan,
             queue_list,
             cancel_task,
             clear_finished_tasks,

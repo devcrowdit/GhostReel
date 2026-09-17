@@ -44,13 +44,22 @@ fn random_token() -> String {
     format!("{a:016x}{:016x}", h2.finish())
 }
 
-/// A path may be served when it's a file inside one of the watched folders.
+/// A path may be served when it's a file inside one of the watched folders,
+/// or a preview / proxy file under the data dir.
 fn allowed(path: &std::path::Path) -> bool {
     let Ok(canonical) = std::fs::canonicalize(path) else { return false };
     if !canonical.is_file() {
         return false;
     }
     let Ok(paths) = Paths::resolve() else { return false };
+    let previews_dir = paths.data_dir.join("previews");
+    if std::fs::canonicalize(&previews_dir).is_ok_and(|root| canonical.starts_with(root)) {
+        return true;
+    }
+    let proxies_dir = paths.data_dir.join("proxies");
+    if std::fs::canonicalize(&proxies_dir).is_ok_and(|root| canonical.starts_with(root)) {
+        return true;
+    }
     let Ok(db) = Db::open(&paths.db_file()) else { return false };
     let folders = db.folders(None).unwrap_or_default();
     folders.iter().any(|f| std::fs::canonicalize(&f.path).is_ok_and(|root| canonical.starts_with(root)))
@@ -80,7 +89,8 @@ async fn serve(
 pub async fn start() -> Result<MediaServer, String> {
     let token = random_token();
     let app = Router::new().route("/{token}/media", get(serve)).with_state(AppState { token: token.clone() });
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn(async move {
         let _ = axum::serve(listener, app).await;

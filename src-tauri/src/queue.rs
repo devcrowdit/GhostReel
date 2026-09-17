@@ -19,6 +19,8 @@ use tokio::sync::{Mutex, Notify};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskKind {
     Index { project_id: i64 },
+    RenderPreview { script_id: i64, burn_titles: bool, burn_narration: bool },
+    Export { script_id: i64, format: String, path: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub struct Task {
     /// Latest human-readable status line ("Transcription: GhostPen @ …").
     pub note: Option<String>,
     pub summary: Option<index::Summary>,
+    pub output: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
     pub finished_at: Option<i64>,
@@ -78,6 +81,7 @@ impl Queue {
             progress: None,
             note: None,
             summary: None,
+            output: None,
             error: None,
             created_at: ghostreel_core::projects::now(),
             finished_at: None,
@@ -148,6 +152,13 @@ impl Queue {
     }
 }
 
+enum TaskOutcome {
+    Index(index::Summary),
+    Preview { path: String },
+    Export { path: String },
+    Cancelled,
+}
+
 /// The single worker: runs queued tasks forever, in order.
 pub async fn worker(app: AppHandle) {
     loop {
@@ -158,16 +169,35 @@ pub async fn worker(app: AppHandle) {
         };
         queue.emit(&app).await;
         let result = match kind {
-            TaskKind::Index { project_id } => run_index(&app, id, project_id, cancel.clone()).await,
+            TaskKind::Index { project_id } => {
+                run_index(&app, id, project_id, cancel.clone()).await.map(TaskOutcome::Index)
+            }
+            TaskKind::RenderPreview { script_id, burn_titles, burn_narration } => {
+                run_preview(&app, id, script_id, burn_titles, burn_narration, cancel.clone()).await
+            }
+            TaskKind::Export { script_id, format, path } => {
+                run_export(&app, id, script_id, &format, &path).await.map(|p| TaskOutcome::Export { path: p })
+            }
         };
         let queue = app.state::<Queue>();
         queue
             .update(&app, id, |t| {
                 t.finished_at = Some(ghostreel_core::projects::now());
                 match result {
-                    Ok(summary) => {
+                    Ok(TaskOutcome::Index(summary)) => {
                         t.state = if summary.cancelled { TaskState::Cancelled } else { TaskState::Done };
                         t.summary = Some(summary);
+                    }
+                    Ok(TaskOutcome::Preview { path }) => {
+                        t.state = TaskState::Done;
+                        t.output = Some(path);
+                    }
+                    Ok(TaskOutcome::Export { path }) => {
+                        t.state = TaskState::Done;
+                        t.output = Some(path);
+                    }
+                    Ok(TaskOutcome::Cancelled) => {
+                        t.state = TaskState::Cancelled;
                     }
                     Err(e) => {
                         t.state = TaskState::Failed;
@@ -265,4 +295,90 @@ fn stage_name(stage: &str) -> &str {
         "frames" => "Keyframes",
         other => other,
     }
+}
+
+async fn run_preview(
+    app: &AppHandle,
+    task_id: u64,
+    script_id: i64,
+    burn_titles: bool,
+    burn_narration: bool,
+    cancel: Arc<AtomicBool>,
+) -> Result<TaskOutcome, String> {
+    let p = Paths::resolve().map_err(|e| e.to_string())?;
+    let db = Db::open(&p.db_file()).map_err(|e| e.to_string())?;
+    let ffmpeg = ghostreel_core::doctor::locate("ffmpeg").ok_or_else(|| "ffmpeg not found".to_string())?;
+    let opts = ghostreel_core::preview::PreviewOptions { burn_titles, burn_narration, out: None, cancel: Some(cancel) };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(f64, String)>();
+    let app_clone = app.clone();
+    let forward = tauri::async_runtime::spawn(async move {
+        let t0 = std::time::Instant::now();
+        while let Some((frac, note)) = rx.recv().await {
+            let queue = app_clone.state::<Queue>();
+            queue
+                .update(&app_clone, task_id, |t| {
+                    t.note = Some(note);
+                    t.progress = Some(Progress {
+                        phase: "preview".to_string(),
+                        phase_done: (frac * 100.0).round() as u64,
+                        phase_total: 100,
+                        fraction: frac,
+                        eta_secs: None,
+                        elapsed_secs: t0.elapsed().as_secs_f64(),
+                        current: None,
+                    });
+                })
+                .await;
+        }
+    });
+
+    let res = tokio::task::spawn_blocking(move || {
+        ghostreel_core::preview::render_preview(&db, &p.data_dir, &ffmpeg, script_id, &opts, |frac, msg| {
+            let _ = tx.send((frac, msg.to_string()));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // The sender was moved into the blocking closure and is gone now: drain the remaining updates
+    // before the worker writes the final state, so a late progress event can't overwrite it.
+    let _ = forward.await;
+
+    match res {
+        Ok(preview_res) => Ok(TaskOutcome::Preview { path: preview_res.path.to_string_lossy().to_string() }),
+        Err(ghostreel_core::Error::Preview(s)) if s == "cancelled" => Ok(TaskOutcome::Cancelled),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+async fn run_export(
+    app: &AppHandle,
+    task_id: u64,
+    script_id: i64,
+    format_str: &str,
+    out_path_str: &str,
+) -> Result<String, String> {
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    let p = Paths::resolve().map_err(|e| e.to_string())?;
+    let db = Db::open(&p.db_file()).map_err(|e| e.to_string())?;
+    let format = ghostreel_core::export::ExportFormat::from_str(format_str).map_err(|e| e.to_string())?;
+    let out_path = PathBuf::from(out_path_str);
+
+    app.state::<Queue>()
+        .update(app, task_id, |t| {
+            t.note = Some(format!("Exporting to {format}…"));
+        })
+        .await;
+
+    let res = tokio::task::spawn_blocking(move || {
+        ghostreel_core::export::export_script(&db, &p.data_dir, script_id, format, &out_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    Ok(res.path.to_string_lossy().to_string())
 }
