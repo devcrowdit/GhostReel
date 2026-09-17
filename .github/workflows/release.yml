@@ -133,7 +133,7 @@ jobs:
 
       - name: Restore CUDA helpers
         id: helpers
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             target/release/ghostreel-asr
@@ -145,6 +145,15 @@ jobs:
         run: scripts/build-helpers.sh asr llm
         env:
           JOBS: "16"
+
+      - name: Save CUDA helpers
+        if: steps.helpers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/release/ghostreel-asr
+            target/release/ghostreel-llm
+          key: ${{ steps.helpers.outputs.cache-primary-key }}
 
       - name: Build CLI
         run: cargo build --release -p ghostreel-cli
@@ -195,7 +204,10 @@ jobs:
             const releaseId = Number(process.env.RELEASE_ID);
             const walk = (d) => !fs.existsSync(d) ? [] : fs.readdirSync(d, { withFileTypes: true })
               .flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
-            const [dirs, pattern] = process.env.FILES.split('|');
+            // "dir,dir|regex": split on the FIRST '|' only (the regex has its own).
+            const sep = process.env.FILES.indexOf('|');
+            const dirs = process.env.FILES.slice(0, sep);
+            const pattern = process.env.FILES.slice(sep + 1);
             const re = new RegExp(pattern, 'i');
             const files = dirs.split(',').flatMap(walk).filter((f) => re.test(f));
             if (!files.length) { core.setFailed('no bundles found'); return; }
@@ -272,7 +284,7 @@ jobs:
 
       - name: Restore CUDA helpers
         id: helpers
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             target/release/ghostreel-asr.exe
@@ -288,6 +300,15 @@ jobs:
         if: steps.helpers.outputs.cache-hit != 'true'
         shell: pwsh
         run: cargo build -j 16 --release -p ghostreel-llm --features cuda
+
+      - name: Save CUDA helpers
+        if: steps.helpers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/release/ghostreel-asr.exe
+            target/release/ghostreel-llm.exe
+          key: ${{ steps.helpers.outputs.cache-primary-key }}
 
       - name: Build CLI
         shell: pwsh
@@ -342,7 +363,10 @@ jobs:
             const releaseId = Number(process.env.RELEASE_ID);
             const walk = (d) => !fs.existsSync(d) ? [] : fs.readdirSync(d, { withFileTypes: true })
               .flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
-            const [dirs, pattern] = process.env.FILES.split('|');
+            // "dir,dir|regex": split on the FIRST '|' only (the regex has its own).
+            const sep = process.env.FILES.indexOf('|');
+            const dirs = process.env.FILES.slice(0, sep);
+            const pattern = process.env.FILES.slice(sep + 1);
             const re = new RegExp(pattern, 'i');
             const files = dirs.split(',').flatMap(walk).filter((f) => re.test(f));
             if (!files.length) { core.setFailed('no bundles found'); return; }
