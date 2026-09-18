@@ -336,6 +336,7 @@ impl LocalLlm {
 pub enum Describer {
     Server(ServerVision),
     Local(Box<LocalLlm>),
+    Cli(crate::cliagent::CliAgent),
 }
 
 impl Describer {
@@ -343,6 +344,17 @@ impl Describer {
         match self {
             Describer::Server(s) => s.describe(image, speech).await,
             Describer::Local(l) => l.describe(image, speech).await,
+            Describer::Cli(agent) => {
+                let schema_hint = serde_json::to_string(&schema()).unwrap_or_default();
+                // Add speech context if present. CliAgent::describe prepends "Read image…reply with JSON: ".
+                let hint = if let Some(sp) = speech {
+                    format!("{schema_hint}\n\nAudio near this frame: {sp}")
+                } else {
+                    schema_hint
+                };
+                let json_text = agent.describe(image, &hint).await?;
+                parse_description(&json_text)
+            }
         }
     }
 }

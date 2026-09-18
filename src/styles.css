@@ -1539,3 +1539,5 @@ form.rename input { font-size: 1.6rem; font-weight: 700; padding: 2px 8px; min-w
 
 .prompt-editor { width: 100%; min-height: 460px; font-family: ui-monospace, monospace; font-size: 0.85rem; line-height: 1.45; resize: vertical; box-sizing: border-box; }
 .prompt-actions { justify-content: space-between; margin-top: 8px; }
+
+pre.cli-test-result { background: var(--panel, #171a21); border: 1px solid var(--line, #262a35); border-radius: 8px; padding: 10px; font-size: 0.78rem; white-space: pre-wrap; max-height: 220px; overflow: auto; }

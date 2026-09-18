@@ -281,6 +281,13 @@ enum FolderAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
+    /// Run one describe call through the configured CLI agent (claude / agy / opencode) and print
+    /// its answer, to check the setup before an index run calls it once per keyframe.
+    TestCli {
+        /// Which capability's CLI settings to use: `vision` or `chat_model`.
+        #[arg(default_value = "vision")]
+        capability: String,
+    },
     /// Print the config file path.
     Path,
     /// Print the effective configuration (defaults applied).
@@ -364,6 +371,12 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Models { action } => models_cmd(&paths, action).await,
         Command::Config { action } => {
             match action {
+                ConfigAction::TestCli { capability } => {
+                    let cfg = Config::load(&paths.config_file).unwrap_or_default();
+                    let llm = if capability == "chat_model" { cfg.chat_model() } else { cfg.vision.clone() };
+                    let agent = ghostreel_core::cliagent::CliAgent::new(llm.cli);
+                    println!("{}", agent.self_test(&paths.data_dir).await.map_err(|e| anyhow::anyhow!("{e}"))?);
+                }
                 ConfigAction::Path => println!("{}", paths.config_file.display()),
                 ConfigAction::Show => {
                     let cfg = Config::load(&paths.config_file)?;
@@ -384,7 +397,8 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                             "auto" => Ok(ghostreel_core::config::Backend::Auto),
                             "local" => Ok(ghostreel_core::config::Backend::Local),
                             "server" => Ok(ghostreel_core::config::Backend::Server),
-                            other => bail!("invalid backend '{other}'; expected 'auto', 'local', or 'server'"),
+                            "cli" => Ok(ghostreel_core::config::Backend::Cli),
+                            other => bail!("invalid backend '{other}'; expected 'auto', 'local', 'server', or 'cli'"),
                         }
                     };
                     // vision.* = frame descriptions, chat_model.* = the script chat.
@@ -418,6 +432,43 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         println!("{key} = {value:?}");
                         return Ok(ExitCode::SUCCESS);
                     }
+                    // vision.cli.* and chat_model.cli.* keys.
+                    let (section2, rest) = key.split_once('.').unwrap_or(("", ""));
+                    let (subsection, cli_field) = rest.split_once('.').unwrap_or(("", ""));
+                    if matches!(section2, "vision" | "chat_model" | "chat-model")
+                        && subsection == "cli"
+                        && matches!(
+                            cli_field,
+                            "tool" | "command" | "model" | "timeout_secs" | "concurrency" | "extra_args"
+                        )
+                    {
+                        let mut llm = if section2 == "vision" { cfg.vision.clone() } else { cfg.chat_model() };
+                        match cli_field {
+                            "tool" => llm.cli.tool = value.clone(),
+                            "command" => llm.cli.command = value.clone(),
+                            "model" => llm.cli.model = value.clone(),
+                            "timeout_secs" => {
+                                llm.cli.timeout_secs =
+                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
+                            }
+                            "concurrency" => {
+                                llm.cli.concurrency =
+                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
+                            }
+                            _ => {
+                                bail!("{key}: extra_args is not settable via config set; edit the config file directly")
+                            }
+                        }
+                        llm.cli.validate(section2).map_err(|e| anyhow::anyhow!("{e}"))?;
+                        if section2 == "vision" {
+                            cfg.vision = llm;
+                        } else {
+                            cfg.chat_model = Some(llm);
+                        }
+                        cfg.save(&paths.config_file)?;
+                        println!("{key} = {value:?}");
+                        return Ok(ExitCode::SUCCESS);
+                    }
                     match key.as_str() {
                         "stt.backend" => cfg.stt.backend = parse_backend(&value)?,
                         "stt.url" => cfg.stt.url = value.clone(),
@@ -435,6 +486,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         other => bail!(
                             "unknown or unsupported config key '{other}'; supported keys: \
                              vision.* and chat_model.* (backend, url, model, local_model, ctx_tokens, kv_cache, flash_attn), \
+                             vision.cli.* and chat_model.cli.* (tool, command, model, timeout_secs, concurrency), \
                              stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s"
                         ),
                     }
@@ -1359,6 +1411,20 @@ fn print_report(r: &Report) {
     );
     print_backend("embeddings", &r.embeddings);
     print_backend("stt", &r.stt);
+
+    println!("\nCLI agents");
+    if r.cli_tools.installed.is_empty() {
+        println!("  - none installed (claude, agy, opencode not found in PATH)");
+    } else {
+        for (name, path) in &r.cli_tools.installed {
+            println!("  ✓ {:<10} {}", name, path.display());
+        }
+    }
+    if !r.cli_tools.active_for.is_empty() {
+        for note in &r.cli_tools.active_for {
+            println!("  → using CLI for {note}");
+        }
+    }
 
     println!("\nLocal model files");
     for m in &r.models {

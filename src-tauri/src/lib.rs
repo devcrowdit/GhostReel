@@ -367,6 +367,19 @@ struct VisionSettingsView {
     ctx_tokens: u32,
     kv_cache: String,
     flash_attn: String,
+    cli: CliSettingsView,
+}
+
+/// A coding-agent CLI (claude / agy / opencode) used instead of a model.
+#[derive(Serialize, Deserialize)]
+struct CliSettingsView {
+    tool: String,
+    command: String,
+    model: String,
+    timeout_secs: u64,
+    concurrency: usize,
+    /// Whether the binary was found on this machine.
+    installed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -404,6 +417,16 @@ struct VisionSettingsPatch {
     ctx_tokens: Option<u32>,
     kv_cache: Option<String>,
     flash_attn: Option<String>,
+    cli: Option<CliSettingsPatch>,
+}
+
+#[derive(Deserialize, Default)]
+struct CliSettingsPatch {
+    tool: Option<String>,
+    command: Option<String>,
+    model: Option<String>,
+    timeout_secs: Option<u64>,
+    concurrency: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -457,6 +480,14 @@ fn llm_view(c: &ghostreel_core::config::VisionConfig) -> VisionSettingsView {
         ctx_tokens: c.ctx_tokens,
         kv_cache: c.kv_cache.clone(),
         flash_attn: c.flash_attn.clone(),
+        cli: CliSettingsView {
+            tool: c.cli.tool.clone(),
+            command: c.cli.command.clone(),
+            model: c.cli.model.clone(),
+            timeout_secs: c.cli.timeout_secs,
+            concurrency: c.cli.concurrency,
+            installed: ghostreel_core::cliagent::CliAgent::new(c.cli.clone()).available().is_some(),
+        },
     }
 }
 
@@ -495,6 +526,23 @@ fn apply_llm_patch(
     }
     if let Some(fa) = v.flash_attn {
         cfg.flash_attn = fa;
+    }
+    if let Some(c) = v.cli {
+        if let Some(t) = c.tool {
+            cfg.cli.tool = t;
+        }
+        if let Some(cmd) = c.command {
+            cfg.cli.command = cmd;
+        }
+        if let Some(m) = c.model {
+            cfg.cli.model = m;
+        }
+        if let Some(t) = c.timeout_secs {
+            cfg.cli.timeout_secs = t;
+        }
+        if let Some(n) = c.concurrency {
+            cfg.cli.concurrency = n;
+        }
     }
     cfg.validate(section)
 }
@@ -610,6 +658,16 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
         },
         frames: FrameSettingsView { max_interval_s: config.frames.max_interval_s },
     })
+}
+
+/// Run one describe call through the configured CLI agent, so the user can check it works before
+/// starting an index run. `capability`: "vision" or "chat_model".
+#[tauri::command]
+async fn test_cli_agent(capability: String) -> CmdResult<String> {
+    let p = paths()?;
+    let config = Config::load(&p.config_file).map_err(err)?;
+    let cfg = if capability == "chat_model" { config.chat_model() } else { config.vision.clone() };
+    ghostreel_core::cliagent::CliAgent::new(cfg.cli).self_test(&p.data_dir).await.map_err(err)
 }
 
 #[tauri::command]
@@ -879,6 +937,7 @@ pub fn run() {
             set_ai_settings,
             server_models,
             probe_backends,
+            test_cli_agent,
             app_version,
         ])
         .run(tauri::generate_context!())

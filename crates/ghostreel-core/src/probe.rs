@@ -60,6 +60,7 @@ pub struct Resolution {
 pub fn resolve(backend: Backend, probe: Option<Probe>) -> Resolution {
     let (target, reason) = match (backend, &probe) {
         (Backend::Local, _) => (Target::Local, "backend = local".to_string()),
+        (Backend::Cli, _) => (Target::Local, "backend = cli (handled by runtime)".to_string()),
         (_, None) => (Target::Local, "server not probed".to_string()),
         (Backend::Auto, Some(p)) if p.capable => (Target::Server, format!("server OK: {}", p.detail)),
         (Backend::Auto, Some(p)) => (Target::Local, format!("server not usable ({}) → local", p.detail)),

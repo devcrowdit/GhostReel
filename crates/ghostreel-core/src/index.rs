@@ -938,6 +938,7 @@ fn describe_phase(setup: &VisionSetup) -> Option<&'static str> {
     match setup {
         VisionSetup::Server(_) => Some("describe_server"),
         VisionSetup::Local { .. } => Some("describe_local"),
+        VisionSetup::Cli(_) => Some("describe_server"), // CLI is billed externally, similar wall time
         VisionSetup::Unavailable(_) => None,
     }
 }
@@ -964,7 +965,7 @@ fn undescribed_frames(db: &Db, data_dir: &Path, video_id: i64) -> Result<Vec<Pen
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Start the describer: the server client, or download missing local models and launch the helper.
+/// Start the describer: the server client, CLI agent, or download missing local models and launch the helper.
 async fn start_describer(
     rt: &Runtime,
     tracker: &mut Tracker,
@@ -973,6 +974,10 @@ async fn start_describer(
     use crate::vision::{Describer, LocalLlm, LocalModels};
     match &rt.vision {
         VisionSetup::Server(s) => Ok(Describer::Server(s.clone())),
+        VisionSetup::Cli(cfg) => {
+            let agent = crate::cliagent::CliAgent::new(cfg.clone());
+            Ok(Describer::Cli(agent))
+        }
         VisionSetup::Unavailable(why) => Err(why.clone()),
         VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime } => {
             let mut paths = Vec::new();
@@ -1055,68 +1060,166 @@ async fn run_describe_jobs(
     tracker.start(phase);
     on_event(Event::Progress(tracker.snapshot(None)));
 
+    let cli_concurrency = if let VisionSetup::Cli(c) = &rt.vision { Some(c.concurrency) } else { None };
+
     let (mut done, mut failed) = (0, 0);
-    'videos: for (video_id, path, frames) in work {
-        if frames.is_empty() {
-            continue;
-        }
-        set_job(db, video_id, STAGE, "running", None)?;
-        on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
-        for (frame_id, t_s, image) in frames {
-            if opts.cancelled() {
-                set_job(db, video_id, STAGE, "pending", None)?;
-                break 'videos;
+
+    if let Some(concurrency) = cli_concurrency {
+        // CLI backend: run up to `concurrency` frames at a time across all videos.
+        use std::sync::Arc;
+        let sem = Arc::new(Semaphore::new(concurrency.max(1)));
+        let agent_cfg = if let VisionSetup::Cli(c) = &rt.vision { c.clone() } else { unreachable!() };
+
+        'videos: for (video_id, path, frames) in work {
+            if frames.is_empty() {
+                continue;
             }
-            let speech = speech_near(db, video_id, t_s)?;
-            let speech = (!speech.is_empty()).then_some(speech.as_str());
-            // One retry for a bad/unparseable answer; transport errors stop the stage.
-            let mut result = describer.describe(&image, speech).await;
-            if matches!(&result, Err(e) if !is_transport_error(e)) {
-                result = describer.describe(&image, speech).await;
-            }
-            match result {
-                Ok(d) => {
-                    let json = serde_json::to_string(&d).unwrap_or_default();
-                    db.conn.execute(
-                        "UPDATE frames SET description_json = ?1, visible_text = ?2 WHERE id = ?3",
-                        params![json, d.visible_text.join("\n"), frame_id],
-                    )?;
-                }
-                Err(e) if is_transport_error(&e) => {
-                    // Server gone / helper crashed: leave the rest pending for a later run.
-                    set_job(db, video_id, STAGE, "pending", Some(&e.to_string()))?;
-                    on_event(Event::StageUnavailable { stage: STAGE.into(), reason: e.to_string() });
+            set_job(db, video_id, STAGE, "running", None)?;
+            on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
+
+            let mut tasks = JoinSet::new();
+            for (frame_id, t_s, image) in frames {
+                if opts.cancelled() {
+                    tasks.abort_all();
+                    set_job(db, video_id, STAGE, "pending", None)?;
                     break 'videos;
                 }
-                Err(e) => {
-                    // This frame can't be described; record why and move on.
-                    let json = serde_json::json!({ "error": e.to_string() }).to_string();
-                    db.conn
-                        .execute("UPDATE frames SET description_json = ?1 WHERE id = ?2", params![json, frame_id])?;
+                let speech = speech_near(db, video_id, t_s)?;
+                let agent = crate::cliagent::CliAgent::new(agent_cfg.clone());
+                let sem = sem.clone();
+                tasks.spawn(async move {
+                    let _permit = sem.acquire_owned().await;
+                    use crate::vision::schema;
+                    let schema_hint = serde_json::to_string(&schema()).unwrap_or_default();
+                    // Mirror Describer::Cli: pass schema + speech context as the schema_hint.
+                    let hint = if !speech.is_empty() {
+                        format!("{schema_hint}\n\nAudio near this frame: {speech}")
+                    } else {
+                        schema_hint
+                    };
+                    let json_text = agent.describe(&image, &hint).await;
+                    (frame_id, json_text)
+                });
+            }
+
+            while let Some(joined) = tasks.join_next().await {
+                let Ok((frame_id, result)) = joined else { continue };
+                let result = result.and_then(|j| crate::vision::parse_description(&j));
+                match result {
+                    Ok(d) => {
+                        let json = serde_json::to_string(&d).unwrap_or_default();
+                        db.conn.execute(
+                            "UPDATE frames SET description_json = ?1, visible_text = ?2 WHERE id = ?3",
+                            params![json, d.visible_text.join("\n"), frame_id],
+                        )?;
+                    }
+                    Err(e) => {
+                        let json = serde_json::json!({ "error": e.to_string() }).to_string();
+                        db.conn.execute(
+                            "UPDATE frames SET description_json = ?1 WHERE id = ?2",
+                            params![json, frame_id],
+                        )?;
+                    }
+                }
+                tracker.advance(phase, 1);
+                if tracker.should_emit() {
+                    on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
                 }
             }
-            tracker.advance(phase, 1);
-            if tracker.should_emit() {
-                on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
+
+            let ok: i64 = db.conn.query_row(
+                "SELECT COUNT(*) FROM frames WHERE video_id = ?1 AND description_json NOT LIKE '{\"error\"%'",
+                [video_id],
+                |r| r.get(0),
+            )?;
+            if ok == 0 {
+                set_job(db, video_id, STAGE, "failed", Some("no frame could be described"))?;
+                on_event(Event::JobFailed {
+                    video_id,
+                    stage: STAGE.into(),
+                    error: "no frame could be described".into(),
+                });
+                failed += 1;
+            } else {
+                set_job(db, video_id, STAGE, "done", None)?;
+                db.conn.execute(
+                    "UPDATE jobs SET state = 'pending', attempts = 0 WHERE video_id = ?1 AND stage = 'embed'",
+                    [video_id],
+                )?;
+                on_event(Event::JobDone { video_id, stage: STAGE.into() });
+                done += 1;
             }
         }
-        let ok: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM frames WHERE video_id = ?1 AND description_json NOT LIKE '{\"error\"%'",
-            [video_id],
-            |r| r.get(0),
-        )?;
-        if ok == 0 {
-            set_job(db, video_id, STAGE, "failed", Some("no frame could be described"))?;
-            on_event(Event::JobFailed { video_id, stage: STAGE.into(), error: "no frame could be described".into() });
-            failed += 1;
-        } else {
-            set_job(db, video_id, STAGE, "done", None)?;
-            db.conn.execute(
-                "UPDATE jobs SET state = 'pending', attempts = 0 WHERE video_id = ?1 AND stage = 'embed'",
+    } else {
+        // Server / Local: sequential single-describer path.
+        'videos: for (video_id, path, frames) in work {
+            if frames.is_empty() {
+                continue;
+            }
+            set_job(db, video_id, STAGE, "running", None)?;
+            on_event(Event::JobStarted { video_id, stage: STAGE.into(), path: path.clone() });
+            for (frame_id, t_s, image) in frames {
+                if opts.cancelled() {
+                    set_job(db, video_id, STAGE, "pending", None)?;
+                    break 'videos;
+                }
+                let speech = speech_near(db, video_id, t_s)?;
+                let speech = (!speech.is_empty()).then_some(speech.as_str());
+                // One retry for a bad/unparseable answer; transport errors stop the stage.
+                let mut result = describer.describe(&image, speech).await;
+                if matches!(&result, Err(e) if !is_transport_error(e)) {
+                    result = describer.describe(&image, speech).await;
+                }
+                match result {
+                    Ok(d) => {
+                        let json = serde_json::to_string(&d).unwrap_or_default();
+                        db.conn.execute(
+                            "UPDATE frames SET description_json = ?1, visible_text = ?2 WHERE id = ?3",
+                            params![json, d.visible_text.join("\n"), frame_id],
+                        )?;
+                    }
+                    Err(e) if is_transport_error(&e) => {
+                        // Server gone / helper crashed: leave the rest pending for a later run.
+                        set_job(db, video_id, STAGE, "pending", Some(&e.to_string()))?;
+                        on_event(Event::StageUnavailable { stage: STAGE.into(), reason: e.to_string() });
+                        break 'videos;
+                    }
+                    Err(e) => {
+                        // This frame can't be described; record why and move on.
+                        let json = serde_json::json!({ "error": e.to_string() }).to_string();
+                        db.conn.execute(
+                            "UPDATE frames SET description_json = ?1 WHERE id = ?2",
+                            params![json, frame_id],
+                        )?;
+                    }
+                }
+                tracker.advance(phase, 1);
+                if tracker.should_emit() {
+                    on_event(Event::Progress(tracker.snapshot(Some(path.clone()))));
+                }
+            }
+            let ok: i64 = db.conn.query_row(
+                "SELECT COUNT(*) FROM frames WHERE video_id = ?1 AND description_json NOT LIKE '{\"error\"%'",
                 [video_id],
+                |r| r.get(0),
             )?;
-            on_event(Event::JobDone { video_id, stage: STAGE.into() });
-            done += 1;
+            if ok == 0 {
+                set_job(db, video_id, STAGE, "failed", Some("no frame could be described"))?;
+                on_event(Event::JobFailed {
+                    video_id,
+                    stage: STAGE.into(),
+                    error: "no frame could be described".into(),
+                });
+                failed += 1;
+            } else {
+                set_job(db, video_id, STAGE, "done", None)?;
+                db.conn.execute(
+                    "UPDATE jobs SET state = 'pending', attempts = 0 WHERE video_id = ?1 AND stage = 'embed'",
+                    [video_id],
+                )?;
+                on_event(Event::JobDone { video_id, stage: STAGE.into() });
+                done += 1;
+            }
         }
     }
     Ok((done, failed))

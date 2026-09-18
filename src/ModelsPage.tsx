@@ -22,6 +22,7 @@ import {
   type Resolution,
   type VisionSettings,
   type VisionSettingsPatch,
+  testCliAgent,
 } from "./api";
 import { useQueue } from "./useQueue";
 
@@ -53,7 +54,92 @@ function probeLabel(r: Resolution): { text: string; cls: string } {
 interface SegmentedProps {
   value: Backend;
   onChange: (v: Backend) => void;
+  /** Frame descriptions and the script chat can also run a coding-agent CLI. */
+  withCli?: boolean;
 }
+/** Which coding-agent CLI answers for this capability, and a button to try it once. */
+function CliAgentFields({
+  cfg,
+  capability,
+  onPatch,
+}: {
+  cfg: VisionSettings;
+  capability: "vision" | "chat_model";
+  onPatch: (p: VisionSettingsPatch) => void;
+}) {
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const perFrame = capability === "vision";
+  return (
+    <>
+      <div className="settings-fields">
+        <div className="settings-field">
+          <label>Tool</label>
+          <select value={cfg.cli.tool} onChange={(e) => onPatch({ cli: { tool: e.currentTarget.value } })}>
+            <option value="claude">claude</option>
+            <option value="agy">agy</option>
+            <option value="opencode">opencode</option>
+          </select>
+          <span className={cfg.cli.installed ? "good-text small" : "bad-text small"}>
+            {cfg.cli.installed ? "found on this computer" : "not found — install it or set a full path"}
+          </span>
+        </div>
+        <div className="settings-field">
+          <label>Model</label>
+          <input
+            type="text"
+            defaultValue={cfg.cli.model}
+            placeholder="— the tool's default —"
+            onChange={(e) => onPatch({ cli: { model: e.currentTarget.value } })}
+          />
+        </div>
+        {perFrame && (
+          <div className="settings-field">
+            <label>At a time</label>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              style={{ width: "4em" }}
+              defaultValue={cfg.cli.concurrency}
+              onChange={(e) => {
+                const v = Number(e.currentTarget.value);
+                if (v >= 1 && v <= 8) onPatch({ cli: { concurrency: v } });
+              }}
+            />
+            <span className="muted small">parallel calls while indexing</span>
+          </div>
+        )}
+      </div>
+      <p className="muted small">
+        {perFrame
+          ? "One call per keyframe. claude bills per call (about $0.04 a frame here, so a 1500 frame library runs into tens of dollars); agy and opencode spend their own quota instead."
+          : "A handful of calls per script — far cheaper than describing every frame. claude bills per call; agy and opencode spend their own quota."}
+      </p>
+      <div className="row">
+        <button
+          className="ghost small"
+          disabled={testing}
+          onClick={async () => {
+            setTesting(true);
+            setResult(null);
+            try {
+              setResult(await testCliAgent(capability));
+            } catch (e) {
+              setResult(String(e));
+            } finally {
+              setTesting(false);
+            }
+          }}
+        >
+          {testing ? "Testing…" : "Test one call"}
+        </button>
+      </div>
+      {result && <pre className="cli-test-result">{result}</pre>}
+    </>
+  );
+}
+
 /** Context window, KV cache and flash attention of one local helper. */
 function LocalRuntimeFields({
   cfg,
@@ -100,11 +186,12 @@ function LocalRuntimeFields({
   );
 }
 
-function BackendSegmented({ value, onChange }: SegmentedProps) {
+function BackendSegmented({ value, onChange, withCli = false }: SegmentedProps) {
   const opts: { label: string; v: Backend }[] = [
     { label: "Auto", v: "auto" },
     { label: "This computer", v: "local" },
     { label: "Server", v: "server" },
+    ...(withCli ? [{ label: "CLI agent", v: "cli" as Backend }] : []),
   ];
   return (
     <div className="segmented-control">
@@ -541,6 +628,7 @@ export default function ModelsPage() {
           <div>
             <BackendSegmented
               value={visionBackend}
+              withCli
               onChange={(b) => applyPatch({ vision: { backend: b } })}
             />
           </div>
@@ -619,7 +707,11 @@ export default function ModelsPage() {
             </div>
           )}
 
-          {visionBackend !== "server" && (
+          {visionBackend === "cli" && (
+            <CliAgentFields cfg={ai.vision} capability="vision" onPatch={(v) => applyPatch({ vision: v })} />
+          )}
+
+          {(visionBackend === "auto" || visionBackend === "local") && (
             <LocalRuntimeFields cfg={ai.vision} onPatch={(v) => applyPatch({ vision: v })} />
           )}
 
@@ -707,6 +799,7 @@ export default function ModelsPage() {
           <div>
             <BackendSegmented
               value={ai.chat_model.backend}
+              withCli
               onChange={(b) => applyPatch({ chat_model: { backend: b } })}
             />
           </div>
@@ -736,7 +829,15 @@ export default function ModelsPage() {
             </div>
           )}
 
-          {ai.chat_model.backend !== "server" && (
+          {ai.chat_model.backend === "cli" && (
+            <CliAgentFields
+              cfg={ai.chat_model}
+              capability="chat_model"
+              onPatch={(v) => applyPatch({ chat_model: v })}
+            />
+          )}
+
+          {(ai.chat_model.backend === "auto" || ai.chat_model.backend === "local") && (
             <>
               <div className="settings-fields">
                 <div className="settings-field">

@@ -61,10 +61,21 @@ pub struct Report {
     pub embeddings: Resolution,
     pub stt: Resolution,
     pub models: Vec<ModelFile>,
+    /// Installed coding-agent CLI tools (name → path) and which capability uses one.
+    pub cli_tools: CliToolsInfo,
+}
+
+/// CLI tool availability and configuration.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CliToolsInfo {
+    /// Detected installations: (tool_name, path).
+    pub installed: Vec<(String, PathBuf)>,
+    /// Human-readable note about which capability is configured to use CLI (if any).
+    pub active_for: Vec<String>,
 }
 
 impl Report {
-    /// Problems that block indexing (empty = ready).
+    /// Problems that block indexing (empty = ready).\
     pub fn blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(e) = &self.config_error {
@@ -98,19 +109,19 @@ pub async fn run(paths: &Paths) -> Report {
 
     let vision_probe = async {
         match config.vision.backend {
-            Backend::Local => None,
+            Backend::Local | Backend::Cli => None,
             _ => Some(probe::vision(&client, &config.vision.url, &config.vision.model).await),
         }
     };
     let embed_probe = async {
         match config.embed.backend {
-            Backend::Local => None,
+            Backend::Local | Backend::Cli => None,
             _ => Some(probe::embeddings(&client, &config.embed.url, &config.embed.model).await),
         }
     };
     let stt_probe = async {
         match config.stt.backend {
-            Backend::Local => None,
+            Backend::Local | Backend::Cli => None,
             _ => Some(probe::stt(&client, &config.stt.url).await),
         }
     };
@@ -142,6 +153,27 @@ pub async fn run(paths: &Paths) -> Report {
         })
         .collect();
 
+    // Detect installed CLI tools and which capability uses one.
+    let cli_tools = {
+        use crate::cliagent::find_binary;
+        use crate::config::CLI_TOOLS;
+        let mut installed = Vec::new();
+        for &tool_name in CLI_TOOLS {
+            let probe_cfg = crate::config::CliAgentConfig { tool: tool_name.to_string(), ..Default::default() };
+            if let Some(path) = find_binary(&probe_cfg) {
+                installed.push((tool_name.to_string(), path));
+            }
+        }
+        let mut active_for = Vec::new();
+        if config.vision.backend == Backend::Cli {
+            active_for.push(format!("frame descriptions ({})", config.vision.cli.tool));
+        }
+        if config.chat_model().backend == Backend::Cli {
+            active_for.push(format!("script chat ({})", config.chat_model().cli.tool));
+        }
+        CliToolsInfo { installed, active_for }
+    };
+
     Report {
         version: env!("CARGO_PKG_VERSION"),
         config_file: paths.config_file.clone(),
@@ -162,6 +194,7 @@ pub async fn run(paths: &Paths) -> Report {
         embeddings: probe::resolve(config.embed.backend, ep),
         stt: probe::resolve(config.stt.backend, sp),
         models,
+        cli_tools,
     }
 }
 

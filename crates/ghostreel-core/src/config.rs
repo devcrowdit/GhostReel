@@ -30,6 +30,9 @@ pub enum Backend {
     Local,
     /// Always use the server; fail if it is unavailable.
     Server,
+    /// Delegate to an installed coding-agent CLI (claude, agy, opencode). Never chosen by `auto`
+    /// because it costs money / quota; the user must set this explicitly.
+    Cli,
 }
 
 impl std::fmt::Display for Backend {
@@ -38,7 +41,57 @@ impl std::fmt::Display for Backend {
             Backend::Auto => "auto",
             Backend::Local => "local",
             Backend::Server => "server",
+            Backend::Cli => "cli",
         })
+    }
+}
+
+/// Valid coding-agent CLI tools.
+pub const CLI_TOOLS: &[&str] = &["claude", "agy", "opencode"];
+
+/// Configuration for a coding-agent CLI backend.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CliAgentConfig {
+    /// Which tool to use: `claude`, `agy`, or `opencode`.
+    pub tool: String,
+    /// Explicit path to the binary. Empty = resolved from PATH (or `GHOSTREEL_<TOOL>` env var).
+    pub command: String,
+    /// Model to pass via `--model`; empty = CLI default.
+    pub model: String,
+    /// Extra flags appended verbatim to every invocation.
+    pub extra_args: Vec<String>,
+    /// Hard timeout for one describe/complete call, in seconds (default 180).
+    pub timeout_secs: u64,
+    /// Maximum concurrent CLI invocations during the describe stage (default 2).
+    pub concurrency: usize,
+}
+
+impl Default for CliAgentConfig {
+    fn default() -> Self {
+        Self {
+            tool: String::new(),
+            command: String::new(),
+            model: String::new(),
+            extra_args: Vec::new(),
+            timeout_secs: 180,
+            concurrency: 2,
+        }
+    }
+}
+
+impl CliAgentConfig {
+    pub fn validate(&self, section: &str) -> Result<(), String> {
+        if !self.tool.is_empty() && !CLI_TOOLS.contains(&self.tool.as_str()) {
+            return Err(format!("{section}.cli.tool must be one of {}, got '{}'", CLI_TOOLS.join(", "), self.tool));
+        }
+        if self.timeout_secs == 0 {
+            return Err(format!("{section}.cli.timeout_secs must be > 0"));
+        }
+        if self.concurrency == 0 {
+            return Err(format!("{section}.cli.concurrency must be > 0"));
+        }
+        Ok(())
     }
 }
 
@@ -64,6 +117,8 @@ pub struct VisionConfig {
     pub kv_cache: String,
     /// Flash attention for the local helper: `auto`, `on` or `off`.
     pub flash_attn: String,
+    /// CLI agent settings (used when `backend = "cli"`).
+    pub cli: CliAgentConfig,
 }
 
 /// Context window of the frame-description helper: a short prompt plus one image.
@@ -84,6 +139,7 @@ impl Default for VisionConfig {
             ctx_tokens: DESCRIBE_CTX_TOKENS,
             kv_cache: "q4_0".into(),
             flash_attn: "auto".into(),
+            cli: CliAgentConfig::default(),
         }
     }
 }
@@ -107,6 +163,7 @@ impl VisionConfig {
                 self.flash_attn
             ));
         }
+        self.cli.validate(section)?;
         Ok(())
     }
 }
@@ -394,5 +451,58 @@ mod tests {
         fc.max_interval_s = 15.0;
         assert_eq!(fc.clamped_interval(), 15.0);
         assert!(fc.validate().is_ok());
+    }
+
+    #[test]
+    fn cli_agent_config_defaults_and_validation() {
+        let default = CliAgentConfig::default();
+        assert_eq!(default.timeout_secs, 180);
+        assert_eq!(default.concurrency, 2);
+        assert!(default.tool.is_empty());
+        // Empty tool is valid (not required when backend != cli in the config file).
+        assert!(default.validate("vision").is_ok());
+
+        // Valid tools pass.
+        for tool in CLI_TOOLS {
+            let cfg = CliAgentConfig { tool: tool.to_string(), ..CliAgentConfig::default() };
+            assert!(cfg.validate("vision").is_ok(), "{tool} should be valid");
+        }
+
+        // Unknown tool fails.
+        let bad_tool = CliAgentConfig { tool: "gpt4all".into(), ..CliAgentConfig::default() };
+        assert!(bad_tool.validate("vision").is_err());
+
+        // Zero timeout fails.
+        let bad_timeout = CliAgentConfig { timeout_secs: 0, ..CliAgentConfig::default() };
+        assert!(bad_timeout.validate("vision").is_err());
+
+        // Zero concurrency fails.
+        let bad_conc = CliAgentConfig { concurrency: 0, ..CliAgentConfig::default() };
+        assert!(bad_conc.validate("vision").is_err());
+    }
+
+    #[test]
+    fn cli_backend_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Write a config with backend = "cli" and cli settings.
+        std::fs::write(
+            &path,
+            "[vision]\nbackend = \"cli\"\n[vision.cli]\ntool = \"claude\"\nmodel = \"claude-opus-4-5\"\ntimeout_secs = 300\nconcurrency = 3\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.vision.backend, Backend::Cli);
+        assert_eq!(cfg.vision.cli.tool, "claude");
+        assert_eq!(cfg.vision.cli.model, "claude-opus-4-5");
+        assert_eq!(cfg.vision.cli.timeout_secs, 300);
+        assert_eq!(cfg.vision.cli.concurrency, 3);
+
+        // Full roundtrip through save/load.
+        cfg.save(&path).unwrap();
+        let back = Config::load(&path).unwrap();
+        assert_eq!(back, cfg);
+        assert!(back.validate().is_ok());
     }
 }

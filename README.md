@@ -106,6 +106,32 @@ key are configurable).
 
 ---
 
+## Using a coding-agent CLI instead of a model
+
+No GPU headroom for a vision model? Point a capability at a coding-agent CLI you already have —
+**claude**, **agy** or **opencode** — on the Models page (backend **CLI agent**) or from the terminal:
+
+```bash
+ghostreel config set vision.backend cli        # frame descriptions through a CLI
+ghostreel config set vision.cli.tool claude
+ghostreel config set chat_model.backend local  # …while the script chat stays local
+ghostreel config test-cli vision               # one call, prints what it answered
+```
+
+The two capabilities are independent: claude for the descriptions and a local model for the script, or
+the other way round, or a server for one and a CLI for the other.
+
+| | calls | what it costs |
+|---|---|---|
+| Frame descriptions | one per keyframe | claude bills per call (~$0.04 a frame, so ~$60 for a 1500-frame library); agy and opencode spend their own quota |
+| Script chat | a handful per script | cents with claude |
+
+**Auto never picks a CLI** — it spends money or quota, so it has to be chosen explicitly. `ghostreel doctor`
+lists which CLIs it can find, and the Models page has a **Test one call** button that describes a generated
+image so you can check the setup (and the latency) before indexing.
+
+---
+
 ## Usage
 
 1. **New project** → name, frame rate and resolution (used for timeline exports).

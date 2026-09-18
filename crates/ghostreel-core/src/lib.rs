@@ -5,6 +5,7 @@
 
 pub mod chat;
 pub mod chunks;
+pub mod cliagent;
 pub mod config;
 pub mod db;
 pub mod doctor;

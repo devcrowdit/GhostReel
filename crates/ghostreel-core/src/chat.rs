@@ -81,6 +81,8 @@ pub enum ChatBackend {
         /// The helper's context window: tool results are trimmed to a fraction of it.
         ctx_tokens: u32,
     },
+    /// Coding-agent CLI (claude / agy / opencode) drives the existing local action loop.
+    Cli(crate::cliagent::CliAgent),
 }
 
 impl ChatBackend {
@@ -95,6 +97,7 @@ impl ChatBackend {
             crate::runtime::VisionSetup::Server(s) => {
                 Ok(ChatBackend::Server { url: s.url.clone(), model: s.model.clone(), api_key: s.api_key.clone() })
             }
+            crate::runtime::VisionSetup::Cli(cfg) => Ok(ChatBackend::Cli(crate::cliagent::CliAgent::new(cfg.clone()))),
             crate::runtime::VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime } => {
                 let mut paths = Vec::with_capacity(2);
                 for spec in [model, mmproj] {
@@ -1510,10 +1513,12 @@ pub async fn run_turn(
     }
 
     let mut sys_prompt = build_system_prompt(&project, latest_script_json.as_deref(), ctx.system_prompt.as_deref());
-    let reference_chars = match ctx.backend {
+    let reference_chars = match &ctx.backend {
         ChatBackend::Server { .. } => 6000,
         // Roughly an eighth of the window (~4 chars per token), so results leave room for the draft.
-        ChatBackend::Local { ctx_tokens, .. } => ((ctx_tokens as usize) * 4 / 8).clamp(1500, 12000),
+        ChatBackend::Local { ctx_tokens, .. } => ((*ctx_tokens as usize) * 4 / 8).clamp(1500, 12000),
+        // CLI: treat like a large-context backend; tool results are limited by LOCAL_TOOL_RESULT_CHARS anyway.
+        ChatBackend::Cli(_) => 6000,
     };
     sys_prompt.push_str(&reference_edits_text(&ctx.db, project_id, reference_chars));
     // A length the user states ("60 second promo", "2 minutos") wins over whatever the model sets.
@@ -1829,6 +1834,117 @@ pub async fn run_turn(
                 on_event(ChatEvent::Drafting);
                 transcript.push_str("<|im_start|>user\nProduce the final script action.<|im_end|>\n");
                 let final_str = helper.complete(&transcript, Some(local_final_action_schema())).await?;
+                if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
+                    script.fill_from_project(&project);
+                    parsed_script = Some(script);
+                }
+            }
+
+            on_event(ChatEvent::Validating);
+            if let Some(s) = &mut parsed_script {
+                if requested_s.is_some() {
+                    s.target_duration_s = requested_s;
+                }
+                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
+            }
+        }
+        ChatBackend::Cli(agent) => {
+            // Drive the same local action schema loop as the Local backend.
+            // The agent CLI receives the whole transcript as a single prompt each turn.
+            let mut transcript = format!("<|im_start|>system\n{sys_prompt}<|im_end|>\n");
+            for pm in &prior_messages {
+                if pm.role == "user" || pm.role == "assistant" {
+                    transcript.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", pm.role, pm.content));
+                }
+            }
+            transcript.push_str(&format!("<|im_start|>user\n{message}<|im_end|>\n"));
+
+            let schema_json = serde_json::to_string(&local_action_schema()).unwrap_or_default();
+            let final_schema_json = serde_json::to_string(&local_final_action_schema()).unwrap_or_default();
+
+            let mut tool_rounds = 0;
+            let mut empty_searches = 0usize;
+            let mut hinted = false;
+            while tool_rounds < 8 {
+                tool_rounds += 1;
+                let cli_prompt = format!(
+                    "{transcript}<|im_start|>assistant\n\
+                     Reply ONLY with a JSON object matching this schema:\n{schema_json}\n<|im_end|>\n"
+                );
+                let out_str = agent.complete(&cli_prompt).await?;
+                let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
+                match action {
+                    Ok(LocalAction::Tool { tool, args }) => {
+                        on_event(ChatEvent::ToolStarted { tool: tool.clone(), args: args.clone() });
+                        let vector = if tool == "search_moments" {
+                            if let (Some(e), Some(q)) =
+                                (ctx.embedder.as_mut(), args.get("query").and_then(|v| v.as_str()))
+                            {
+                                query_vector(e, q).await.ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        let (res, summary) = dispatch_tool(
+                            &ctx.db,
+                            &ctx.data_dir,
+                            project_id,
+                            &tool,
+                            &args,
+                            &mut grounding,
+                            vector.as_deref(),
+                        );
+                        on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
+                        let empty = is_empty_search(&tool, &summary);
+                        tool_records.push(ToolCallRecord { tool: tool.clone(), args: args.clone(), summary });
+
+                        if empty {
+                            empty_searches += 1;
+                        } else if !tool.starts_with("search") {
+                            empty_searches = 0;
+                        }
+                        let hint = if empty_searches >= EMPTY_SEARCHES_BEFORE_HINT && !hinted {
+                            hinted = true;
+                            format!("\n{EMPTY_SEARCH_HINT}")
+                        } else {
+                            String::new()
+                        };
+                        transcript.push_str(&format!(
+                            "<|im_start|>assistant\n{out_str}\n<|im_end|>\n<|im_start|>user\nTool result for {tool}:\n{res}{hint}\n<|im_end|>\n"
+                        ));
+                    }
+                    Ok(LocalAction::Final { script }) => {
+                        let mut s = script;
+                        s.fill_from_project(&project);
+                        parsed_script = Some(s);
+                        break;
+                    }
+                    Err(_) => {
+                        // A CLI may wrap the JSON in prose: pull the object out and retry once.
+                        if let Some(start) = out_str.find('{')
+                            && let Ok(LocalAction::Final { mut script }) =
+                                serde_json::from_str::<LocalAction>(&out_str[start..])
+                        {
+                            script.fill_from_project(&project);
+                            parsed_script = Some(script);
+                            break;
+                        }
+                        // Give up this round and ask for the final script.
+                        break;
+                    }
+                }
+            }
+
+            if parsed_script.is_none() {
+                on_event(ChatEvent::Drafting);
+                let cli_final_prompt = format!(
+                    "{transcript}<|im_start|>assistant\n\
+                     Produce the final script. Reply ONLY with a JSON object matching this schema:\n{final_schema_json}\n<|im_end|>\n"
+                );
+                let final_str = agent.complete(&cli_final_prompt).await?;
                 if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
                     script.fill_from_project(&project);
                     parsed_script = Some(script);

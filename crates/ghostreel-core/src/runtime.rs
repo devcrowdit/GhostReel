@@ -46,12 +46,14 @@ pub enum VisionSetup {
     Local {
         helper: PathBuf,
         models_dir: PathBuf,
-        model: ModelSpec,
-        mmproj: ModelSpec,
+        model: crate::models::ModelSpec,
+        mmproj: crate::models::ModelSpec,
         found: Vec<PathBuf>,
         /// Context window / KV cache / flash attention for this capability.
         runtime: crate::vision::HelperRuntime,
     },
+    /// Coding-agent CLI (claude / agy / opencode).
+    Cli(crate::config::CliAgentConfig),
     Unavailable(String),
 }
 
@@ -66,6 +68,13 @@ impl VisionSetup {
                     "local {} ({} ctx, kv {}, flash {})",
                     model.file_name, runtime.ctx_tokens, runtime.kv_cache, runtime.flash_attn
                 )
+            }
+            VisionSetup::Cli(cfg) => {
+                if cfg.model.is_empty() {
+                    format!("CLI {}", cfg.tool)
+                } else {
+                    format!("CLI {} ({})", cfg.tool, cfg.model)
+                }
             }
             VisionSetup::Unavailable(why) => format!("unavailable: {why}"),
         }
@@ -212,8 +221,21 @@ pub async fn resolve_chat(paths: &Paths, config: &Config) -> VisionSetup {
 }
 
 async fn resolve_llm(paths: &Paths, config: &Config, cfg: &crate::config::VisionConfig) -> VisionSetup {
+    // CLI backend: resolve binary; `auto` never picks this.
+    if cfg.backend == Backend::Cli {
+        let agent_cfg = cfg.cli.clone();
+        let tool = &agent_cfg.tool;
+        if tool.is_empty() {
+            return VisionSetup::Unavailable("vision.cli.tool is not set (set to claude, agy, or opencode)".into());
+        }
+        return match crate::cliagent::find_binary(&agent_cfg) {
+            Some(_) => VisionSetup::Cli(agent_cfg),
+            None => VisionSetup::Unavailable(format!("CLI tool '{tool}' not found on PATH")),
+        };
+    }
+
     let probe = match cfg.backend {
-        Backend::Local => None,
+        Backend::Local | Backend::Cli => None,
         _ => Some(probe::vision(&probe::probe_client(), &cfg.url, &cfg.model).await),
     };
     let model_id = probe.as_ref().and_then(|p| p.model.clone()).unwrap_or_default();

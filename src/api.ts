@@ -4,7 +4,7 @@ export const fileUrl = (path: string) => convertFileSrc(path);
 
 // Mirrors ghostreel-core's doctor::Report (serde field names).
 export type Target = "server" | "local" | "unavailable";
-export type Backend = "auto" | "local" | "server";
+export type Backend = "auto" | "local" | "server" | "cli";
 
 export interface Probe {
   url: string;
@@ -522,6 +522,18 @@ export interface VisionSettings {
   kv_cache: string;
   /** auto | on | off */
   flash_attn: string;
+  cli: CliSettings;
+}
+
+/** A coding-agent CLI used instead of a model. */
+export interface CliSettings {
+  tool: string;
+  command: string;
+  model: string;
+  timeout_secs: number;
+  concurrency: number;
+  /** Whether the binary was found on this machine. */
+  installed: boolean;
 }
 
 export interface SttSettings {
@@ -567,6 +579,13 @@ export interface VisionSettingsPatch {
   ctx_tokens?: number;
   kv_cache?: string;
   flash_attn?: string;
+  cli?: {
+    tool?: string;
+    command?: string;
+    model?: string;
+    timeout_secs?: number;
+    concurrency?: number;
+  };
 }
 
 export interface SttSettingsPatch {
@@ -594,6 +613,8 @@ export interface AiSettingsPatch {
 }
 
 export const getAiSettings = () => invoke<AiSettings>("get_ai_settings");
+/** Run one describe call through the configured CLI agent. `capability`: "vision" | "chat_model". */
+export const testCliAgent = (capability: string) => invoke<string>("test_cli_agent", { capability });
 export const setAiSettings = (patch: AiSettingsPatch) => invoke<AiSettings>("set_ai_settings", { patch });
 export const probeBackends = () => invoke<BackendsResolution>("probe_backends");
 export const serverModels = (url: string) => invoke<string[]>("server_models", { url });
