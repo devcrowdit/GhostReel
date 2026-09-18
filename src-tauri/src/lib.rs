@@ -500,6 +500,12 @@ fn apply_llm_patch(
 ) -> CmdResult<()> {
     if let Some(b) = v.backend {
         cfg.backend = parse_backend(&b)?;
+        // The tool defaults to empty, but the picker has no empty entry and so renders its
+        // first option: without this the UI would claim `claude` is selected while the
+        // config says nothing is, and the run would fail with "unknown CLI tool ''".
+        if cfg.backend == Backend::Cli && cfg.cli.tool.is_empty() {
+            cfg.cli.tool = ghostreel_core::config::CLI_TOOLS[0].to_string();
+        }
     }
     if let Some(url) = v.url {
         cfg.url = url;
@@ -578,13 +584,23 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
         }
     }
 
+    /// Vision and the script chat can also delegate to a coding-agent CLI; speech and
+    /// embeddings cannot, so they keep `parse_backend` above.
+    fn parse_backend_cli_ok(s: &str) -> CmdResult<Backend> {
+        match s.to_lowercase().as_str() {
+            "cli" => Ok(Backend::Cli),
+            other => parse_backend(other)
+                .map_err(|_| format!("invalid backend '{other}'; expected 'auto', 'local', 'server', or 'cli'")),
+        }
+    }
+
     if let Some(v) = patch.vision {
-        apply_llm_patch(&mut config.vision, v, "vision", parse_backend)?;
+        apply_llm_patch(&mut config.vision, v, "vision", parse_backend_cli_ok)?;
     }
 
     if let Some(v) = patch.chat_model {
         let mut cfg = config.chat_model();
-        apply_llm_patch(&mut cfg, v, "chat_model", parse_backend)?;
+        apply_llm_patch(&mut cfg, v, "chat_model", parse_backend_cli_ok)?;
         config.chat_model = Some(cfg);
     }
 
