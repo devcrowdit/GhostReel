@@ -219,9 +219,10 @@ pub struct ScriptConfig {
     pub local_tool_result_chars: usize,
     /// Characters of tool result a server or CLI brain is given.
     pub roomy_tool_result_chars: usize,
-    /// Above this frame-to-frame change in camera motion, a shot is called shaky and the editor is
-    /// told to prefer something else. Steady footage measured well under 0.2 here; handheld ran
-    /// several times that. 0 turns the check off.
+    /// Above this, a stretch is called shaky and the editor is told to cut around it. The number
+    /// is high-frequency camera movement as a percentage of the frame width per frame: a tripod, a
+    /// stabilised action camera and a static shot all measured 0.3–0.4 (that is the noise floor),
+    /// an uneven hand-driven pan 1.6, and genuinely shaky handheld 4. 0 turns the check off.
     pub max_shake_jerk: f64,
     /// Seconds measured at a time when checking how steady a video is.
     pub shake_window_s: f64,
@@ -251,7 +252,7 @@ impl Default for ScriptConfig {
             roomy_tool_rounds: 60,
             local_tool_result_chars: 1500,
             roomy_tool_result_chars: 8000,
-            max_shake_jerk: 0.35,
+            max_shake_jerk: 1.5,
             shake_window_s: 4.0,
             shake_stride_s: 4.0,
         }

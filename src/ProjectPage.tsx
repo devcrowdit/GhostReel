@@ -411,7 +411,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                       <span className="tag warn" title="Stretches where the camera shakes; open the video to see them">
                         shaky {Math.round(v.shaky_s)}s
                       </span>
-                    ) : v.frames ? (
+                    ) : v.steadiness_measured ? (
                       <span className="muted">steady</span>
                     ) : (
                       <span className="muted">–</span>

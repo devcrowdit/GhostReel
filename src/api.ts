@@ -132,6 +132,8 @@ export interface VideoRow {
   frames: number;
   /** Seconds the camera measured shaky; 0 = none, unmeasured, or the check is off. */
   shaky_s: number;
+  /** False until the camera has been measured; "steady" means nothing before that. */
+  steadiness_measured: boolean;
 }
 
 /** One measured stretch of a video: `jerk` is camera shake as % of frame width per frame. */

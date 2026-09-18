@@ -1481,6 +1481,8 @@ pub struct VideoRow {
     /// Seconds where the camera measured shakier than the configured limit (0 = none, or not
     /// measured, or the check is off).
     pub shaky_s: f64,
+    /// Whether the camera was measured at all: "steady" is only a verdict when it was.
+    pub steadiness_measured: bool,
 }
 
 /// Videos visible to a project (or all), one row per content with its first path.
@@ -1537,7 +1539,8 @@ pub fn videos_with_shake(db: &Db, project_id: Option<i64>, max_shake: f64) -> Re
                 (SELECT j.state FROM jobs j WHERE j.video_id = v.id AND j.stage = 'transcribe'),
                 (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id),
                 (SELECT COALESCE(SUM(m.end_s - m.start_s), 0) FROM motion_windows m
-                  WHERE m.video_id = v.id AND ?2 > 0 AND m.jerk > ?2)
+                  WHERE m.video_id = v.id AND ?2 > 0 AND m.jerk > ?2),
+                EXISTS (SELECT 1 FROM motion_windows m WHERE m.video_id = v.id)
            FROM ({SCOPE}) sc JOIN videos v ON v.id = sc.video_id
           ORDER BY sc.path"
     ))?;
@@ -1561,6 +1564,7 @@ pub fn videos_with_shake(db: &Db, project_id: Option<i64>, max_shake: f64) -> Re
             transcribe: r.get(15)?,
             frames: r.get(16)?,
             shaky_s: r.get(17)?,
+            steadiness_measured: r.get(18)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

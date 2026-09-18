@@ -31,7 +31,13 @@ async fn main() {
         frames.windows(2).map(|p| ghostreel_core::steadiness::motion_between(p[0], p[1])).collect();
     for (i, m) in motions.iter().enumerate() {
         match m {
-            Some(m) => println!("{i:3} dx={:+.2} dy={:+.2} rot={:+.4} scale={:.3}", m.dx, m.dy, m.rot, m.scale),
+            Some(m) => {
+                let (matched, inliers) = ghostreel_core::steadiness::patch_stats(frames[i], frames[i + 1]);
+                println!(
+                    "{i:3} dx={:+.2} dy={:+.2} rot={:+.4} scale={:.3}  patches matched={matched} inliers={inliers}",
+                    m.dx, m.dy, m.rot, m.scale
+                )
+            }
             None => println!("{i:3} unmeasured"),
         }
     }

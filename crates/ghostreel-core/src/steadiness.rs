@@ -30,8 +30,9 @@ use crate::Error;
 pub const ANALYSIS_W: usize = 160;
 /// Height of the analysed frame.
 pub const ANALYSIS_H: usize = 90;
-/// Frames per second sampled from the video.
-pub const ANALYSIS_FPS: u32 = 10;
+/// Frames per second sampled from the video. Handheld tremor is 3–8 Hz; at 10 fps it aliases into
+/// the same band as an uneven pan, and the two cannot be told apart.
+pub const ANALYSIS_FPS: u32 = 30;
 /// Side of one measurement patch, in analysis pixels.
 const PATCH: usize = 16;
 /// Largest shift searched for a patch between two frames, in analysis pixels.
@@ -43,8 +44,13 @@ const MIN_CONTRAST: f64 = 2.0;
 /// A patch whose motion differs from the frame's median by more than this is something moving
 /// in the shot, not the camera, and is left out of the fit.
 const CONSENSUS_PX: f64 = 2.0;
+/// A non-zero shift must beat standing still by this fraction of the match cost to count.
+const ZERO_PRIOR: f64 = 0.10;
 /// Fewest agreeing patches for a frame pair to count as measured.
 const MIN_INLIERS: usize = 4;
+/// Standard deviation, in seconds, of the smoothing that separates intended motion from shake.
+/// A quarter second: a pan, a walk or a push changes more slowly than that; tremor does not.
+const SMOOTH_SIGMA_S: f64 = 0.25;
 /// A frame-to-frame move larger than this share of the frame width is a cut, not a camera move:
 /// nothing handheld jumps a quarter of the frame in a tenth of a second. The path restarts there.
 const CUT_FRACTION: f64 = 0.25;
@@ -115,7 +121,39 @@ fn match_patch(a: &[u8], b: &[u8], x0: usize, y0: usize) -> Option<(f64, f64)> {
     if bdx.abs() == SEARCH_RADIUS || bdy.abs() == SEARCH_RADIUS {
         return None;
     }
-    Some((bdx as f64, bdy as f64))
+    // A still camera must read as still. Sensor noise makes a neighbouring shift match a
+    // fraction better now and then; unless a shift is clearly the better match, it is noise.
+    let at = |dx: i32, dy: i32| -> f64 {
+        let (sx, sy) = (x0 as i32 + dx, y0 as i32 + dy);
+        if sx < 0 || sy < 0 || sx as usize + PATCH > ANALYSIS_W || sy as usize + PATCH > ANALYSIS_H {
+            return f64::MAX;
+        }
+        let mut cost = 0u64;
+        for y in 0..PATCH {
+            let ar = (y0 + y) * ANALYSIS_W + x0;
+            let br = (sy as usize + y) * ANALYSIS_W + sx as usize;
+            for x in 0..PATCH {
+                cost += (a[ar + x] as i64).abs_diff(b[br + x] as i64);
+            }
+        }
+        cost as f64
+    };
+    let zero = at(0, 0);
+    if (bdx != 0 || bdy != 0) && best > zero * (1.0 - ZERO_PRIOR) {
+        return Some((0.0, 0.0));
+    }
+    // Sub-pixel: fit a parabola through the cost on either side of the minimum. Whole-pixel
+    // matching quantises to ±1 px, which at this size is most of the score of a steady shot.
+    let refine = |c_minus: f64, c_zero: f64, c_plus: f64| -> f64 {
+        let denom = c_minus - 2.0 * c_zero + c_plus;
+        if denom <= 0.0 || !c_minus.is_finite() || !c_plus.is_finite() {
+            return 0.0;
+        }
+        (0.5 * (c_minus - c_plus) / denom).clamp(-0.5, 0.5)
+    };
+    let fx = refine(at(bdx - 1, bdy), best, at(bdx + 1, bdy));
+    let fy = refine(at(bdx, bdy - 1), best, at(bdx, bdy + 1));
+    Some((bdx as f64 + fx, bdy as f64 + fy))
 }
 
 /// Least-squares similarity fit through a set of (from, to) point pairs, about the frame centre.
@@ -164,6 +202,41 @@ fn apply(m: &Motion, x: f64, y: f64) -> (f64, f64) {
     let (x, y) = (x - cx, y - cy);
     let (c, s) = (m.rot.cos() * m.scale, m.rot.sin() * m.scale);
     (c * x - s * y + m.dx + cx, s * x + c * y + m.dy + cy)
+}
+
+/// How many patches passed contrast selection and matched, and how many agreed with the
+/// consensus — for diagnosing a scene the estimator misreads.
+pub fn patch_stats(a: &[u8], b: &[u8]) -> (usize, usize) {
+    let mut pairs: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    let mut y0 = PATCH / 2;
+    while y0 + PATCH + PATCH / 2 <= ANALYSIS_H {
+        let mut x0 = PATCH / 2;
+        while x0 + PATCH + PATCH / 2 <= ANALYSIS_W {
+            if contrast(a, x0, y0) >= MIN_CONTRAST
+                && let Some((dx, dy)) = match_patch(a, b, x0, y0)
+            {
+                let (px, py) = ((x0 + PATCH / 2) as f64, (y0 + PATCH / 2) as f64);
+                pairs.push(((px, py), (px + dx, py + dy)));
+            }
+            x0 += PATCH;
+        }
+        y0 += PATCH;
+    }
+    let matched = pairs.len();
+    if matched < MIN_INLIERS {
+        return (matched, 0);
+    }
+    let median_of = |vals: &mut Vec<f64>| {
+        vals.sort_by(|a, b| a.total_cmp(b));
+        vals[vals.len() / 2]
+    };
+    let mdx = median_of(&mut pairs.iter().map(|(f, t)| t.0 - f.0).collect());
+    let mdy = median_of(&mut pairs.iter().map(|(f, t)| t.1 - f.1).collect());
+    let inliers = pairs
+        .iter()
+        .filter(|(f, t)| ((t.0 - f.0) - mdx).abs() <= CONSENSUS_PX && ((t.1 - f.1) - mdy).abs() <= CONSENSUS_PX)
+        .count();
+    (matched, inliers)
 }
 
 /// The camera's movement between two frames, or `None` when too little could be matched.
@@ -224,32 +297,68 @@ pub fn motion_between(a: &[u8], b: &[u8]) -> Option<Motion> {
     Some(fit)
 }
 
-/// Shake per frame from a run of frame-to-frame motions: the second difference of the camera
-/// path — how much its velocity changes — as a percentage of the frame width, with rotation
-/// counted by how far it moves the frame edge.
+/// Shake per frame from a run of frame-to-frame motions: the camera path minus its smoothed
+/// self, as a percentage of the frame width, with rotation counted by how far it moves the frame
+/// edge. The intended path is the smoothed one; what is left is what the hand added.
 ///
-/// Not a smoothed-path residual. That scores the *start* of a pan: the path turns a corner, the
-/// smoothing rounds it, and the gap between them reads as shake on a tripod. Velocity change is a
-/// single spike at that corner and zero along the pan, while under shake it fires every frame.
-/// The window statistic is the median, which ignores the spike and keeps the tremor.
+/// The window statistic is the median. Where a pan starts, the path turns a corner that the
+/// smoothing rounds off, and for a few frames the gap between them looks like shake. That is a
+/// transient; the median of a window ignores it. Tremor is there on every frame, and it does not.
 pub fn shake_per_frame(motions: &[Option<Motion>]) -> Vec<f64> {
+    if motions.is_empty() {
+        return Vec::new();
+    }
     let cut = CUT_FRACTION * ANALYSIS_W as f64;
     let half_w = ANALYSIS_W as f64 / 2.0;
-    // Velocity per frame; an unmeasured step or a cut contributes no movement.
-    let v: Vec<(f64, f64, f64)> = motions
-        .iter()
-        .map(|m| match m {
-            Some(m) if m.dx.abs() <= cut && m.dy.abs() <= cut => (m.dx, m.dy, m.rot * half_w),
-            _ => (0.0, 0.0, 0.0),
-        })
-        .collect();
-    let mut out = Vec::with_capacity(v.len());
-    for i in 0..v.len() {
-        let prev = if i == 0 { v[0] } else { v[i - 1] };
-        let (ax, ay, ar) = (v[i].0 - prev.0, v[i].1 - prev.1, v[i].2 - prev.2);
-        out.push((ax * ax + ay * ay + ar * ar).sqrt() / ANALYSIS_W as f64 * 100.0);
+    // Accumulate the path. An unmeasured step continues it unchanged; so does a cut, which then
+    // never reaches the smoothing as a jump.
+    let (mut x, mut y, mut r) = (0.0, 0.0, 0.0);
+    let mut path: Vec<(f64, f64, f64)> = Vec::with_capacity(motions.len());
+    for m in motions {
+        if let Some(m) = m
+            && m.dx.abs() <= cut
+            && m.dy.abs() <= cut
+        {
+            x += m.dx;
+            y += m.dy;
+            r += m.rot * half_w;
+        }
+        path.push((x, y, r));
     }
-    out
+    let sigma = SMOOTH_SIGMA_S * ANALYSIS_FPS as f64;
+    let radius = (sigma * 3.0).ceil() as i64;
+    let weights: Vec<f64> = (-radius..=radius).map(|k| (-(k as f64).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
+    let n = path.len() as i64;
+    // Past either end, continue the path by point reflection: a steady pan then smooths to
+    // itself exactly, where a truncated kernel would bend it inward and call the bend shake.
+    let at = |j: i64| -> (f64, f64, f64) {
+        let (x0, y0, r0) = path[0];
+        let (xn, yn, rn) = path[(n - 1) as usize];
+        if j < 0 {
+            let (x, y, r) = path[(-j).min(n - 1) as usize];
+            (2.0 * x0 - x, 2.0 * y0 - y, 2.0 * r0 - r)
+        } else if j >= n {
+            let (x, y, r) = path[(2 * (n - 1) - j).max(0) as usize];
+            (2.0 * xn - x, 2.0 * yn - y, 2.0 * rn - r)
+        } else {
+            path[j as usize]
+        }
+    };
+    path.iter()
+        .enumerate()
+        .map(|(i, (px, py, pr))| {
+            let (mut sx, mut sy, mut sr, mut sw) = (0.0, 0.0, 0.0, 0.0);
+            for (k, w) in (-radius..=radius).zip(&weights) {
+                let (qx, qy, qr) = at(i as i64 + k);
+                sx += w * qx;
+                sy += w * qy;
+                sr += w * qr;
+                sw += w;
+            }
+            let (ex, ey, er) = (px - sx / sw, py - sy / sw, pr - sr / sw);
+            (ex * ex + ey * ey + er * er).sqrt() / ANALYSIS_W as f64 * 100.0
+        })
+        .collect()
 }
 
 /// Middle value: what most frames in a window do, not what the worst one did.
@@ -260,13 +369,6 @@ fn median(values: &[f64]) -> f64 {
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.total_cmp(b));
     v[v.len() / 2]
-}
-
-fn rms(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    (values.iter().map(|v| v * v).sum::<f64>() / values.len() as f64).sqrt()
 }
 
 /// Decode the video as tiny greyscale frames and measure the camera's move between each pair.
@@ -337,10 +439,24 @@ pub async fn measure(
 
     let shake = shake_per_frame(&motions);
     let per_window = (window_s * ANALYSIS_FPS as f64).round().max(1.0) as usize;
-    let mut out = Vec::new();
-    for (i, chunk) in shake.chunks(per_window).enumerate() {
+    let mut out: Vec<Window> = Vec::new();
+    let chunks: Vec<&[f64]> = shake.chunks(per_window).collect();
+    for (i, chunk) in chunks.iter().enumerate() {
         let start_s = i as f64 * window_s;
-        out.push(Window { start_s, end_s: (start_s + window_s).min(duration_s), jerk: median(chunk) });
+        let end_s = (start_s + window_s).min(duration_s);
+        // A short tail is not a window: its few frames sit at the end of the path, where the
+        // smoothing is least informed, and a one-second verdict is not worth reporting. It joins
+        // the window before it instead.
+        if i > 0 && chunk.len() < per_window / 2 {
+            let last = out.last_mut().expect("a previous window");
+            let prev_n = chunks[i - 1].len();
+            let merged: Vec<f64> = chunks[i - 1].iter().chain(chunk.iter()).copied().collect();
+            last.end_s = end_s;
+            last.jerk = median(&merged);
+            debug_assert!(prev_n >= chunk.len());
+            continue;
+        }
+        out.push(Window { start_s, end_s, jerk: median(chunk) });
     }
     Ok(out)
 }
@@ -414,7 +530,7 @@ mod tests {
     #[test]
     fn a_locked_off_shot_scores_zero() {
         let still = render(&Motion { scale: 1.0, ..Default::default() });
-        let motions: Vec<Option<Motion>> = (0..20).map(|_| motion_between(&still, &still)).collect();
+        let motions: Vec<Option<Motion>> = (0..60).map(|_| motion_between(&still, &still)).collect();
         assert!(median(&shake_per_frame(&motions)) < 0.05);
     }
 
@@ -422,16 +538,17 @@ mod tests {
     /// and are not shake; the same amount of movement reversing every frame is.
     #[test]
     fn smooth_motion_is_not_shake_but_jitter_is() {
-        let frames_of = |f: &dyn Fn(usize) -> Motion| -> Vec<Vec<u8>> { (0..30).map(|i| render(&f(i))).collect() };
+        let frames_of = |f: &dyn Fn(usize) -> Motion| -> Vec<Vec<u8>> { (0..60).map(|i| render(&f(i))).collect() };
         let motions_of = |frames: &[Vec<u8>]| -> Vec<Option<Motion>> {
             frames.windows(2).map(|p| motion_between(&p[0], &p[1])).collect()
         };
 
         let pan = frames_of(&|i| Motion { dx: 1.5 * i as f64, dy: 0.0, rot: 0.0, scale: 1.0 });
         let push = frames_of(&|i| Motion { dx: 0.0, dy: 0.0, rot: 0.0, scale: 1.0 + 0.004 * i as f64 });
+        // Tremor at about 5 Hz, a couple of pixels either way — what a hand does.
         let jitter = frames_of(&|i| Motion {
-            dx: if i % 2 == 0 { 0.0 } else { 1.5 },
-            dy: if i % 3 == 0 { 1.0 } else { 0.0 },
+            dx: 2.0 * ((i as f64) * std::f64::consts::TAU / 6.0).sin(),
+            dy: 1.5 * ((i as f64) * std::f64::consts::TAU / 7.0).cos(),
             rot: 0.0,
             scale: 1.0,
         });
@@ -451,6 +568,18 @@ mod tests {
         assert_eq!(shaky_spans(&windows, 5.0, 10.0, 0.5), vec![(5.0, 8.0)]);
         assert!(shaky_spans(&windows, 8.0, 12.0, 0.5).is_empty());
         assert!(shaky_spans(&windows, 0.0, 20.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn a_short_tail_joins_the_window_before_it() {
+        // 4 s windows at 30 fps; the last chunk here is 30 frames — a one-second tail.
+        let still = render(&Motion { scale: 1.0, ..Default::default() });
+        let motions: Vec<Option<Motion>> = (0..(120 * 2 + 30)).map(|_| motion_between(&still, &still)).collect();
+        let shake = shake_per_frame(&motions);
+        let per_window = 120usize;
+        let chunks: Vec<&[f64]> = shake.chunks(per_window).collect();
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[2].len() < per_window / 2, "the tail is short by construction");
     }
 
     #[test]
