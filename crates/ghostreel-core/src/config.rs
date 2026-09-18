@@ -232,6 +232,11 @@ pub struct ScriptConfig {
     /// Sway — movement within a second that is undone — above which a stretch is shaky, as a
     /// percentage of the frame width per second. Mounted and stabilised footage measured 0–0.6,
     /// an unstabilised walking shot 1.3. 0 turns the sway check off.
+    ///
+    /// Calibrated against the editor's own eye on the Greet Mag footage (Sep 2026): stretches at
+    /// sway 1.35 and 2.01 were called shaky, one at 0.09 was called fine, and a stretch with
+    /// tremor 2.87 was shaky by both measures. vid.stab's motion paths, scored the same way,
+    /// agreed with GhostReel's to within ~0.1 across eleven clips. Change these with evidence.
     pub max_sway: f64,
     /// Seconds measured at a time when checking how steady a video is.
     pub shake_window_s: f64,
