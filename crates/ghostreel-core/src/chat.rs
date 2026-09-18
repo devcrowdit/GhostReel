@@ -257,6 +257,16 @@ fn enforce_grounding_and_pacing(
     }
     // Pad before trimming, so the target is met with the people's pauses already in.
     pad_speech(db, s);
+    // Padding can grow two clips of the same video into each other: check again.
+    let overlapped = drop_repeated_footage(s);
+    if overlapped > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("dropped {overlapped} clip(s) that overlapped another once padded"),
+        });
+    }
     let before = s.total_duration_s();
     let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
     if enforce_target && fit_speech_to_target(db, s) | trim_to_target_with(s, speaking) {
