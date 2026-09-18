@@ -109,7 +109,7 @@ vision, M5 chunk/embed/search, M6 UI, M7 packaging (NSIS, AppImage/deb/rpm/CLI t
 - [ ] Code signing (Windows)
 - [x] In-app updates: `tauri-plugin-updater` + `tauri-plugin-process`; Status page "Check for updates" flow with
       download progress bar and "Restart to finish"; CI signs artifacts with `TAURI_SIGNING_PRIVATE_KEY` and builds
-      `latest.json` in `publish-release`; endpoint: `devcrowdit/GhostReel/releases/latest/download/latest.json`
+      `latest.json` in `publish-release`; endpoint: `highercomve/GhostReel/releases/latest/download/latest.json`
 - [ ] In-app update flow not verified end-to-end (needs a real published release with signed artifacts)
 
 ## Open

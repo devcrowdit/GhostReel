@@ -242,7 +242,7 @@ Everything lives in one folder: **`~/.ghostreel/`** (`%USERPROFILE%\.ghostreel\`
 
 ## Updates
 
-GhostReel checks for new releases from [github.com/devcrowdit/GhostReel](https://github.com/devcrowdit/GhostReel/releases)
+GhostReel checks for new releases from [github.com/highercomve/GhostReel](https://github.com/highercomve/GhostReel/releases)
 on the **Status** page. Click **Check for updates** — if a newer version is available you will see
 the release notes and a **Download and install** button with a progress bar. Once the download
 finishes, **Restart to finish** applies the update immediately.
