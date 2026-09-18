@@ -79,6 +79,7 @@ function CliAgentFields({
             <option value="claude">claude</option>
             <option value="agy">agy</option>
             <option value="opencode">opencode</option>
+            <option value="codex">codex</option>
           </select>
           <span className={cfg.cli.installed ? "good-text small" : "bad-text small"}>
             {cfg.cli.installed ? "found on this computer" : "not found — install it or set a full path"}

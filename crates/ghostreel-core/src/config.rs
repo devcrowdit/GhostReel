@@ -47,13 +47,13 @@ impl std::fmt::Display for Backend {
 }
 
 /// Valid coding-agent CLI tools.
-pub const CLI_TOOLS: &[&str] = &["claude", "agy", "opencode"];
+pub const CLI_TOOLS: &[&str] = &["claude", "agy", "opencode", "codex"];
 
 /// Configuration for a coding-agent CLI backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CliAgentConfig {
-    /// Which tool to use: `claude`, `agy`, or `opencode`.
+    /// Which tool to use: `claude`, `agy`, `opencode`, or `codex`.
     pub tool: String,
     /// Explicit path to the binary. Empty = resolved from PATH (or `GHOSTREEL_<TOOL>` env var).
     pub command: String,

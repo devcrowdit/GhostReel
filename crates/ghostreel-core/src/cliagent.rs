@@ -1,4 +1,4 @@
-//! Delegate vision / chat to an installed coding-agent CLI (claude, agy, opencode).
+//! Delegate vision / chat to an installed coding-agent CLI (claude, agy, opencode, codex).
 //!
 //! Each tool has a different invocation shape:
 //! - **claude**: `claude -p "<prompt>" --output-format json --allowedTools Read [--model <m>]`
@@ -7,6 +7,9 @@
 //!   stdout is JSON; answer is `response` (a string).
 //! - **opencode**: `opencode run [-m <provider/model>] "<prompt>"`
 //!   plain stdout; ignore `[opencode-*]` plugin log lines; answer is the first `{...}` object.
+//! - **codex**: `codex exec --json --skip-git-repo-check -s read-only [-i <image>] [-m <m>] "<prompt>"`
+//!   stdout is JSONL events; the answer is the last `item.completed` of type `agent_message`.
+//!   It attaches images itself via `-i`, so the prompt does not ask it to read the file.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,9 +36,48 @@ pub fn find_binary(cfg: &CliAgentConfig) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // Fall back to PATH.
+    // Fall back to PATH, then to the usual per-user install dirs.
     let exe = if cfg!(windows) { format!("{tool}.exe") } else { tool.to_string() };
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&exe)).find(|p| p.is_file())
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(hit) = std::env::split_paths(&path).map(|d| d.join(&exe)).find(|p| p.is_file())
+    {
+        return Some(hit);
+    }
+    user_bin_dirs().into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
+}
+
+/// Where these CLIs actually install themselves. A desktop-launched app inherits the session's
+/// PATH (`/usr/local/bin:/usr/bin` on a stock Linux login), not the one a shell builds from the
+/// user's profile, so a tool installed in `~/.local/bin` is invisible unless we look here.
+fn user_bin_dirs() -> Vec<PathBuf> {
+    let Some(home) = home_dir() else { return Vec::new() };
+    let rel: &[&str] = if cfg!(windows) {
+        &["AppData/Local/Programs", "AppData/Roaming/npm", ".bun/bin", ".local/bin"]
+    } else {
+        &[
+            ".local/bin",
+            "bin",
+            ".bun/bin",
+            ".opencode/bin",
+            ".deno/bin",
+            ".cargo/bin",
+            ".volta/bin",
+            ".npm-global/bin",
+            ".local/share/pnpm",
+            ".yarn/bin",
+        ]
+    };
+    let mut dirs: Vec<PathBuf> = rel.iter().map(|r| home.join(r)).collect();
+    if !cfg!(windows) {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+    }
+    dirs
+}
+
+fn home_dir() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 pub struct CliAgent {
@@ -121,6 +163,17 @@ impl CliAgent {
                     format!("Read the image file {} and reply with ONLY compact JSON: {}", image.display(), prompt);
                 args.push(full_prompt.into());
             }
+            "codex" => {
+                args.extend(codex_exec_prefix(bin));
+                // codex attaches the image itself, so the prompt is only the schema.
+                args.push("-i".into());
+                args.push(image.as_os_str().to_owned());
+                if !self.cfg.model.is_empty() {
+                    args.push("-m".into());
+                    args.push(self.cfg.model.clone().into());
+                }
+                args.push(format!("Describe this image. Reply with ONLY compact JSON: {prompt}").into());
+            }
             other => {
                 // Unknown tool — return an empty argv; the caller will error.
                 tracing_warn(other);
@@ -170,6 +223,14 @@ impl CliAgent {
                 }
                 args.push(prompt.into());
             }
+            "codex" => {
+                args.extend(codex_exec_prefix(bin));
+                if !self.cfg.model.is_empty() {
+                    args.push("-m".into());
+                    args.push(self.cfg.model.clone().into());
+                }
+                args.push(prompt.into());
+            }
             other => {
                 tracing_warn(other);
             }
@@ -192,6 +253,9 @@ impl CliAgent {
         }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // codex treats a non-TTY stdin as extra prompt input and waits for EOF; none of these
+        // tools should read from us at all.
+        cmd.stdin(std::process::Stdio::null());
         // ETXTBSY: the binary was written moments ago (a fresh install, or a test fixture) and the
         // kernel still holds it open. One short retry is enough.
         let child = match cmd.spawn() {
@@ -246,6 +310,24 @@ impl CliAgent {
                     .collect();
                 Ok(filtered.join("\n"))
             }
+            "codex" => {
+                // stdout is JSONL events; the answer is the last agent_message item.
+                let mut answer: Option<String> = None;
+                for line in raw.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                    if v["type"] == "item.completed"
+                        && v["item"]["type"] == "agent_message"
+                        && let Some(t) = v["item"]["text"].as_str()
+                    {
+                        answer = Some(t.to_string());
+                    }
+                }
+                answer.ok_or_else(|| Error::Vision(format!("codex: no agent_message: {}", preview(raw))))
+            }
             other => Err(Error::Vision(format!("unknown CLI tool '{other}'"))),
         }
     }
@@ -282,6 +364,19 @@ impl CliAgent {
         let text = Self::extract_text(&self.cfg.tool, &raw)?;
         Self::extract_json_object(&text)
     }
+}
+
+/// `codex exec` in headless shape: JSONL events, no git-repo requirement (frames live in the data
+/// dir), read-only sandbox — it only has to look, never edit.
+fn codex_exec_prefix(bin: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        bin.as_os_str().to_owned(),
+        "exec".into(),
+        "--json".into(),
+        "--skip-git-repo-check".into(),
+        "-s".into(),
+        "read-only".into(),
+    ]
 }
 
 fn tracing_warn(tool: &str) {
@@ -451,6 +546,88 @@ mod tests {
         let agent = CliAgent::new(cfg("claude", &bin));
         let json = agent.describe(&img, "schema").await.unwrap();
         assert!(json.contains("a monitor"), "got: {json}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_codex_describe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("frame.jpg");
+        std::fs::write(&img, b"fake").unwrap();
+
+        // codex emits JSONL events; only the last agent_message counts.
+        let script = r#"printf '%s\n' \
+'{"type":"thread.started","thread_id":"t1"}' \
+'{"type":"turn.started"}' \
+'{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"description\":\"a canyon\",\"visible_text\":[],\"objects\":[],\"setting\":\"outdoors\",\"shot\":\"wide\",\"tags\":[]}"}}' \
+'{"type":"turn.completed","usage":{"output_tokens":9}}'"#;
+        let bin = write_fake_cli(tmp.path(), "codex", script);
+
+        let agent = CliAgent::new(cfg("codex", &bin));
+        let json = agent.describe(&img, "schema").await.unwrap();
+        assert!(json.contains("a canyon"), "got: {json}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_argv_is_headless_and_attaches_the_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("frame.jpg");
+        let bin = tmp.path().join("codex");
+
+        let agent = CliAgent::new(cfg("codex", &bin));
+        let argv: Vec<String> =
+            agent.build_argv_describe(&bin, &img, "schema").iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(argv.contains(&"exec".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--json".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--skip-git-repo-check".to_string()), "{argv:?}");
+        // The frame is attached with -i rather than described by path in the prompt.
+        let i = argv.iter().position(|a| a == "-i").expect("-i");
+        assert_eq!(argv[i + 1], img.to_string_lossy());
+    }
+
+    #[test]
+    fn codex_ignores_non_message_events_and_takes_the_last() {
+        let raw = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"thinking\"}}\n",
+            "not json at all\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"last\"}}\n",
+        );
+        assert_eq!(CliAgent::extract_text("codex", raw).unwrap(), "last");
+        assert!(CliAgent::extract_text("codex", "{\"type\":\"turn.started\"}").is_err());
+    }
+
+    #[test]
+    fn a_tool_outside_path_is_still_found_in_the_usual_install_dirs() {
+        // A desktop-launched app gets a bare PATH; the tool lives in ~/.local/bin.
+        let home = tempfile::tempdir().unwrap();
+        let bindir = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let exe = bindir.join(if cfg!(windows) { "codex.exe" } else { "codex" });
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let prev_home = std::env::var_os(key);
+        let prev_path = std::env::var_os("PATH");
+        // SAFETY: single-threaded test; restored below.
+        unsafe {
+            std::env::set_var(key, home.path());
+            std::env::set_var("PATH", "/nonexistent-bin");
+        }
+        let found = find_binary(&CliAgentConfig { tool: "codex".into(), ..Default::default() });
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        assert_eq!(found.as_deref(), Some(exe.as_path()));
     }
 
     #[cfg(unix)]
