@@ -1566,3 +1566,17 @@ pre.cli-test-result { background: var(--panel, #171a21); border: 1px solid var(-
   background: var(--fg, #fff);
   pointer-events: none;
 }
+
+.session-item .session-remove {
+  margin-left: auto;
+  opacity: 0;
+  padding: 0 6px;
+  line-height: 1;
+}
+.session-item:hover .session-remove,
+.session-item.active .session-remove {
+  opacity: 0.7;
+}
+.session-item .session-remove:hover {
+  opacity: 1;
+}

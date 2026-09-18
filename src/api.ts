@@ -145,12 +145,15 @@ export interface MotionWindow {
   jerk: number;
   /** How fast the camera moves on purpose, % of frame width per frame. */
   motion: number;
+  /** Movement within a second that is undone, % of frame width per second. */
+  sway: number;
 }
 export interface SteadinessView {
   windows: MotionWindow[];
   max_shake: number;
   /** The line this clip is judged against (floor, or a multiple of its own level). */
   limit: number;
+  max_sway: number;
   camera: string;
 }
 
@@ -483,6 +486,8 @@ export const chatTurn = (projectId: number, sessionId: number | null, message: s
 
 export const chatSessions = (projectId: number) =>
   invoke<ChatSession[]>("chat_sessions", { projectId });
+
+export const deleteChatSession = (sessionId: number) => invoke<boolean>("delete_chat_session", { sessionId });
 
 export const chatMessages = (sessionId: number) =>
   invoke<ChatMessage[]>("chat_messages", { sessionId });

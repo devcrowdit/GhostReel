@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   chatMessages,
   chatSessions,
+  deleteChatSession,
   chatTurn,
   listScripts,
   type ChatEvent,
@@ -59,6 +60,21 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const tasks = useQueue();
+
+  const removeSession = async (id: number) => {
+    if (!window.confirm("Remove this chat? Scripts drafted in it are kept.")) return;
+    try {
+      await deleteChatSession(id);
+    } catch (e) {
+      console.error(e);
+      return;
+    }
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    if (selectedSessionId === id) {
+      setSelectedSessionId(null);
+      setMessages([]);
+    }
+  };
 
   // Load sessions and scripts on mount / projectId change
   useEffect(() => {
@@ -242,6 +258,16 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
                   <span className="session-time muted small">
                     {formatRelativeTime(sess.updated_at || sess.created_at)}
                   </span>
+                  <button
+                    className="ghost small session-remove"
+                    title="Remove this chat (its scripts are kept)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void removeSession(sess.id);
+                    }}
+                  >
+                    ×
+                  </button>
                 </div>
 
                 {/* Script versions under selected session */}

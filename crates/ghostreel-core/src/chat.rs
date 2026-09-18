@@ -683,6 +683,7 @@ pub fn dispatch_tool(
         cfg.local_tool_result_chars,
         cfg.max_shake_jerk,
         cfg.shake_relative,
+        cfg.max_sway,
     )
 }
 
@@ -704,6 +705,7 @@ pub fn dispatch_tool_limited(
     max_chars: usize,
     max_shake: f64,
     shake_relative: f64,
+    max_sway: f64,
 ) -> (String, String) {
     match tool {
         "search_moments" => {
@@ -936,7 +938,8 @@ pub fn dispatch_tool_limited(
             // clip's usual stretches are what it is, the worse ones are what to avoid.
             let limit = crate::steadiness::shake_limit(&measured, max_shake, shake_relative);
             let camera = crate::steadiness::camera_style(&measured).as_str();
-            let shaky_spans = crate::steadiness::shaky_spans(&measured, range_start, speech_end, limit);
+            let shaky_spans =
+                crate::steadiness::shaky_spans_with_sway(&measured, range_start, speech_end, limit, max_sway);
             // Timestamps, not a verdict on the whole file: most of a shaky clip is usually fine,
             // and the editor is choosing a range, not a video.
             let shaky_at: Vec<String> = shaky_spans.iter().map(|(a, b)| format!("{a:.1}-{b:.1}")).collect();
@@ -1825,6 +1828,13 @@ pub fn create_session(db: &Db, project_id: i64, title: &str) -> Result<i64, Erro
 }
 
 /// List all chat sessions for a project ordered by most recently updated.
+/// Delete a chat session and its messages. Scripts drafted in it are kept and merely lose the
+/// link (the schema sets their `session_id` to NULL): a script is a deliverable, a chat is not.
+pub fn delete_session(db: &Db, session_id: i64) -> Result<bool, Error> {
+    let n = db.conn.execute("DELETE FROM chat_sessions WHERE id = ?1", [session_id])?;
+    Ok(n > 0)
+}
+
 pub fn sessions(db: &Db, project_id: i64) -> Result<Vec<ChatSession>, Error> {
     let mut st = db.conn.prepare(
         "SELECT id, project_id, title, created_at, updated_at
@@ -2096,6 +2106,7 @@ pub async fn run_turn(
                         ctx.script.roomy_tool_result_chars,
                         ctx.script.max_shake_jerk,
                         ctx.script.shake_relative,
+                        ctx.script.max_sway,
                     );
 
                     on_event(ChatEvent::ToolFinished { tool: tool_name.clone(), summary: summary.clone() });
@@ -2431,6 +2442,7 @@ pub async fn run_turn(
                             ctx.script.roomy_tool_result_chars,
                             ctx.script.max_shake_jerk,
                             ctx.script.shake_relative,
+                            ctx.script.max_sway,
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
                         let empty = is_empty_search(&tool, &summary);
