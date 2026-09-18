@@ -171,7 +171,7 @@ impl ServerVision {
 
 /// A running `ghostreel-llm` process. Models stay loaded until it is dropped (kill on drop).
 pub struct LocalLlm {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
     next_id: u64,
@@ -276,7 +276,7 @@ impl LocalLlm {
                     return Err(Error::Vision(format!("helper did not start: {line}")));
                 }
                 let embed_dim = v["embed_dim"].as_u64().map(|d| d as usize);
-                Ok(Self { _child: child, stdin, lines, next_id: 1, embed_dim })
+                Ok(Self { child, stdin, lines, next_id: 1, embed_dim })
             }
             Ok(_) => {
                 let _ = child.wait().await;
@@ -329,6 +329,13 @@ impl LocalLlm {
     pub async fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
         let v = self.request(json!({ "cmd": "embed", "texts": texts })).await?;
         serde_json::from_value(v["embeddings"].clone()).map_err(|e| Error::Vision(format!("bad embeddings: {e}")))
+    }
+
+    /// Kill the helper. A generation runs inside the helper process and does not check anything
+    /// we set out here, so stopping a turn means ending the process; the next turn starts a new
+    /// one. Without this, Stop only took effect after the model had finished anyway.
+    pub async fn kill(&mut self) {
+        let _ = self.child.kill().await;
     }
 
     pub async fn complete(&mut self, prompt: &str, schema: Option<Value>) -> Result<String, Error> {

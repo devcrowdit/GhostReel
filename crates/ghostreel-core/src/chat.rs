@@ -140,7 +140,13 @@ pub struct ChatContext {
     pub max_tool_rounds: u32,
     /// The `[script]` settings: clip lengths, target tolerances, narration pace, research budget.
     pub script: crate::config::ScriptConfig,
+    /// Set by Stop. Checked between tool rounds and before every model call, so a turn ends
+    /// within a round instead of after the whole draft.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
+
+/// Returned when a turn is stopped; the caller reports it as cancelled, not as a failure.
+pub const CANCELLED: &str = "stopped";
 
 /// How much footage each brain gets to look at before drafting.
 ///
@@ -1520,6 +1526,7 @@ HOW TO EDIT
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
 5a. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
+6b. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
 8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
@@ -2001,6 +2008,9 @@ pub async fn run_turn(
 ) -> Result<TurnResult, Error> {
     let project = ctx.db.project(project_id)?;
     // A configured budget wins; otherwise the backend decides how much research it can afford.
+    // Captured before the backend is borrowed, so every arm can check it.
+    let cancel_flag = ctx.cancel.clone();
+    let cancelled = move || cancel_flag.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
     let rounds_budget = match (ctx.max_tool_rounds, &ctx.backend) {
         (n, _) if n > 0 => n,
         (_, ChatBackend::Local { .. }) => ctx.script.local_tool_rounds,
@@ -2092,6 +2102,9 @@ pub async fn run_turn(
             let mut last_assistant_text = String::new();
 
             while tool_rounds < rounds_budget {
+                if cancelled() {
+                    return Err(Error::Invalid(CANCELLED.into()));
+                }
                 tool_rounds += 1;
                 let mut body = json!({
                     "messages": req_messages,
@@ -2318,8 +2331,17 @@ pub async fn run_turn(
             let mut empty_searches = 0usize;
             let mut hinted = false;
             while tool_rounds < rounds_budget {
+                if cancelled() {
+                    // The generation runs inside the helper process; ending the turn means
+                    // ending it, or the model keeps going and Stop waits for it.
+                    helper.kill().await;
+                    return Err(Error::Invalid(CANCELLED.into()));
+                }
                 tool_rounds += 1;
-                let out_str = helper.complete(&transcript, Some(local_action_schema())).await?;
+                // A tool action is short, but a model that reasons first spends the same budget on
+                // the thought — at the default 2048 it ran out mid-round and the turn died.
+                let out_str =
+                    helper.complete_full(&transcript, Some(local_action_schema()), script_token_budget, *think).await?;
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
                 match action {
                     Ok(LocalAction::Tool { tool, args }) => {
@@ -2379,6 +2401,9 @@ pub async fn run_turn(
             }
 
             if parsed_script.is_none() {
+                if cancelled() {
+                    return Err(Error::Invalid(CANCELLED.into()));
+                }
                 on_event(ChatEvent::Drafting);
                 transcript.push_str(&format!(
                     "<|im_start|>user\n{}Produce the final script action.<|im_end|>\n",
@@ -2480,6 +2505,9 @@ pub async fn run_turn(
             let mut empty_searches = 0usize;
             let mut hinted = false;
             while tool_rounds < rounds_budget {
+                if cancelled() {
+                    return Err(Error::Invalid(CANCELLED.into()));
+                }
                 tool_rounds += 1;
                 let cli_prompt = format!(
                     "{transcript}<|im_start|>assistant\n\
@@ -2557,6 +2585,9 @@ pub async fn run_turn(
             }
 
             if parsed_script.is_none() {
+                if cancelled() {
+                    return Err(Error::Invalid(CANCELLED.into()));
+                }
                 on_event(ChatEvent::Drafting);
                 let cli_final_prompt = format!(
                     "{transcript}<|im_start|>assistant\n\
@@ -3333,6 +3364,7 @@ mod tests {
             system_prompt: None,
             max_tool_rounds: 0,
             script: sc(),
+            cancel: None,
         };
 
         let res =
@@ -3448,6 +3480,7 @@ mod tests {
             system_prompt: None,
             max_tool_rounds: 0,
             script: sc(),
+            cancel: None,
         };
 
         let res = run_turn(&mut ctx, p.id, None, "Make video", &mut |_| {}).await.unwrap();

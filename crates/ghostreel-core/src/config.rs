@@ -199,7 +199,10 @@ pub struct ScriptConfig {
     pub target_overshoot: f64,
     /// The last pass before saving works to this (1.02 = 2% over). Whatever it leaves is final.
     pub final_target_tolerance: f64,
-    /// Share of the target that speaking clips may fill, leaving room for the pictures (0.7).
+    /// Hard limit on the share of the target that speaking clips may fill. 1.0 — the default —
+    /// leaves the balance of interview and pictures to the editor, which is the only thing that
+    /// knows whether this piece was asked for in people's own words or as a scenic teaser. Lower
+    /// it to impose a house rule (0.7 keeps a third of the running time for pictures).
     pub speech_budget: f64,
     /// Spoken words per second, for checking narration covers its beat.
     pub narration_words_per_s: f64,
@@ -256,7 +259,7 @@ impl Default for ScriptConfig {
             min_trimmed_clip_s: 4.0,
             target_overshoot: 1.25,
             final_target_tolerance: 1.02,
-            speech_budget: 0.7,
+            speech_budget: 1.0,
             narration_words_per_s: 2.5,
             min_narration_coverage: 0.6,
             speech_tail_s: 1.5,

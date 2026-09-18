@@ -854,6 +854,7 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 system_prompt: Some(config.chat.system_prompt.clone()),
                 max_tool_rounds: config.chat_model().max_tool_rounds,
                 script: config.script.clone(),
+                cancel: None,
             };
 
             let t0 = std::time::Instant::now();

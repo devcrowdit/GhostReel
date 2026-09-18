@@ -488,6 +488,7 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
                 system_prompt: Some(config.chat.system_prompt.clone()),
                 max_tool_rounds: config.chat_model().max_tool_rounds,
                 script: config.script.clone(),
+                cancel: None,
             };
             let turn = ghostreel_core::chat::run_turn(&mut ctx, p.id, session_id, &message, &mut |_| {}).await?;
             Ok(serde_json::to_value(turn)?)

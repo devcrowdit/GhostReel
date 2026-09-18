@@ -172,7 +172,7 @@ impl Queue {
             }
             TaskState::Running => {
                 t.cancel.store(true, Ordering::SeqCst);
-                t.note = Some("Stopping after the current item…".into());
+                t.note = Some("Stopping…".into());
             }
             _ => return false,
         }
@@ -256,6 +256,8 @@ pub async fn worker(app: AppHandle) {
                         let res = run_chat(&app, id, project_id, session_id, message, cancel.clone()).await;
                         let outcome = match &res {
                             Ok(_) => Ok(TaskOutcome::Chat),
+                            // Stop is not a failure: report it as the cancellation it is.
+                            Err(e) if e.contains(ghostreel_core::chat::CANCELLED) => Ok(TaskOutcome::Chat),
                             Err(e) => Err(e.clone()),
                         };
                         let _ = tx.send(res);
@@ -508,6 +510,7 @@ async fn run_chat(
         system_prompt: Some(config.chat.system_prompt.clone()),
         max_tool_rounds: config.chat_model().max_tool_rounds,
         script: config.script.clone(),
+        cancel: Some(cancel.clone()),
     };
 
     let app_handle = app.clone();
