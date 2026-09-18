@@ -534,6 +534,19 @@ pub fn reference_edits_text(db: &Db, project_id: i64, max_chars: usize) -> Strin
     out
 }
 
+/// After this many searches in a row come back empty, the model is told to look at the footage
+/// directly instead: a weak local model otherwise repeats the same query until it runs out of turns.
+const EMPTY_SEARCHES_BEFORE_HINT: usize = 2;
+
+const EMPTY_SEARCH_HINT: &str = "Those searches found nothing — the words you are searching for are not in this \
+footage. Stop searching: call list_videos, then get_video and get_transcript on the videos that look useful, and \
+build the script from what they actually show.";
+
+/// A `search_moments` result with no hits.
+fn is_empty_search(tool: &str, summary: &str) -> bool {
+    tool == "search_moments" && (summary.starts_with("0 hits") || summary == "no matches")
+}
+
 /// Check whether a video belongs to a project.
 pub fn is_video_in_project(db: &Db, project_id: i64, video_id: i64) -> bool {
     let res: Result<i64, _> = db.conn.query_row(
@@ -1521,6 +1534,8 @@ pub async fn run_turn(
             req_messages.push(json!({ "role": "user", "content": message }));
 
             let mut tool_rounds = 0;
+            let mut empty_searches = 0usize;
+            let mut hinted = false;
             let mut last_assistant_text = String::new();
 
             while tool_rounds < 16 {
@@ -1568,6 +1583,11 @@ pub async fn run_turn(
 
                 req_messages.push(msg_obj.clone());
 
+                if empty_searches >= EMPTY_SEARCHES_BEFORE_HINT && !hinted {
+                    hinted = true;
+                    req_messages.push(json!({ "role": "user", "content": EMPTY_SEARCH_HINT }));
+                }
+
                 for tc in tool_calls.unwrap() {
                     let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let func = tc.get("function").cloned().unwrap_or(Value::Null);
@@ -1606,7 +1626,15 @@ pub async fn run_turn(
 
                     on_event(ChatEvent::ToolFinished { tool: tool_name.clone(), summary: summary.clone() });
 
+                    let empty = is_empty_search(&tool_name, &summary);
+                    let was_search = tool_name.starts_with("search");
                     tool_records.push(ToolCallRecord { tool: tool_name, args: tool_args, summary });
+
+                    if empty {
+                        empty_searches += 1;
+                    } else if !was_search {
+                        empty_searches = 0;
+                    }
 
                     req_messages.push(json!({
                         "role": "tool",
@@ -1725,6 +1753,8 @@ pub async fn run_turn(
             transcript.push_str(&format!("<|im_start|>user\n{message}<|im_end|>\n"));
 
             let mut tool_rounds = 0;
+            let mut empty_searches = 0usize;
+            let mut hinted = false;
             while tool_rounds < 8 {
                 tool_rounds += 1;
                 let out_str = helper.complete(&transcript, Some(local_action_schema())).await?;
@@ -1754,10 +1784,22 @@ pub async fn run_turn(
                             vector.as_deref(),
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
+                        let empty = is_empty_search(&tool, &summary);
                         tool_records.push(ToolCallRecord { tool: tool.clone(), args: args.clone(), summary });
 
+                        if empty {
+                            empty_searches += 1;
+                        } else if !tool.starts_with("search") {
+                            empty_searches = 0;
+                        }
+                        let hint = if empty_searches >= EMPTY_SEARCHES_BEFORE_HINT && !hinted {
+                            hinted = true;
+                            format!("\n{EMPTY_SEARCH_HINT}")
+                        } else {
+                            String::new()
+                        };
                         transcript.push_str(&format!(
-                            "<|im_start|>assistant\n{}\n<|im_end|>\n<|im_start|>user\nTool result for {tool}:\n{res}\n<|im_end|>\n",
+                            "<|im_start|>assistant\n{}\n<|im_end|>\n<|im_start|>user\nTool result for {tool}:\n{res}{hint}\n<|im_end|>\n",
                             out_str
                         ));
                     }
@@ -2026,6 +2068,15 @@ mod tests {
         db.include_video(p.id, 2).unwrap();
         assert!(is_video_in_project(&db, p.id, 2));
         assert!(reference_edits_text(&db, p.id, 6000).is_empty());
+    }
+
+    #[test]
+    fn empty_searches_are_recognised() {
+        assert!(is_empty_search("search_moments", "0 hits"));
+        assert!(is_empty_search("search_moments", "no matches"));
+        assert!(!is_empty_search("search_moments", "8 hits"));
+        assert!(!is_empty_search("get_transcript", "0 segments"), "only searches count");
+        assert!(EMPTY_SEARCH_HINT.contains("list_videos"));
     }
 
     #[test]
