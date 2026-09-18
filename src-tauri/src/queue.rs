@@ -506,6 +506,7 @@ async fn run_chat(
         backend,
         embedder,
         system_prompt: Some(config.chat.system_prompt.clone()),
+        max_tool_rounds: config.chat_model().max_tool_rounds,
     };
 
     let app_handle = app.clone();

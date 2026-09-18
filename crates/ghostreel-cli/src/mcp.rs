@@ -102,6 +102,52 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
+/// The AI settings as the MCP tools report them: one entry per capability, plus which
+/// coding-agent CLIs this machine can actually run.
+fn settings_view(cfg: &ghostreel_core::config::Config) -> Value {
+    let llm = |c: &ghostreel_core::config::VisionConfig| {
+        json!({
+            "backend": c.backend.to_string(),
+            "url": c.url,
+            "model": c.model,
+            "local_model": c.local_model,
+            "ctx_tokens": c.ctx_tokens,
+            "kv_cache": c.kv_cache,
+            "flash_attn": c.flash_attn,
+            "think": c.think,
+            "cli": {
+                "tool": c.cli.tool,
+                "command": c.cli.command,
+                "model": c.cli.model,
+                "concurrency": c.cli.concurrency,
+                "timeout_secs": c.cli.timeout_secs,
+                "installed": ghostreel_core::cliagent::CliAgent::new(c.cli.clone()).available().is_some(),
+            },
+        })
+    };
+    let agents: Vec<Value> = ghostreel_core::config::CLI_TOOLS
+        .iter()
+        .map(|tool| {
+            let probe = ghostreel_core::config::CliAgentConfig {
+                tool: (*tool).to_string(),
+                ..ghostreel_core::config::CliAgentConfig::default()
+            };
+            json!({
+                "tool": tool,
+                "path": ghostreel_core::cliagent::find_binary(&probe).map(|p| p.display().to_string()),
+            })
+        })
+        .collect();
+    json!({
+        "vision": llm(&cfg.vision),
+        "chat_model": llm(&cfg.chat_model()),
+        "stt": { "backend": cfg.stt.backend.to_string(), "url": cfg.stt.url, "model": cfg.stt.model },
+        "embed": { "backend": cfg.embed.backend.to_string(), "url": cfg.embed.url, "model": cfg.embed.model },
+        "frames": { "max_interval_s": cfg.frames.max_interval_s },
+        "cli_agents": agents,
+    })
+}
+
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
 }
@@ -216,6 +262,28 @@ fn tools() -> Vec<Value> {
                 "format": { "type": "string", "enum": ["fcp_xml", "otio"], "description": "default fcp_xml" },
                 "out": { "type": "string", "description": "Output file path" },
             }), &["script_id", "out"]),
+        }),
+        json!({
+            "name": "preview_script",
+            "description": "Render a script version to a preview MP4 and return its path (and duration/encoder). Slow: it cuts and encodes the real footage. Optionally burn in the on-screen titles and the narration as subtitles.",
+            "inputSchema": obj(json!({
+                "script_id": { "type": "integer" },
+                "burn_titles": { "type": "boolean", "description": "default false" },
+                "burn_narration": { "type": "boolean", "description": "default false: narration as burnt-in subtitles" },
+                "out": { "type": "string", "description": "Output file path; default is the data dir's preview folder" },
+            }), &["script_id"]),
+        }),
+        json!({
+            "name": "get_settings",
+            "description": "The AI settings: for speech, frame descriptions, the script chat and embeddings — which backend each uses (auto/local/server/cli), its server URL and model, the local context window, KV cache, flash attention and whether the model reasons before answering, plus which coding-agent CLIs are installed.",
+            "inputSchema": obj(json!({}), &[]),
+        }),
+        json!({
+            "name": "set_settings",
+            "description": "Change AI settings, the same keys `ghostreel config set` takes, e.g. {\"chat_model.backend\": \"local\", \"chat_model.think\": \"true\", \"chat_model.ctx_tokens\": \"16384\"}. Sections: vision (frame descriptions), chat_model (script chat), stt, embed. Returns the settings after the change.",
+            "inputSchema": obj(json!({
+                "set": { "type": "object", "description": "{\"<section>.<field>\": \"<value>\"} — values as strings" },
+            }), &["set"]),
         }),
         json!({
             "name": "delete_project",
@@ -418,6 +486,7 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
                 backend,
                 embedder,
                 system_prompt: Some(config.chat.system_prompt.clone()),
+                max_tool_rounds: config.chat_model().max_tool_rounds,
             };
             let turn = ghostreel_core::chat::run_turn(&mut ctx, p.id, session_id, &message, &mut |_| {}).await?;
             Ok(serde_json::to_value(turn)?)
@@ -448,6 +517,43 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
             let out = PathBuf::from(arg_str(args, "out")?);
             let res = ghostreel_core::export::export_script(&db, &paths.data_dir, script_id, fmt, &out)?;
             Ok(json!({ "path": res.path, "format": format }))
+        }
+        "preview_script" => {
+            let db = open_db(paths)?;
+            let script_id = arg_i64(args, "script_id")?;
+            let ffmpeg = doctor::locate("ffmpeg").context("ffmpeg not found")?;
+            let opts = ghostreel_core::preview::PreviewOptions {
+                burn_titles: args.get("burn_titles").and_then(|v| v.as_bool()).unwrap_or(false),
+                burn_narration: args.get("burn_narration").and_then(|v| v.as_bool()).unwrap_or(false),
+                out: args.get("out").and_then(|v| v.as_str()).map(PathBuf::from),
+                cancel: None,
+            };
+            let res =
+                ghostreel_core::preview::render_preview(&db, &paths.data_dir, &ffmpeg, script_id, &opts, |_, _| {})?;
+            Ok(serde_json::to_value(res)?)
+        }
+        "get_settings" => {
+            let cfg = ghostreel_core::config::Config::load(&paths.config_file).unwrap_or_default();
+            Ok(settings_view(&cfg))
+        }
+        "set_settings" => {
+            let mut cfg = ghostreel_core::config::Config::load(&paths.config_file).unwrap_or_default();
+            let set = args
+                .get("set")
+                .and_then(|v| v.as_object())
+                .context("set must be an object of \"section.field\": \"value\"")?;
+            let mut applied = Vec::new();
+            for (key, value) in set {
+                // Numbers and booleans are as natural to write here as strings; take either.
+                let value = match value {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                cfg.set_key(key, &value).map_err(|e| anyhow::anyhow!("{e}"))?;
+                applied.push(format!("{key} = {value}"));
+            }
+            cfg.save(&paths.config_file)?;
+            Ok(json!({ "applied": applied, "settings": settings_view(&cfg) }))
         }
         "delete_project" => {
             let mut db = open_db(paths)?;

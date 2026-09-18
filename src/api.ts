@@ -522,6 +522,7 @@ export interface VisionSettings {
   kv_cache: string;
   /** auto | on | off */
   flash_attn: string;
+  think: boolean;
   cli: CliSettings;
 }
 
@@ -579,6 +580,7 @@ export interface VisionSettingsPatch {
   ctx_tokens?: number;
   kv_cache?: string;
   flash_attn?: string;
+  think?: boolean;
   cli?: {
     tool?: string;
     command?: string;

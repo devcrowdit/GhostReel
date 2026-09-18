@@ -117,6 +117,13 @@ pub struct VisionConfig {
     pub kv_cache: String,
     /// Flash attention for the local helper: `auto`, `on` or `off`.
     pub flash_attn: String,
+    /// How many tool calls the script chat may make before it has to draft: how much footage it
+    /// gets to search, watch and read transcripts of. 0 = pick from the backend (a local model
+    /// gets fewer, since every round costs it context it cannot spare).
+    pub max_tool_rounds: u32,
+    /// Let the local model reason before it answers. Worth its cost for a whole script, not for
+    /// a keyframe: descriptions run once per frame, so they default to off and scripts to on.
+    pub think: bool,
     /// CLI agent settings (used when `backend = "cli"`).
     pub cli: CliAgentConfig,
 }
@@ -139,6 +146,8 @@ impl Default for VisionConfig {
             ctx_tokens: DESCRIBE_CTX_TOKENS,
             kv_cache: "q4_0".into(),
             flash_attn: "auto".into(),
+            max_tool_rounds: 0,
+            think: false,
             cli: CliAgentConfig::default(),
         }
     }
@@ -271,8 +280,102 @@ impl Config {
     pub fn chat_model(&self) -> VisionConfig {
         match &self.chat_model {
             Some(c) => c.clone(),
-            None => VisionConfig { ctx_tokens: CHAT_CTX_TOKENS, ..self.vision.clone() },
+            None => VisionConfig { ctx_tokens: CHAT_CTX_TOKENS, think: true, ..self.vision.clone() },
         }
+    }
+
+    /// Apply one `section.field = value` setting, the form `ghostreel config set` and the MCP
+    /// `set_settings` tool both speak. Values arrive as strings because that is what both callers
+    /// have. Returns a message naming the problem, never a partially applied change.
+    pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
+        fn backend(v: &str) -> Result<Backend, String> {
+            match v.to_lowercase().as_str() {
+                "auto" => Ok(Backend::Auto),
+                "local" => Ok(Backend::Local),
+                "server" => Ok(Backend::Server),
+                "cli" => Ok(Backend::Cli),
+                other => Err(format!("invalid backend '{other}'; expected 'auto', 'local', 'server', or 'cli'")),
+            }
+        }
+        fn flag(v: &str) -> bool {
+            matches!(v.to_lowercase().as_str(), "true" | "on" | "yes" | "1")
+        }
+        fn num<T: std::str::FromStr>(key: &str, v: &str) -> Result<T, String> {
+            v.parse().map_err(|_| format!("{key} must be a number, got '{v}'"))
+        }
+
+        let mut parts = key.split('.');
+        let section = parts.next().unwrap_or_default();
+        let field = parts.next().unwrap_or_default();
+        let sub = parts.next().unwrap_or_default();
+        let is_llm = matches!(section, "vision" | "chat_model" | "chat-model");
+
+        // vision.* = frame descriptions, chat_model.* = the script chat.
+        if is_llm && field == "cli" {
+            let mut llm = if section == "vision" { self.vision.clone() } else { self.chat_model() };
+            match sub {
+                "tool" => llm.cli.tool = value.to_string(),
+                "command" => llm.cli.command = value.to_string(),
+                "model" => llm.cli.model = value.to_string(),
+                "timeout_secs" => llm.cli.timeout_secs = num(key, value)?,
+                "concurrency" => llm.cli.concurrency = num(key, value)?,
+                "extra_args" => {
+                    return Err(format!("{key}: extra_args is not settable here; edit the config file directly"));
+                }
+                other => return Err(format!("unknown config key '{section}.cli.{other}'")),
+            }
+            llm.cli.validate(section)?;
+            if section == "vision" {
+                self.vision = llm
+            } else {
+                self.chat_model = Some(llm)
+            }
+            return Ok(());
+        }
+        if is_llm {
+            let mut llm = if section == "vision" { self.vision.clone() } else { self.chat_model() };
+            match field {
+                "backend" => llm.backend = backend(value)?,
+                "url" => llm.url = value.to_string(),
+                "model" => llm.model = value.to_string(),
+                "local_model" => llm.local_model = value.to_string(),
+                "ctx_tokens" => llm.ctx_tokens = num(key, value)?,
+                "kv_cache" => llm.kv_cache = value.to_string(),
+                "flash_attn" => llm.flash_attn = value.to_string(),
+                "think" => llm.think = flag(value),
+                other => return Err(format!("unknown config key '{section}.{other}'")),
+            }
+            llm.validate(section)?;
+            if section == "vision" {
+                self.vision = llm
+            } else {
+                self.chat_model = Some(llm)
+            }
+            return Ok(());
+        }
+        match key {
+            "stt.backend" => self.stt.backend = backend(value)?,
+            "stt.url" => self.stt.url = value.to_string(),
+            "embed.backend" | "embeddings.backend" => self.embed.backend = backend(value)?,
+            "embed.url" | "embeddings.url" => self.embed.url = value.to_string(),
+            "frames.max_interval_s" => {
+                let v: f64 = num(key, value)?;
+                if !(1.0..=60.0).contains(&v) {
+                    return Err(format!("frames.max_interval_s must be between 1 and 60, got {v}"));
+                }
+                self.frames.max_interval_s = v;
+            }
+            other => {
+                return Err(format!(
+                    "unknown or unsupported config key '{other}'; supported keys: \
+                     vision.* and chat_model.* (backend, url, model, local_model, ctx_tokens, kv_cache, \
+                     flash_attn, think), vision.cli.* and chat_model.cli.* (tool, command, model, \
+                     timeout_secs, concurrency), stt.backend, stt.url, embed.backend, embed.url, \
+                     frames.max_interval_s"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Check every section that has rules. Returns the first problem as a message.

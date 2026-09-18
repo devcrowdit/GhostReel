@@ -80,6 +80,8 @@ pub enum ChatBackend {
         helper: Box<crate::vision::LocalLlm>,
         /// The helper's context window: tool results are trimmed to a fraction of it.
         ctx_tokens: u32,
+        /// Whether the draft may reason before answering (`chat_model.think`).
+        think: bool,
     },
     /// Coding-agent CLI (claude / agy / opencode) drives the existing local action loop.
     Cli(crate::cliagent::CliAgent),
@@ -117,7 +119,7 @@ impl ChatBackend {
                     runtime: runtime.clone(),
                 };
                 let llm = crate::vision::LocalLlm::start(&models).await?;
-                Ok(ChatBackend::Local { helper: Box::new(llm), ctx_tokens: runtime.ctx_tokens })
+                Ok(ChatBackend::Local { helper: Box::new(llm), ctx_tokens: runtime.ctx_tokens, think: runtime.think })
             }
             crate::runtime::VisionSetup::Unavailable(why) => {
                 Err(Error::Vision(format!("vision/chat model unavailable: {why}")))
@@ -134,7 +136,18 @@ pub struct ChatContext {
     pub embedder: Option<Embedder>,
     /// Custom editing instructions (Settings); `None`/empty = [`DEFAULT_EDITOR_PROMPT`].
     pub system_prompt: Option<String>,
+    /// `chat_model.max_tool_rounds`; 0 = the backend's own default.
+    pub max_tool_rounds: u32,
 }
+
+/// How much footage each brain gets to look at before drafting.
+///
+/// A local model pays for every round out of a context it barely has, so it stays modest. A
+/// server or a coding-agent CLI has room to search, watch and read transcripts until it actually
+/// knows the material, which is what separates a teaser built from three voices from one built
+/// from the first clip that matched.
+const LOCAL_TOOL_ROUNDS: u32 = 10;
+const ROOMY_TOOL_ROUNDS: u32 = 24;
 
 /// Slack around grounded ranges (search moments are approximate).
 const GROUNDING_SLACK_S: f64 = 5.0;
@@ -203,6 +216,44 @@ fn enforce_grounding_and_pacing(
     enforce_target: bool,
 ) -> Vec<Issue> {
     let mut issues = Vec::new();
+    // A clip with no transcript in its range cannot carry source audio, whatever the model said.
+    // Left alone, a scenery shot marked "source" reads as "someone speaks here", which is exactly
+    // the case the editing rules tell the model to leave narration empty for — so a whole script
+    // of b-roll ends up silent.
+    let mut unmuted = 0usize;
+    for beat in &mut s.beats {
+        for c in &mut beat.clips {
+            if c.audio == crate::script::Audio::Source && !clip_has_speech(db, c.video_id, c.in_s, c.out_s) {
+                c.audio = crate::script::Audio::Mute;
+                unmuted += 1;
+            }
+        }
+    }
+    let mut hushed = 0usize;
+    for beat in &mut s.beats {
+        let speaks = beat.clips.iter().any(|c| c.audio == crate::script::Audio::Source);
+        let narrated = beat.narration.as_deref().map(str::trim).is_some_and(|n| !n.is_empty());
+        if speaks && narrated {
+            beat.narration = Some(String::new());
+            hushed += 1;
+        }
+    }
+    if hushed > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("dropped narration from {hushed} beat(s) that play the speaker's own audio"),
+        });
+    }
+    if unmuted > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("muted {unmuted} clip(s) with no speech in range"),
+        });
+    }
     for beat in &mut s.beats {
         let mut kept = Vec::with_capacity(beat.clips.len());
         for c in beat.clips.drain(..) {
@@ -836,6 +887,12 @@ pub fn dispatch_tool_limited(
 
             let summary = format!("{}s, {} frames", duration_s.unwrap_or(0.0) as i64, frames.len());
 
+            // Whether anyone speaks in the asked-for range. Without this the model has no evidence
+            // either way and picks the first `audio` the schema offers — "source" — for scenery,
+            // which then reads as "people speak here" and suppresses the beat's narration.
+            let speech_end = if range_end == f64::MAX { duration_s.unwrap_or(0.0) } else { range_end };
+            let has_speech = clip_has_speech(db, video_id, range_start, speech_end);
+
             let mut obj = json!({
                 "video_id": video_id,
                 "file": file,
@@ -844,6 +901,8 @@ pub fn dispatch_tool_limited(
                 "width": width,
                 "height": height,
                 "language": language,
+                "has_speech": has_speech,
+                "audio": if has_speech { "source" } else { "mute" },
                 "frames": frames,
             });
 
@@ -876,6 +935,8 @@ pub fn dispatch_tool_limited(
                 file: String,
                 duration_s: Option<f64>,
                 language: Option<String>,
+                /// Someone talks in this video: it can carry a beat on its own audio.
+                has_speech: bool,
                 summary: String,
             }
 
@@ -931,7 +992,13 @@ pub fn dispatch_tool_limited(
                 }
 
                 let summary_text: String = sum.unwrap_or_default().chars().take(150).collect();
-                videos.push(VideoItem { video_id: vid, file, duration_s, language, summary: summary_text });
+                let has_speech = db
+                    .conn
+                    .query_row("SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE video_id = ?1)", [vid], |r| {
+                        r.get::<_, bool>(0)
+                    })
+                    .unwrap_or(false);
+                videos.push(VideoItem { video_id: vid, file, duration_s, language, has_speech, summary: summary_text });
             }
 
             let summary = format!("{} videos", videos.len());
@@ -1160,6 +1227,7 @@ HOW TO EDIT
    - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
+6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. If the user gave no length, choose what the material supports (usually 60-180 s).
 8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
@@ -1202,6 +1270,137 @@ pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>, 
     }
 
     prompt
+}
+
+/// Writes the prompt and raw answer of one local call to `$GHOSTREEL_DEBUG_CHAT/<stage>.*.txt`.
+/// Off unless the variable is set: what the model actually emitted is otherwise unknowable from
+/// the outside, and "the narration is empty" has very different causes before and after parsing.
+fn debug_dump(stage: &str, prompt: &str, answer: &str) {
+    let Some(dir) = std::env::var_os("GHOSTREEL_DEBUG_CHAT") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(dir.join(format!("{stage}.prompt.txt")), prompt);
+    let _ = std::fs::write(dir.join(format!("{stage}.answer.txt")), answer);
+}
+
+/// What the keyframes in a clip's range show, as a few short lines.
+fn frame_summaries(db: &Db, video_id: i64, in_s: f64, out_s: f64, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(mut st) = db
+        .conn
+        .prepare("SELECT description_json FROM frames WHERE video_id = ?1 AND t_s >= ?2 AND t_s <= ?3 ORDER BY t_s")
+    else {
+        return out;
+    };
+    let Ok(rows) = st.query_map(params![video_id, in_s - 0.5, out_s + 0.5], |r| r.get::<_, Option<String>>(0)) else {
+        return out;
+    };
+    for row in rows.flatten().flatten() {
+        let summary = serde_json::from_str::<Value>(&row)
+            .ok()
+            .and_then(|v| v["description"].as_str().map(str::to_string))
+            .unwrap_or(row);
+        if !summary.trim().is_empty() {
+            out.push(summary.chars().take(240).collect::<String>());
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// The clips the model is actually allowed to cut, as the draft prompt states them.
+///
+/// Grounding is enforced after the fact — anything outside it is dropped, and a draft built
+/// entirely from unseen video ids collapses to nothing. `list_videos` shows every id in the
+/// project, so a small model readily drafts with footage it never opened; spelling the permitted
+/// ranges out costs a few lines and removes the guesswork.
+fn allowed_clips_text(grounding: &Grounding) -> String {
+    if grounding.ranges.is_empty() {
+        return String::new();
+    }
+    let mut merged: Vec<(i64, f64, f64)> = Vec::new();
+    for &(vid, s, e) in &grounding.ranges {
+        match merged.iter_mut().find(|(v, _, _)| *v == vid) {
+            Some(r) => {
+                r.1 = r.1.min(s);
+                r.2 = r.2.max(e);
+            }
+            None => merged.push((vid, s, e)),
+        }
+    }
+    merged.sort_by_key(|(v, _, _)| *v);
+    let list: Vec<String> = merged.iter().map(|(v, s, e)| format!("  video #{v}: {s:.1}-{e:.1} s")).collect();
+    format!(
+        "You may only use these videos and time ranges — every clip must lie inside one of them, \
+         and any clip outside them is thrown away:\n{}\n",
+        list.join("\n")
+    )
+}
+
+/// The beats that need a voice-over written, as (beat index, prompt) pairs.
+///
+/// Kept separate from the asking so that no database handle is alive across an await — the
+/// connection is not `Send`, and `run_turn`'s future has to be.
+fn narration_jobs(db: &Db, script: &Script) -> Vec<(usize, String)> {
+    let mut jobs = Vec::new();
+    for (idx, beat) in script.beats.iter().enumerate() {
+        let beat_s: f64 = beat.clips.iter().map(|c| c.out_s - c.in_s).sum();
+        let empty = beat.narration.as_deref().map(str::trim).is_none_or(str::is_empty);
+        let has_speech = beat.clips.iter().any(|c| clip_has_speech(db, c.video_id, c.in_s, c.out_s));
+        if !empty || has_speech || beat_s < 2.0 {
+            continue;
+        }
+        let words = (beat_s * NARRATION_WORDS_PER_S).round().max(5.0) as usize;
+        let seen: Vec<String> =
+            beat.clips.iter().flat_map(|c| frame_summaries(db, c.video_id, c.in_s, c.out_s, 3)).collect();
+        let purpose = if beat.purpose.trim().is_empty() { "introduce what is on screen" } else { beat.purpose.trim() };
+        let seen = if seen.is_empty() { "(no description available)".to_string() } else { seen.join("\n") };
+        jobs.push((
+            idx,
+            format!(
+                "<|im_start|>system\nYou write documentary voice-over. Write natural, specific sentences about what \
+                 is on screen and why it matters. No filler, no lists, no stage directions.<|im_end|>\n\
+                 <|im_start|>user\nThis shot runs {beat_s:.0} seconds. Its purpose: {purpose}\n\
+                 On screen:\n{seen}\n\n\
+                 Write about {words} words of narration for it.<|im_end|>\n"
+            ),
+        ));
+    }
+    jobs
+}
+
+/// Ask for each silent beat's narration on its own.
+///
+/// A small local model reliably writes good voice-over when that is the only thing it is asked
+/// for, and reliably leaves `narration` empty when it is one field among a whole nested script —
+/// so the beats that come back silent get a second, much smaller question instead of a redraft.
+async fn fill_missing_narration(
+    helper: &mut crate::vision::LocalLlm,
+    script: &mut Script,
+    jobs: Vec<(usize, String)>,
+) -> usize {
+    let schema = json!({
+        "type": "object",
+        "properties": { "narration": { "type": "string" } },
+        "required": ["narration"],
+        "additionalProperties": false
+    });
+    let mut filled = 0usize;
+    for (idx, prompt) in jobs {
+        if let Ok(answer) = helper.complete_limited(&prompt, Some(schema.clone()), 512).await
+            && let Ok(v) = serde_json::from_str::<Value>(&answer)
+            && let Some(n) = v["narration"].as_str().map(str::trim).filter(|n| !n.is_empty())
+            && let Some(beat) = script.beats.get_mut(idx)
+        {
+            beat.narration = Some(n.to_string());
+            filled += 1;
+        }
+    }
+    filled
 }
 
 /// Spoken voice-over rate used to check that narration fills its beat.
@@ -1469,6 +1668,12 @@ pub async fn run_turn(
     on_event: &mut (dyn FnMut(ChatEvent) + Send),
 ) -> Result<TurnResult, Error> {
     let project = ctx.db.project(project_id)?;
+    // A configured budget wins; otherwise the backend decides how much research it can afford.
+    let rounds_budget = match (ctx.max_tool_rounds, &ctx.backend) {
+        (n, _) if n > 0 => n,
+        (_, ChatBackend::Local { .. }) => LOCAL_TOOL_ROUNDS,
+        _ => ROOMY_TOOL_ROUNDS,
+    };
 
     let (session_id, is_new_session) = match session_id {
         Some(id) => (id, false),
@@ -1554,7 +1759,7 @@ pub async fn run_turn(
             let mut hinted = false;
             let mut last_assistant_text = String::new();
 
-            while tool_rounds < 16 {
+            while tool_rounds < rounds_budget {
                 tool_rounds += 1;
                 let mut body = json!({
                     "messages": req_messages,
@@ -1759,7 +1964,7 @@ pub async fn run_turn(
 
             raw_reply = last_assistant_text;
         }
-        ChatBackend::Local { helper, ctx_tokens } => {
+        ChatBackend::Local { helper, ctx_tokens, think } => {
             let mut transcript = format!("<|im_start|>system\n{sys_prompt}<|im_end|>\n");
             for pm in &prior_messages {
                 if pm.role == "user" || pm.role == "assistant" {
@@ -1770,12 +1975,13 @@ pub async fn run_turn(
 
             // A full script's JSON is far longer than a tool action, so the draft call gets its
             // own budget out of the configured context rather than the default.
-            let script_token_budget = (*ctx_tokens as usize / 4).clamp(crate::vision::DEFAULT_COMPLETE_TOKENS, 8192);
+            // Reasoning is spent from the same budget as the answer, so leave room for both.
+            let script_token_budget = (*ctx_tokens as usize / 2).clamp(4096, 12288);
 
             let mut tool_rounds = 0;
             let mut empty_searches = 0usize;
             let mut hinted = false;
-            while tool_rounds < 8 {
+            while tool_rounds < rounds_budget {
                 tool_rounds += 1;
                 let out_str = helper.complete(&transcript, Some(local_action_schema())).await?;
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
@@ -1837,10 +2043,14 @@ pub async fn run_turn(
 
             if parsed_script.is_none() {
                 on_event(ChatEvent::Drafting);
-                transcript.push_str("<|im_start|>user\nProduce the final script action.<|im_end|>\n");
+                transcript.push_str(&format!(
+                    "<|im_start|>user\n{}Produce the final script action.<|im_end|>\n",
+                    allowed_clips_text(&grounding)
+                ));
                 let final_str = helper
-                    .complete_limited(&transcript, Some(local_final_action_schema()), script_token_budget)
+                    .complete_full(&transcript, Some(local_final_action_schema()), script_token_budget, *think)
                     .await?;
+                debug_dump("final-draft", &transcript, &final_str);
                 // Failing to parse here used to leave `parsed_script` as None, which surfaced as
                 // the bland "unable to assemble a script" reply with no hint of what went wrong —
                 // the same silence a mid-loop parse failure is loud about.
@@ -1864,11 +2074,54 @@ pub async fn run_turn(
             }
 
             on_event(ChatEvent::Validating);
+
+            // Redraft once against the same checks the server backend uses. Without this the
+            // local model's first answer is final, and its usual miss — beats with a purpose but
+            // no narration — reached the user as a finished script full of silent beats.
+            if let Some(s) = &parsed_script {
+                let mut reasons = check_grounding(&ctx.db, project_id, s, &grounding);
+                reasons.extend(pacing_issues(s, enforce_target));
+                reasons.extend(content_issues(&ctx.db, s));
+                if !reasons.is_empty() {
+                    on_event(ChatEvent::Drafting);
+                    let issue_text: Vec<String> = reasons.iter().map(|i| i.message.clone()).collect();
+                    transcript.push_str(&format!(
+                        "<|im_start|>assistant\n{}<|im_end|>\n",
+                        serde_json::to_string(&LocalAction::Final { script: s.clone() }).unwrap_or_default()
+                    ));
+                    transcript.push_str(&format!(
+                        "<|im_start|>user\nFix these problems and return the complete corrected script action:\n{}\n\
+                         {}Keep applying the user's request: {message}<|im_end|>\n",
+                        issue_text.join("\n"),
+                        allowed_clips_text(&grounding)
+                    ));
+                    if let Ok(retry_str) = helper
+                        .complete_full(&transcript, Some(local_final_action_schema()), script_token_budget, *think)
+                        .await
+                        && let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&retry_str)
+                    {
+                        script.fill_from_project(&project);
+                        parsed_script = Some(script);
+                    }
+                }
+            }
+
             if let Some(s) = &mut parsed_script {
                 if requested_s.is_some() {
                     s.target_duration_s = requested_s;
                 }
                 pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
+                // Muting happens above, so by now the beats that need a voice-over are known.
+                let jobs = narration_jobs(&ctx.db, s);
+                let filled = fill_missing_narration(helper, s, jobs).await;
+                if filled > 0 {
+                    pre_issues.push(Issue {
+                        severity: IssueSeverity::Info,
+                        beat_id: None,
+                        clip_index: None,
+                        message: format!("wrote narration for {filled} silent beat(s)"),
+                    });
+                }
             }
         }
         ChatBackend::Cli(agent) => {
@@ -1888,7 +2141,7 @@ pub async fn run_turn(
             let mut tool_rounds = 0;
             let mut empty_searches = 0usize;
             let mut hinted = false;
-            while tool_rounds < 8 {
+            while tool_rounds < rounds_budget {
                 tool_rounds += 1;
                 let cli_prompt = format!(
                     "{transcript}<|im_start|>assistant\n\
@@ -1911,7 +2164,7 @@ pub async fn run_turn(
                             None
                         };
 
-                        let (res, summary) = dispatch_tool(
+                        let (res, summary) = dispatch_tool_limited(
                             &ctx.db,
                             &ctx.data_dir,
                             project_id,
@@ -1919,6 +2172,7 @@ pub async fn run_turn(
                             &args,
                             &mut grounding,
                             vector.as_deref(),
+                            SERVER_TOOL_RESULT_CHARS,
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
                         let empty = is_empty_search(&tool, &summary);
@@ -2541,6 +2795,7 @@ mod tests {
             backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
             embedder: None,
             system_prompt: None,
+            max_tool_rounds: 0,
         };
 
         let res =
@@ -2654,6 +2909,7 @@ mod tests {
             backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
             embedder: None,
             system_prompt: None,
+            max_tool_rounds: 0,
         };
 
         let res = run_turn(&mut ctx, p.id, None, "Make video", &mut |_| {}).await.unwrap();

@@ -195,17 +195,29 @@ pub struct HelperRuntime {
     pub ctx_tokens: u32,
     pub kv_cache: String,
     pub flash_attn: String,
+    /// Whether this helper's calls may reason before answering.
+    pub think: bool,
 }
 
 impl Default for HelperRuntime {
     fn default() -> Self {
-        Self { ctx_tokens: crate::config::DESCRIBE_CTX_TOKENS, kv_cache: "q4_0".into(), flash_attn: "auto".into() }
+        Self {
+            ctx_tokens: crate::config::DESCRIBE_CTX_TOKENS,
+            kv_cache: "q4_0".into(),
+            flash_attn: "auto".into(),
+            think: false,
+        }
     }
 }
 
 impl From<&crate::config::VisionConfig> for HelperRuntime {
     fn from(c: &crate::config::VisionConfig) -> Self {
-        Self { ctx_tokens: c.ctx_tokens, kv_cache: c.kv_cache.clone(), flash_attn: c.flash_attn.clone() }
+        Self {
+            ctx_tokens: c.ctx_tokens,
+            kv_cache: c.kv_cache.clone(),
+            flash_attn: c.flash_attn.clone(),
+            think: c.think,
+        }
     }
 }
 
@@ -333,10 +345,24 @@ impl LocalLlm {
         schema: Option<Value>,
         max_tokens: usize,
     ) -> Result<String, Error> {
+        self.complete_full(prompt, schema, max_tokens, false).await
+    }
+
+    /// `complete_limited`, optionally letting the model reason before it answers. Thinking costs
+    /// tokens and time, so it is for the few calls whose quality carries a whole script, not for
+    /// per-keyframe work.
+    pub async fn complete_full(
+        &mut self,
+        prompt: &str,
+        schema: Option<Value>,
+        max_tokens: usize,
+        think: bool,
+    ) -> Result<String, Error> {
         let mut req = json!({
             "cmd": "complete",
             "prompt": prompt,
             "max_tokens": max_tokens,
+            "think": think,
         });
         if let Some(s) = schema {
             req["schema"] = s;

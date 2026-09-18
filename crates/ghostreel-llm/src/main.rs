@@ -118,7 +118,14 @@ struct Request {
     max_tokens: Option<usize>,
     #[serde(default)]
     texts: Option<Vec<String>>,
+    /// Let the model reason before answering. The grammar only binds after `</think>`, so the
+    /// reasoning is free text; without this a schema forces JSON from the very first token.
+    #[serde(default)]
+    think: Option<bool>,
 }
+
+const OPEN_THINK: &str = "<think>";
+const CLOSE_THINK: &str = "</think>";
 
 fn reply(v: Value) {
     let mut out = std::io::stdout().lock();
@@ -157,6 +164,7 @@ impl Vision<'_> {
         schema: Option<&Value>,
         max_tokens: usize,
         t0: Instant,
+        think: bool,
     ) -> Result<Value, String> {
         let mut grammar = match schema {
             Some(s) if !s.is_null() => {
@@ -176,11 +184,38 @@ impl Vision<'_> {
         let mut out = String::new();
         let mut batch = LlamaBatch::new(1, 1);
         let mut gen_tokens = 0usize;
-        for pos in (n_past..).take(max_tokens) {
+        // While the model is still reasoning, the grammar must stay out of the way: it would
+        // otherwise reject the very first word of the thought. It binds once `</think>` closes.
+        let mut thinking = think;
+        // Reasoning and answer share one budget, so an unbounded thought starves the answer and
+        // the reply arrives cut off mid-JSON. Give the thought half, then close it ourselves.
+        let think_max = (max_tokens / 2).max(256);
+        let mut pos = n_past;
+        while gen_tokens < max_tokens {
+            if thinking && out.contains(CLOSE_THINK) {
+                thinking = false;
+            } else if thinking && gen_tokens >= think_max {
+                let close = format!("{CLOSE_THINK}\n\n");
+                let toks = self
+                    .model
+                    .str_to_token(&close, llama_cpp_2::model::AddBos::Never)
+                    .map_err(|e| format!("close think: {e}"))?;
+                for t in toks {
+                    batch.clear();
+                    batch.add(t, pos, &[0], true).map_err(|e| e.to_string())?;
+                    self.ctx.decode(&mut batch).map_err(|e| format!("decode: {e}"))?;
+                    chain.accept(t);
+                    pos += 1;
+                    gen_tokens += 1;
+                }
+                out.push_str(&close);
+                thinking = false;
+                continue;
+            }
             let mut cur = self.ctx.token_data_array();
             cur.apply_sampler(&chain);
             let mut tok = cur.selected_token().ok_or("sampler selected no token")?;
-            if let Some(g) = &grammar {
+            if let Some(g) = grammar.as_ref().filter(|_| !thinking) {
                 let mut single = LlamaTokenDataArray::new(vec![LlamaTokenData::new(tok, 1.0, 0.0)], false);
                 single.apply_sampler(g);
                 if !single.data[0].logit().is_finite() {
@@ -191,7 +226,7 @@ impl Vision<'_> {
                     tok = full.selected_token().ok_or("no grammatical token")?;
                 }
             }
-            if let Some(g) = &mut grammar {
+            if let Some(g) = grammar.as_mut().filter(|_| !thinking) {
                 g.accept(tok);
             }
             chain.accept(tok);
@@ -203,12 +238,21 @@ impl Vision<'_> {
             batch.clear();
             batch.add(tok, pos, &[0], true).map_err(|e| e.to_string())?;
             self.ctx.decode(&mut batch).map_err(|e| format!("decode: {e}"))?;
+            pos += 1;
         }
+        // The reasoning is not the answer: hand back what follows `</think>`, and the thought
+        // separately so a caller can log it.
+        let (thought, answer) = match out.split_once(CLOSE_THINK) {
+            Some((t, a)) => (Some(t.trim_start_matches(OPEN_THINK).trim().to_string()), a.trim().to_string()),
+            None => (None, out.clone()),
+        };
         Ok(json!({
-            "content": out,
+            "content": answer,
+            "thinking": thought,
             "prompt_tokens": prompt_tokens,
             "gen_tokens": gen_tokens,
-            "truncated": gen_tokens >= max_tokens,
+            // A thought that never closed means the answer never started.
+            "truncated": gen_tokens >= max_tokens || (think && !out.contains(CLOSE_THINK)),
             "secs": t0.elapsed().as_secs_f64(),
         }))
     }
@@ -235,21 +279,35 @@ impl Vision<'_> {
             .eval_chunks(&self.mtmd, &self.ctx, 0, 0, self.n_batch as i32, true)
             .map_err(|e| format!("prompt eval: {e:?}"))?;
 
-        self.sample(prompt_tokens, n_past, schema, max_tokens, t0)
+        self.sample(prompt_tokens, n_past, schema, max_tokens, t0, false)
     }
 
-    fn complete(&mut self, prompt: &str, schema: Option<&Value>, max_tokens: usize) -> Result<Value, String> {
+    fn complete(
+        &mut self,
+        prompt: &str,
+        schema: Option<&Value>,
+        max_tokens: usize,
+        think: bool,
+    ) -> Result<Value, String> {
         let t0 = Instant::now();
         self.ctx.clear_kv_cache();
+        // Thinking opens the block and leaves it to the model to close; otherwise the block is
+        // pre-closed, which is what tells a Qwen-style model to answer straight away.
+        let head = if think { "<think>\n" } else { "<think>\n\n</think>\n\n" };
         let text = if prompt.starts_with("<|im_start|>") {
             if prompt.ends_with("<think>\n\n</think>\n\n") {
-                prompt.to_string()
+                if think {
+                    // Caller wants reasoning: reopen the block this prompt already closed.
+                    format!("{}{head}", prompt.trim_end_matches("<think>\n\n</think>\n\n"))
+                } else {
+                    prompt.to_string()
+                }
             } else if prompt.ends_with("<|im_start|>assistant\n") {
-                format!("{prompt}<think>\n\n</think>\n\n")
+                format!("{prompt}{head}")
             } else if prompt.ends_with("<|im_start|>assistant") {
-                format!("{prompt}\n<think>\n\n</think>\n\n")
+                format!("{prompt}\n{head}")
             } else {
-                format!("{prompt}\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+                format!("{prompt}\n<|im_start|>assistant\n{head}")
             }
         } else {
             format_prompt_with_template(self.model, prompt)
@@ -263,7 +321,7 @@ impl Vision<'_> {
             .eval_chunks(&self.mtmd, &self.ctx, 0, 0, self.n_batch as i32, true)
             .map_err(|e| format!("prompt eval: {e:?}"))?;
 
-        self.sample(prompt_tokens, n_past, schema, max_tokens, t0)
+        self.sample(prompt_tokens, n_past, schema, max_tokens, t0, think)
     }
 }
 
@@ -421,7 +479,9 @@ fn run() -> Result<(), String> {
                 (_, None) => Err("describe needs image".into()),
             },
             "complete" => match (&mut vision, &req.prompt) {
-                (Some(v), Some(prompt)) => v.complete(prompt, req.schema.as_ref(), req.max_tokens.unwrap_or(2048)),
+                (Some(v), Some(prompt)) => {
+                    v.complete(prompt, req.schema.as_ref(), req.max_tokens.unwrap_or(2048), req.think.unwrap_or(false))
+                }
                 (None, _) => Err("vision/llm model not loaded".into()),
                 (_, None) => Err("complete needs prompt".into()),
             },

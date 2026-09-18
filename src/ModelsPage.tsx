@@ -145,9 +145,12 @@ function CliAgentFields({
 function LocalRuntimeFields({
   cfg,
   onPatch,
+  thinkHint,
 }: {
   cfg: VisionSettings;
   onPatch: (p: VisionSettingsPatch) => void;
+  /** Why thinking is or isn't worth its cost for this capability. */
+  thinkHint: string;
 }) {
   return (
     <div className="settings-fields">
@@ -182,6 +185,13 @@ function LocalRuntimeFields({
           <option value="on">on</option>
           <option value="off">off</option>
         </select>
+      </div>
+      <div className="settings-field">
+        <label>Think first</label>
+        <input type="checkbox" checked={cfg.think} onChange={(e) => onPatch({ think: e.currentTarget.checked })} />
+        <span className="muted small">
+          {thinkHint}
+        </span>
       </div>
     </div>
   );
@@ -713,7 +723,11 @@ export default function ModelsPage() {
           )}
 
           {(visionBackend === "auto" || visionBackend === "local") && (
-            <LocalRuntimeFields cfg={ai.vision} onPatch={(v) => applyPatch({ vision: v })} />
+            <LocalRuntimeFields
+              cfg={ai.vision}
+              onPatch={(v) => applyPatch({ vision: v })}
+              thinkHint="slower — this runs once per keyframe, so it is usually off"
+            />
           )}
 
           {visionProbe && (
@@ -857,7 +871,11 @@ export default function ModelsPage() {
                   <span className="muted small">Download it in the table above.</span>
                 </div>
               </div>
-              <LocalRuntimeFields cfg={ai.chat_model} onPatch={(v) => applyPatch({ chat_model: v })} />
+              <LocalRuntimeFields
+                cfg={ai.chat_model}
+                onPatch={(v) => applyPatch({ chat_model: v })}
+                thinkHint="a few calls per script — reasoning makes a noticeably better edit"
+              />
             </>
           )}
 

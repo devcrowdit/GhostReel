@@ -367,6 +367,7 @@ struct VisionSettingsView {
     ctx_tokens: u32,
     kv_cache: String,
     flash_attn: String,
+    think: bool,
     cli: CliSettingsView,
 }
 
@@ -417,6 +418,7 @@ struct VisionSettingsPatch {
     ctx_tokens: Option<u32>,
     kv_cache: Option<String>,
     flash_attn: Option<String>,
+    think: Option<bool>,
     cli: Option<CliSettingsPatch>,
 }
 
@@ -480,6 +482,7 @@ fn llm_view(c: &ghostreel_core::config::VisionConfig) -> VisionSettingsView {
         ctx_tokens: c.ctx_tokens,
         kv_cache: c.kv_cache.clone(),
         flash_attn: c.flash_attn.clone(),
+        think: c.think,
         cli: CliSettingsView {
             tool: c.cli.tool.clone(),
             command: c.cli.command.clone(),
@@ -532,6 +535,9 @@ fn apply_llm_patch(
     }
     if let Some(fa) = v.flash_attn {
         cfg.flash_attn = fa;
+    }
+    if let Some(t) = v.think {
+        cfg.think = t;
     }
     if let Some(c) = v.cli {
         if let Some(t) = c.tool {

@@ -392,104 +392,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
                 ConfigAction::Set { key, value } => {
                     let mut cfg = Config::load(&paths.config_file).unwrap_or_default();
-                    let parse_backend = |val: &str| -> anyhow::Result<ghostreel_core::config::Backend> {
-                        match val.to_lowercase().as_str() {
-                            "auto" => Ok(ghostreel_core::config::Backend::Auto),
-                            "local" => Ok(ghostreel_core::config::Backend::Local),
-                            "server" => Ok(ghostreel_core::config::Backend::Server),
-                            "cli" => Ok(ghostreel_core::config::Backend::Cli),
-                            other => bail!("invalid backend '{other}'; expected 'auto', 'local', 'server', or 'cli'"),
-                        }
-                    };
-                    // vision.* = frame descriptions, chat_model.* = the script chat.
-                    let (section, field) = key.split_once('.').unwrap_or((key.as_str(), ""));
-                    if matches!(section, "vision" | "chat_model" | "chat-model")
-                        && matches!(
-                            field,
-                            "backend" | "url" | "model" | "local_model" | "ctx_tokens" | "kv_cache" | "flash_attn"
-                        )
-                    {
-                        let mut llm = if section == "vision" { cfg.vision.clone() } else { cfg.chat_model() };
-                        match field {
-                            "backend" => llm.backend = parse_backend(&value)?,
-                            "url" => llm.url = value.clone(),
-                            "model" => llm.model = value.clone(),
-                            "local_model" => llm.local_model = value.clone(),
-                            "ctx_tokens" => {
-                                llm.ctx_tokens =
-                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
-                            }
-                            "kv_cache" => llm.kv_cache = value.clone(),
-                            _ => llm.flash_attn = value.clone(),
-                        }
-                        llm.validate(section).map_err(|e| anyhow::anyhow!("{e}"))?;
-                        if section == "vision" {
-                            cfg.vision = llm;
-                        } else {
-                            cfg.chat_model = Some(llm);
-                        }
-                        cfg.save(&paths.config_file)?;
-                        println!("{key} = {value:?}");
-                        return Ok(ExitCode::SUCCESS);
-                    }
-                    // vision.cli.* and chat_model.cli.* keys.
-                    let (section2, rest) = key.split_once('.').unwrap_or(("", ""));
-                    let (subsection, cli_field) = rest.split_once('.').unwrap_or(("", ""));
-                    if matches!(section2, "vision" | "chat_model" | "chat-model")
-                        && subsection == "cli"
-                        && matches!(
-                            cli_field,
-                            "tool" | "command" | "model" | "timeout_secs" | "concurrency" | "extra_args"
-                        )
-                    {
-                        let mut llm = if section2 == "vision" { cfg.vision.clone() } else { cfg.chat_model() };
-                        match cli_field {
-                            "tool" => llm.cli.tool = value.clone(),
-                            "command" => llm.cli.command = value.clone(),
-                            "model" => llm.cli.model = value.clone(),
-                            "timeout_secs" => {
-                                llm.cli.timeout_secs =
-                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
-                            }
-                            "concurrency" => {
-                                llm.cli.concurrency =
-                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
-                            }
-                            _ => {
-                                bail!("{key}: extra_args is not settable via config set; edit the config file directly")
-                            }
-                        }
-                        llm.cli.validate(section2).map_err(|e| anyhow::anyhow!("{e}"))?;
-                        if section2 == "vision" {
-                            cfg.vision = llm;
-                        } else {
-                            cfg.chat_model = Some(llm);
-                        }
-                        cfg.save(&paths.config_file)?;
-                        println!("{key} = {value:?}");
-                        return Ok(ExitCode::SUCCESS);
-                    }
-                    match key.as_str() {
-                        "stt.backend" => cfg.stt.backend = parse_backend(&value)?,
-                        "stt.url" => cfg.stt.url = value.clone(),
-                        "embed.backend" | "embeddings.backend" => cfg.embed.backend = parse_backend(&value)?,
-                        "embed.url" | "embeddings.url" => cfg.embed.url = value.clone(),
-                        "frames.max_interval_s" => {
-                            let v: f64 = value
-                                .parse()
-                                .with_context(|| format!("frames.max_interval_s must be a number, got '{value}'"))?;
-                            if v < 1.0 || v > 60.0 {
-                                bail!("frames.max_interval_s must be between 1 and 60, got {v}");
-                            }
-                            cfg.frames.max_interval_s = v;
-                        }
-                        other => bail!(
-                            "unknown or unsupported config key '{other}'; supported keys: \
-                             vision.* and chat_model.* (backend, url, model, local_model, ctx_tokens, kv_cache, flash_attn), \
-                             vision.cli.* and chat_model.cli.* (tool, command, model, timeout_secs, concurrency), \
-                             stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s"
-                        ),
-                    }
+                    cfg.set_key(&key, &value).map_err(|e| anyhow::anyhow!("{e}"))?;
                     cfg.save(&paths.config_file)?;
                     println!("{key} = \"{value}\"");
                 }
@@ -949,6 +852,7 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 backend,
                 embedder,
                 system_prompt: Some(config.chat.system_prompt.clone()),
+                max_tool_rounds: config.chat_model().max_tool_rounds,
             };
 
             let t0 = std::time::Instant::now();
