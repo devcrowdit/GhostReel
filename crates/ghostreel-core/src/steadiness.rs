@@ -92,10 +92,14 @@ fn contrast(frame: &[u8], x0: usize, y0: usize) -> f64 {
 }
 
 /// Where the patch at (x0, y0) in `a` went in `b`, or `None` when the match is unreliable.
-fn match_patch(a: &[u8], b: &[u8], x0: usize, y0: usize) -> Option<(f64, f64)> {
-    let (mut best, mut bdx, mut bdy) = (f64::MAX, 0i32, 0i32);
-    for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
-        for dx in -SEARCH_RADIUS..=SEARCH_RADIUS {
+///
+/// The search is centred on `guess` — the camera's move on the previous pair. A pan is smooth,
+/// so what it did a frame ago is where to look now, and a fast one that would outrun a search
+/// centred on zero stays inside one centred on its own speed.
+fn match_patch(a: &[u8], b: &[u8], x0: usize, y0: usize, guess: (i32, i32)) -> Option<(f64, f64)> {
+    let (mut best, mut bdx, mut bdy) = (f64::MAX, guess.0, guess.1);
+    for dy in guess.1 - SEARCH_RADIUS..=guess.1 + SEARCH_RADIUS {
+        for dx in guess.0 - SEARCH_RADIUS..=guess.0 + SEARCH_RADIUS {
             let sx = x0 as i32 + dx;
             let sy = y0 as i32 + dy;
             if sx < 0 || sy < 0 || sx as usize + PATCH > ANALYSIS_W || sy as usize + PATCH > ANALYSIS_H {
@@ -118,7 +122,7 @@ fn match_patch(a: &[u8], b: &[u8], x0: usize, y0: usize) -> Option<(f64, f64)> {
         }
     }
     // A match pinned to the search edge means the motion outran it: the number is a floor.
-    if bdx.abs() == SEARCH_RADIUS || bdy.abs() == SEARCH_RADIUS {
+    if (bdx - guess.0).abs() == SEARCH_RADIUS || (bdy - guess.1).abs() == SEARCH_RADIUS {
         return None;
     }
     // A still camera must read as still. Sensor noise makes a neighbouring shift match a
@@ -138,9 +142,9 @@ fn match_patch(a: &[u8], b: &[u8], x0: usize, y0: usize) -> Option<(f64, f64)> {
         }
         cost as f64
     };
-    let zero = at(0, 0);
-    if (bdx != 0 || bdy != 0) && best > zero * (1.0 - ZERO_PRIOR) {
-        return Some((0.0, 0.0));
+    let zero = at(guess.0, guess.1);
+    if (bdx != guess.0 || bdy != guess.1) && best > zero * (1.0 - ZERO_PRIOR) {
+        return Some((guess.0 as f64, guess.1 as f64));
     }
     // Sub-pixel: fit a parabola through the cost on either side of the minimum. Whole-pixel
     // matching quantises to ±1 px, which at this size is most of the score of a steady shot.
@@ -213,7 +217,7 @@ pub fn patch_stats(a: &[u8], b: &[u8]) -> (usize, usize) {
         let mut x0 = PATCH / 2;
         while x0 + PATCH + PATCH / 2 <= ANALYSIS_W {
             if contrast(a, x0, y0) >= MIN_CONTRAST
-                && let Some((dx, dy)) = match_patch(a, b, x0, y0)
+                && let Some((dx, dy)) = match_patch(a, b, x0, y0, (0, 0))
             {
                 let (px, py) = ((x0 + PATCH / 2) as f64, (y0 + PATCH / 2) as f64);
                 pairs.push(((px, py), (px + dx, py + dy)));
@@ -241,13 +245,23 @@ pub fn patch_stats(a: &[u8], b: &[u8]) -> (usize, usize) {
 
 /// The camera's movement between two frames, or `None` when too little could be matched.
 pub fn motion_between(a: &[u8], b: &[u8]) -> Option<Motion> {
+    motion_between_from(a, b, (0, 0))
+}
+
+/// Share of matched patches that must agree with the consensus. Below it, most of the frame is
+/// moving on its own — someone walking through, a close-up — and the camera's move is not
+/// knowable from this pair; better to say so than to fit whatever is left.
+const MIN_INLIER_SHARE: f64 = 0.5;
+
+/// [`motion_between`] searching around the previous pair's move.
+pub fn motion_between_from(a: &[u8], b: &[u8], guess: (i32, i32)) -> Option<Motion> {
     let mut pairs: Vec<((f64, f64), (f64, f64))> = Vec::new();
     let mut y0 = PATCH / 2;
     while y0 + PATCH + PATCH / 2 <= ANALYSIS_H {
         let mut x0 = PATCH / 2;
         while x0 + PATCH + PATCH / 2 <= ANALYSIS_W {
             if contrast(a, x0, y0) >= MIN_CONTRAST
-                && let Some((dx, dy)) = match_patch(a, b, x0, y0)
+                && let Some((dx, dy)) = match_patch(a, b, x0, y0, guess)
             {
                 let (px, py) = ((x0 + PATCH / 2) as f64, (y0 + PATCH / 2) as f64);
                 pairs.push(((px, py), (px + dx, py + dy)));
@@ -256,6 +270,7 @@ pub fn motion_between(a: &[u8], b: &[u8]) -> Option<Motion> {
         }
         y0 += PATCH;
     }
+    let matched = pairs.len();
     // The camera moves every patch the same way; a person moves only theirs. Take the median
     // motion as the camera's and drop what disagrees with it before fitting anything — a
     // least-squares fit on the raw set would be pulled toward whoever fills the most patches.
@@ -269,7 +284,7 @@ pub fn motion_between(a: &[u8], b: &[u8]) -> Option<Motion> {
     let mdx = median_of(&mut pairs.iter().map(|(f, t)| t.0 - f.0).collect());
     let mdy = median_of(&mut pairs.iter().map(|(f, t)| t.1 - f.1).collect());
     pairs.retain(|(f, t)| ((t.0 - f.0) - mdx).abs() <= CONSENSUS_PX && ((t.1 - f.1) - mdy).abs() <= CONSENSUS_PX);
-    if pairs.len() < MIN_INLIERS {
+    if pairs.len() < MIN_INLIERS || (pairs.len() as f64) < MIN_INLIER_SHARE * matched as f64 {
         return None;
     }
     // Then fit, throw out what disagrees with the fit, fit again.
@@ -399,6 +414,7 @@ async fn decode_motions(ffmpeg: &Path, video: &Path, hwaccel: Option<&str>) -> R
     let mut prev: Option<Vec<u8>> = None;
     let mut cur = vec![0u8; size];
     let mut motions: Vec<Option<Motion>> = Vec::new();
+    let mut guess = (0i32, 0i32);
     loop {
         match stdout.read_exact(&mut cur).await {
             Ok(_) => {}
@@ -406,7 +422,10 @@ async fn decode_motions(ffmpeg: &Path, video: &Path, hwaccel: Option<&str>) -> R
             Err(e) => return Err(Error::Vision(format!("ffmpeg read: {e}"))),
         }
         if let Some(p) = &prev {
-            motions.push(motion_between(p, &cur));
+            let m = motion_between_from(p, &cur, guess);
+            // Look where the camera was last going; after a miss, start from rest again.
+            guess = m.map(|m| (m.dx.round() as i32, m.dy.round() as i32)).unwrap_or((0, 0));
+            motions.push(m);
         }
         prev = Some(std::mem::replace(&mut cur, vec![0u8; size]));
     }
