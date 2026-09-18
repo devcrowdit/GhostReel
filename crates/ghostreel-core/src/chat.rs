@@ -1759,7 +1759,7 @@ pub async fn run_turn(
 
             raw_reply = last_assistant_text;
         }
-        ChatBackend::Local { helper, .. } => {
+        ChatBackend::Local { helper, ctx_tokens } => {
             let mut transcript = format!("<|im_start|>system\n{sys_prompt}<|im_end|>\n");
             for pm in &prior_messages {
                 if pm.role == "user" || pm.role == "assistant" {
@@ -1767,6 +1767,10 @@ pub async fn run_turn(
                 }
             }
             transcript.push_str(&format!("<|im_start|>user\n{message}<|im_end|>\n"));
+
+            // A full script's JSON is far longer than a tool action, so the draft call gets its
+            // own budget out of the configured context rather than the default.
+            let script_token_budget = (*ctx_tokens as usize / 4).clamp(crate::vision::DEFAULT_COMPLETE_TOKENS, 8192);
 
             let mut tool_rounds = 0;
             let mut empty_searches = 0usize;
@@ -1834,10 +1838,28 @@ pub async fn run_turn(
             if parsed_script.is_none() {
                 on_event(ChatEvent::Drafting);
                 transcript.push_str("<|im_start|>user\nProduce the final script action.<|im_end|>\n");
-                let final_str = helper.complete(&transcript, Some(local_final_action_schema())).await?;
-                if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
-                    script.fill_from_project(&project);
-                    parsed_script = Some(script);
+                let final_str = helper
+                    .complete_limited(&transcript, Some(local_final_action_schema()), script_token_budget)
+                    .await?;
+                // Failing to parse here used to leave `parsed_script` as None, which surfaced as
+                // the bland "unable to assemble a script" reply with no hint of what went wrong —
+                // the same silence a mid-loop parse failure is loud about.
+                match serde_json::from_str::<LocalAction>(&final_str) {
+                    Ok(LocalAction::Final { mut script }) => {
+                        script.fill_from_project(&project);
+                        parsed_script = Some(script);
+                    }
+                    Ok(LocalAction::Tool { .. }) => {
+                        return Err(Error::Invalid(
+                            "the local model asked for another tool instead of drafting the script".into(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(Error::Invalid(format!(
+                            "the local model's final script was not valid JSON: {e}: {}",
+                            final_str.chars().take(200).collect::<String>()
+                        )));
+                    }
                 }
             }
 

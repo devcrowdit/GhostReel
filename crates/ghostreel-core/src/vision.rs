@@ -320,18 +320,40 @@ impl LocalLlm {
     }
 
     pub async fn complete(&mut self, prompt: &str, schema: Option<Value>) -> Result<String, Error> {
+        self.complete_limited(prompt, schema, DEFAULT_COMPLETE_TOKENS).await
+    }
+
+    /// `complete` with an explicit output budget. A whole script's JSON runs far past the default,
+    /// and the helper simply stops emitting at the cap — mid-object, so the JSON never parses.
+    /// The helper reports that as `truncated`; turn it into an error instead of handing back a
+    /// fragment the caller will fail to parse for no stated reason.
+    pub async fn complete_limited(
+        &mut self,
+        prompt: &str,
+        schema: Option<Value>,
+        max_tokens: usize,
+    ) -> Result<String, Error> {
         let mut req = json!({
             "cmd": "complete",
             "prompt": prompt,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
         });
         if let Some(s) = schema {
             req["schema"] = s;
         }
         let v = self.request(req).await?;
+        if v["truncated"].as_bool().unwrap_or(false) {
+            return Err(Error::Vision(format!(
+                "the local model hit its {max_tokens}-token output limit and the answer is cut off; \
+                 raise chat_model.ctx_tokens or ask for a shorter script"
+            )));
+        }
         Ok(v["content"].as_str().unwrap_or_default().to_string())
     }
 }
+
+/// Output budget for a plain `complete` call: enough for a tool action or a short answer.
+pub const DEFAULT_COMPLETE_TOKENS: usize = 2048;
 
 pub enum Describer {
     Server(ServerVision),
@@ -475,6 +497,53 @@ done
         assert_eq!(d.objects, vec!["cat"]);
         let e = llm.embed(&["a".into(), "b".into()]).await.unwrap();
         assert_eq!(e, vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_truncated_completion_is_an_error_not_a_fragment() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let helper = tmp.path().join("llm");
+        // Fake helper: echoes back the requested budget and reports the answer as cut off.
+        std::fs::write(
+            &helper,
+            r#"#!/bin/sh
+echo '{"ready":true,"vision":true,"embed_dim":3}'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  mt=$(printf '%s' "$line" | sed 's/.*"max_tokens":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"cmd":"complete"'*)
+      if [ "$mt" -ge 4096 ]; then
+        printf '{"id":%s,"ok":true,"content":"{\\"done\\":true}","truncated":false}\n' "$id"
+      else
+        printf '{"id":%s,"ok":true,"content":"{\\"beats\\":[{\\"narr","truncated":true}\n' "$id"
+      fi ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let models = LocalModels {
+            helper,
+            vision: Some(("m".into(), "p".into())),
+            embed: None,
+            cpu: false,
+            runtime: Default::default(),
+        };
+        let mut llm = LocalLlm::start(&models).await.unwrap();
+
+        // Small budget: the helper cuts the JSON off. That must not come back as a fragment.
+        let err = llm.complete_limited("prompt", None, 2048).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "got: {msg}");
+        assert!(msg.contains("2048"), "got: {msg}");
+
+        // A budget big enough for the whole answer succeeds.
+        let ok = llm.complete_limited("prompt", None, 4096).await.unwrap();
+        assert_eq!(ok, r#"{"done":true}"#);
     }
 
     #[cfg(unix)]
