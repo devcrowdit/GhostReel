@@ -20,6 +20,8 @@ import {
   type ModelStatus,
   type ModelsStatusView,
   type Resolution,
+  type VisionSettings,
+  type VisionSettingsPatch,
 } from "./api";
 import { useQueue } from "./useQueue";
 
@@ -52,6 +54,52 @@ interface SegmentedProps {
   value: Backend;
   onChange: (v: Backend) => void;
 }
+/** Context window, KV cache and flash attention of one local helper. */
+function LocalRuntimeFields({
+  cfg,
+  onPatch,
+}: {
+  cfg: VisionSettings;
+  onPatch: (p: VisionSettingsPatch) => void;
+}) {
+  return (
+    <div className="settings-fields">
+      <div className="settings-field">
+        <label>Context window</label>
+        <input
+          type="number"
+          min={2048}
+          max={131072}
+          step={2048}
+          style={{ width: "7em" }}
+          defaultValue={cfg.ctx_tokens}
+          onChange={(e) => {
+            const v = Number(e.currentTarget.value);
+            if (v >= 2048 && v <= 131072) onPatch({ ctx_tokens: v });
+          }}
+        />
+        <span className="muted small">tokens · more room for the model, more VRAM</span>
+      </div>
+      <div className="settings-field">
+        <label>KV cache</label>
+        <select value={cfg.kv_cache} onChange={(e) => onPatch({ kv_cache: e.currentTarget.value })}>
+          <option value="q4_0">q4_0 — ~4× the context per GB</option>
+          <option value="q8_0">q8_0 — balanced</option>
+          <option value="f16">f16 — best quality, 4× the VRAM</option>
+        </select>
+      </div>
+      <div className="settings-field">
+        <label>Flash attention</label>
+        <select value={cfg.flash_attn} onChange={(e) => onPatch({ flash_attn: e.currentTarget.value })}>
+          <option value="auto">auto</option>
+          <option value="on">on</option>
+          <option value="off">off</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function BackendSegmented({ value, onChange }: SegmentedProps) {
   const opts: { label: string; v: Backend }[] = [
     { label: "Auto", v: "auto" },
@@ -306,6 +354,7 @@ export default function ModelsPage() {
 
   const sttProbe = resolution ? probeLabel(resolution.stt) : null;
   const visionProbe = resolution ? probeLabel(resolution.vision) : null;
+  const chatProbe = resolution?.chat ? probeLabel(resolution.chat) : null;
   const embedProbe = resolution ? probeLabel(resolution.embeddings) : null;
 
   // ─── render ─────────────────────────────────────────────────────────────────
@@ -481,8 +530,11 @@ export default function ModelsPage() {
         </table>
       </div>
 
-      {/* ── Frame descriptions & chat (vision) ── */}
-      <h2>Frame descriptions &amp; chat</h2>
+      {/* ── Frame descriptions (indexing) ── */}
+      <h2>Frame descriptions</h2>
+      <p className="muted small">
+        Describes keyframes while indexing: a short prompt and one image, run once per keyframe.
+      </p>
 
       {ai && (
         <div className="card ai-settings-card">
@@ -567,6 +619,10 @@ export default function ModelsPage() {
             </div>
           )}
 
+          {visionBackend !== "server" && (
+            <LocalRuntimeFields cfg={ai.vision} onPatch={(v) => applyPatch({ vision: v })} />
+          )}
+
           {visionProbe && (
             <div className="probe-status">
               <span className={visionProbe.cls}>{visionProbe.text}</span>
@@ -638,6 +694,78 @@ export default function ModelsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* ── Script chat ── */}
+      <h2>Script chat</h2>
+      <p className="muted small">
+        Drafts and revises scripts. It reads search results and transcripts, so it wants a much bigger context
+        window than the frame descriptions do.
+      </p>
+
+      {ai && (
+        <div className="card ai-settings-card">
+          <div>
+            <BackendSegmented
+              value={ai.chat_model.backend}
+              onChange={(b) => applyPatch({ chat_model: { backend: b } })}
+            />
+          </div>
+
+          {(ai.chat_model.backend === "server" || ai.chat_model.backend === "auto") && (
+            <div className="settings-fields">
+              <div className="settings-field">
+                <label>URL</label>
+                <input
+                  type="text"
+                  defaultValue={ai.chat_model.url}
+                  placeholder="http://127.0.0.1:8089"
+                  onChange={(e) => debouncedUrlPatch("chat_model.url", { chat_model: { url: e.currentTarget.value } })}
+                />
+              </div>
+              <div className="settings-field">
+                <label>Model</label>
+                <input
+                  type="text"
+                  defaultValue={ai.chat_model.model}
+                  placeholder="— server default —"
+                  onChange={(e) =>
+                    debouncedUrlPatch("chat_model.model", { chat_model: { model: e.currentTarget.value } })
+                  }
+                />
+              </div>
+            </div>
+          )}
+
+          {ai.chat_model.backend !== "server" && (
+            <>
+              <div className="settings-fields">
+                <div className="settings-field">
+                  <label>Model on this computer</label>
+                  <select
+                    value={ai.chat_model.local_model}
+                    onChange={(e) => applyPatch({ chat_model: { local_model: e.currentTarget.value } })}
+                  >
+                    {visionModels.map((m) => (
+                      <option key={m.entry.id} value={m.entry.id}>
+                        {m.entry.id}
+                        {m.installed_path ? "" : " (not downloaded)"}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="muted small">Download it in the table above.</span>
+                </div>
+              </div>
+              <LocalRuntimeFields cfg={ai.chat_model} onPatch={(v) => applyPatch({ chat_model: v })} />
+            </>
+          )}
+
+          {chatProbe && (
+            <div className="probe-status">
+              <span className={chatProbe.cls}>{chatProbe.text}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Search embeddings ── */}
       <h2>Search embeddings</h2>

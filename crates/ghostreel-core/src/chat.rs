@@ -71,8 +71,16 @@ pub struct TurnResult {
 
 /// Backends for script chat.
 pub enum ChatBackend {
-    Server { url: String, model: String, api_key: String },
-    Local { helper: Box<crate::vision::LocalLlm> },
+    Server {
+        url: String,
+        model: String,
+        api_key: String,
+    },
+    Local {
+        helper: Box<crate::vision::LocalLlm>,
+        /// The helper's context window: tool results are trimmed to a fraction of it.
+        ctx_tokens: u32,
+    },
 }
 
 impl ChatBackend {
@@ -87,7 +95,7 @@ impl ChatBackend {
             crate::runtime::VisionSetup::Server(s) => {
                 Ok(ChatBackend::Server { url: s.url.clone(), model: s.model.clone(), api_key: s.api_key.clone() })
             }
-            crate::runtime::VisionSetup::Local { helper, models_dir, model, mmproj, found } => {
+            crate::runtime::VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime } => {
                 let mut paths = Vec::with_capacity(2);
                 for spec in [model, mmproj] {
                     if let Some(p) = found.iter().find(|p| p.file_name().is_some_and(|n| n == spec.file_name.as_str()))
@@ -98,9 +106,15 @@ impl ChatBackend {
                     }
                 }
                 let vision = Some((paths[0].clone(), paths[1].clone()));
-                let models = crate::vision::LocalModels { helper: helper.clone(), vision, embed: None, cpu: false };
+                let models = crate::vision::LocalModels {
+                    helper: helper.clone(),
+                    vision,
+                    embed: None,
+                    cpu: false,
+                    runtime: runtime.clone(),
+                };
                 let llm = crate::vision::LocalLlm::start(&models).await?;
-                Ok(ChatBackend::Local { helper: Box::new(llm) })
+                Ok(ChatBackend::Local { helper: Box::new(llm), ctx_tokens: runtime.ctx_tokens })
             }
             crate::runtime::VisionSetup::Unavailable(why) => {
                 Err(Error::Vision(format!("vision/chat model unavailable: {why}")))
@@ -1475,7 +1489,8 @@ pub async fn run_turn(
     let mut sys_prompt = build_system_prompt(&project, latest_script_json.as_deref(), ctx.system_prompt.as_deref());
     let reference_chars = match ctx.backend {
         ChatBackend::Server { .. } => 6000,
-        ChatBackend::Local { .. } => 1200,
+        // Roughly an eighth of the window (~4 chars per token), so results leave room for the draft.
+        ChatBackend::Local { ctx_tokens, .. } => ((ctx_tokens as usize) * 4 / 8).clamp(1500, 12000),
     };
     sys_prompt.push_str(&reference_edits_text(&ctx.db, project_id, reference_chars));
     // A length the user states ("60 second promo", "2 minutos") wins over whatever the model sets.
@@ -1700,7 +1715,7 @@ pub async fn run_turn(
 
             raw_reply = last_assistant_text;
         }
-        ChatBackend::Local { helper } => {
+        ChatBackend::Local { helper, .. } => {
             let mut transcript = format!("<|im_start|>system\n{sys_prompt}<|im_end|>\n");
             for pm in &prior_messages {
                 if pm.role == "user" || pm.role == "assistant" {

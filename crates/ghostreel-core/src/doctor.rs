@@ -52,7 +52,12 @@ pub struct Report {
     pub ffmpeg: Tool,
     pub ffprobe: Tool,
     pub gpu: Vec<Gpu>,
+    /// Frame descriptions.
     pub vision: Resolution,
+    /// Script chat (its own backend and model settings).
+    pub chat: Resolution,
+    /// The local context window / KV cache of both, for the report.
+    pub local_runtime: LocalRuntimeInfo,
     pub embeddings: Resolution,
     pub stt: Resolution,
     pub models: Vec<ModelFile>,
@@ -146,11 +151,27 @@ pub async fn run(paths: &Paths) -> Report {
         ffmpeg,
         ffprobe,
         gpu,
-        vision: probe::resolve(config.vision.backend, vp),
+        vision: probe::resolve(config.vision.backend, vp.clone()),
+        chat: probe::resolve(config.chat_model().backend, vp),
+        local_runtime: LocalRuntimeInfo {
+            describe_ctx: config.vision.ctx_tokens,
+            describe_kv: config.vision.kv_cache.clone(),
+            chat_ctx: config.chat_model().ctx_tokens,
+            chat_kv: config.chat_model().kv_cache.clone(),
+        },
         embeddings: probe::resolve(config.embed.backend, ep),
         stt: probe::resolve(config.stt.backend, sp),
         models,
     }
+}
+
+/// Local helper settings shown by `doctor`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalRuntimeInfo {
+    pub describe_ctx: u32,
+    pub describe_kv: String,
+    pub chat_ctx: u32,
+    pub chat_kv: String,
 }
 
 fn db_status(path: &Path) -> DbStatus {

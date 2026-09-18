@@ -364,6 +364,9 @@ struct VisionSettingsView {
     model: String,
     local_model: String,
     api_key_set: bool,
+    ctx_tokens: u32,
+    kv_cache: String,
+    flash_attn: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -382,7 +385,10 @@ struct EmbedSettingsView {
 
 #[derive(Serialize, Deserialize)]
 struct AiSettingsView {
+    /// Frame descriptions (indexing).
     vision: VisionSettingsView,
+    /// Script chat: its own model settings, with a bigger context window by default.
+    chat_model: VisionSettingsView,
     stt: SttSettingsView,
     embed: EmbedSettingsView,
     frames: FrameSettingsView,
@@ -395,6 +401,9 @@ struct VisionSettingsPatch {
     model: Option<String>,
     local_model: Option<String>,
     api_key: Option<String>,
+    ctx_tokens: Option<u32>,
+    kv_cache: Option<String>,
+    flash_attn: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -414,6 +423,7 @@ struct EmbedSettingsPatch {
 #[derive(Deserialize, Default)]
 struct AiSettingsPatch {
     vision: Option<VisionSettingsPatch>,
+    chat_model: Option<VisionSettingsPatch>,
     stt: Option<SttSettingsPatch>,
     embed: Option<EmbedSettingsPatch>,
     frames: Option<FrameSettingsPatch>,
@@ -432,8 +442,61 @@ struct FrameSettingsPatch {
 #[derive(Serialize)]
 struct BackendsResolutionView {
     vision: Resolution,
+    chat: Resolution,
     embeddings: Resolution,
     stt: Resolution,
+}
+
+fn llm_view(c: &ghostreel_core::config::VisionConfig) -> VisionSettingsView {
+    VisionSettingsView {
+        backend: c.backend.to_string(),
+        url: c.url.clone(),
+        model: c.model.clone(),
+        local_model: c.local_model.clone(),
+        api_key_set: !c.api_key.trim().is_empty(),
+        ctx_tokens: c.ctx_tokens,
+        kv_cache: c.kv_cache.clone(),
+        flash_attn: c.flash_attn.clone(),
+    }
+}
+
+/// Apply a patch to one capability's model settings.
+fn apply_llm_patch(
+    cfg: &mut ghostreel_core::config::VisionConfig,
+    v: VisionSettingsPatch,
+    section: &str,
+    parse_backend: impl Fn(&str) -> CmdResult<Backend>,
+) -> CmdResult<()> {
+    if let Some(b) = v.backend {
+        cfg.backend = parse_backend(&b)?;
+    }
+    if let Some(url) = v.url {
+        cfg.url = url;
+    }
+    if let Some(model) = v.model {
+        cfg.model = model;
+    }
+    if let Some(lm) = v.local_model {
+        if models::vision_pair(&lm).is_none()
+            && !models::find_entry(&lm).is_some_and(|e| e.kind == models::ModelKind::Vision)
+        {
+            return Err(format!("unknown local vision model '{lm}'"));
+        }
+        cfg.local_model = lm;
+    }
+    if let Some(key) = v.api_key {
+        cfg.api_key = key;
+    }
+    if let Some(ctx) = v.ctx_tokens {
+        cfg.ctx_tokens = ctx;
+    }
+    if let Some(kv) = v.kv_cache {
+        cfg.kv_cache = kv;
+    }
+    if let Some(fa) = v.flash_attn {
+        cfg.flash_attn = fa;
+    }
+    cfg.validate(section)
 }
 
 #[tauri::command]
@@ -441,13 +504,8 @@ fn get_ai_settings() -> CmdResult<AiSettingsView> {
     let p = paths()?;
     let config = Config::load(&p.config_file).unwrap_or_default();
     Ok(AiSettingsView {
-        vision: VisionSettingsView {
-            backend: config.vision.backend.to_string(),
-            url: config.vision.url,
-            model: config.vision.model,
-            local_model: config.vision.local_model,
-            api_key_set: !config.vision.api_key.trim().is_empty(),
-        },
+        vision: llm_view(&config.vision),
+        chat_model: llm_view(&config.chat_model()),
         stt: SttSettingsView { backend: config.stt.backend.to_string(), url: config.stt.url, model: config.stt.model },
         embed: EmbedSettingsView {
             backend: config.embed.backend.to_string(),
@@ -473,26 +531,13 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
     }
 
     if let Some(v) = patch.vision {
-        if let Some(b) = v.backend {
-            config.vision.backend = parse_backend(&b)?;
-        }
-        if let Some(url) = v.url {
-            config.vision.url = url;
-        }
-        if let Some(model) = v.model {
-            config.vision.model = model;
-        }
-        if let Some(lm) = v.local_model {
-            if models::vision_pair(&lm).is_none()
-                && !models::find_entry(&lm).is_some_and(|e| e.kind == models::ModelKind::Vision)
-            {
-                return Err(format!("unknown local vision model '{lm}'"));
-            }
-            config.vision.local_model = lm;
-        }
-        if let Some(key) = v.api_key {
-            config.vision.api_key = key;
-        }
+        apply_llm_patch(&mut config.vision, v, "vision", parse_backend)?;
+    }
+
+    if let Some(v) = patch.chat_model {
+        let mut cfg = config.chat_model();
+        apply_llm_patch(&mut cfg, v, "chat_model", parse_backend)?;
+        config.chat_model = Some(cfg);
     }
 
     if let Some(s) = patch.stt {
@@ -555,13 +600,8 @@ async fn set_ai_settings(patch: AiSettingsPatch, search_state: State<'_, SearchS
     config.save(&p.config_file).map_err(err)?;
 
     Ok(AiSettingsView {
-        vision: VisionSettingsView {
-            backend: config.vision.backend.to_string(),
-            url: config.vision.url,
-            model: config.vision.model,
-            local_model: config.vision.local_model,
-            api_key_set: !config.vision.api_key.trim().is_empty(),
-        },
+        vision: llm_view(&config.vision),
+        chat_model: llm_view(&config.chat_model()),
         stt: SttSettingsView { backend: config.stt.backend.to_string(), url: config.stt.url, model: config.stt.model },
         embed: EmbedSettingsView {
             backend: config.embed.backend.to_string(),
@@ -595,17 +635,25 @@ async fn probe_backends() -> CmdResult<BackendsResolutionView> {
             _ => Some(probe::embeddings(&client, &config.embed.url, &config.embed.model).await),
         }
     };
+    let chat_cfg = config.chat_model();
+    let chat_probe = async {
+        match chat_cfg.backend {
+            Backend::Local => None,
+            _ => Some(probe::vision(&client, &chat_cfg.url, &chat_cfg.model).await),
+        }
+    };
     let stt_probe = async {
         match config.stt.backend {
             Backend::Local => None,
             _ => Some(probe::stt(&client, &config.stt.url).await),
         }
     };
-    let (vision_p, embed_p, stt_p) = tokio::join!(vision_probe, embed_probe, stt_probe);
+    let (vision_p, chat_p, embed_p, stt_p) = tokio::join!(vision_probe, chat_probe, embed_probe, stt_probe);
     let vision = probe::resolve(config.vision.backend, vision_p);
+    let chat = probe::resolve(chat_cfg.backend, chat_p);
     let embeddings = probe::resolve(config.embed.backend, embed_p);
     let stt = probe::resolve(config.stt.backend, stt_p);
-    Ok(BackendsResolutionView { vision, embeddings, stt })
+    Ok(BackendsResolutionView { vision, chat, embeddings, stt })
 }
 
 #[tauri::command]

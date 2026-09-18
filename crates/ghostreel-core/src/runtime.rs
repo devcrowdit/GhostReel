@@ -49,6 +49,8 @@ pub enum VisionSetup {
         model: ModelSpec,
         mmproj: ModelSpec,
         found: Vec<PathBuf>,
+        /// Context window / KV cache / flash attention for this capability.
+        runtime: crate::vision::HelperRuntime,
     },
     Unavailable(String),
 }
@@ -59,7 +61,12 @@ impl VisionSetup {
             VisionSetup::Server(s) => {
                 format!("{} @ {}", if s.model.is_empty() { "vision server" } else { &s.model }, s.url)
             }
-            VisionSetup::Local { model, .. } => format!("local {}", model.file_name),
+            VisionSetup::Local { model, runtime, .. } => {
+                format!(
+                    "local {} ({} ctx, kv {}, flash {})",
+                    model.file_name, runtime.ctx_tokens, runtime.kv_cache, runtime.flash_attn
+                )
+            }
             VisionSetup::Unavailable(why) => format!("unavailable: {why}"),
         }
     }
@@ -97,8 +104,14 @@ pub async fn start_embedder(
                 Some(p) => p.clone(),
                 None => models::download(spec, models_dir, on_download).await.map_err(|e| e.to_string())?,
             };
-            let models =
-                crate::vision::LocalModels { helper: helper.clone(), vision: None, embed: Some(path), cpu: true };
+            // Embeddings keep an f16 cache: the model is tiny and the vectors must stay comparable.
+            let models = crate::vision::LocalModels {
+                helper: helper.clone(),
+                vision: None,
+                embed: Some(path),
+                cpu: true,
+                runtime: crate::vision::HelperRuntime { kv_cache: "f16".into(), ..Default::default() },
+            };
             Embedder::local(&models).await.map_err(|e| e.to_string())
         }
     }
@@ -188,8 +201,17 @@ pub async fn resolve_embed(paths: &Paths, config: &Config) -> EmbedSetup {
     EmbedSetup::Local { helper, models_dir, spec, found }
 }
 
+/// Frame descriptions (indexing): `[vision]`.
 pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
-    let cfg = &config.vision;
+    resolve_llm(paths, config, &config.vision).await
+}
+
+/// Script chat: `[chat_model]`, or `[vision]` with a bigger window on older configs.
+pub async fn resolve_chat(paths: &Paths, config: &Config) -> VisionSetup {
+    resolve_llm(paths, config, &config.chat_model()).await
+}
+
+async fn resolve_llm(paths: &Paths, config: &Config, cfg: &crate::config::VisionConfig) -> VisionSetup {
     let probe = match cfg.backend {
         Backend::Local => None,
         _ => Some(probe::vision(&probe::probe_client(), &cfg.url, &cfg.model).await),
@@ -216,7 +238,7 @@ pub async fn resolve_vision(paths: &Paths, config: &Config) -> VisionSetup {
     let models_dir = models::effective_models_dir(paths, config);
     let roots = models::search_roots(&models_dir, &config.models.search_paths);
     let found = [&model, &mmproj].iter().filter_map(|s| models::find(&roots, &s.file_name)).collect();
-    VisionSetup::Local { helper, models_dir, model, mmproj, found }
+    VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime: cfg.into() }
 }
 
 pub async fn resolve_stt(paths: &Paths, config: &Config) -> SttSetup {

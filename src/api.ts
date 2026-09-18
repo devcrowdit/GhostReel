@@ -509,12 +509,19 @@ export interface ModelsStatusView {
 
 // ---- AI settings (backend per capability) ------------------------------------------------
 
+/** Model settings for one capability: frame descriptions, or the script chat. */
 export interface VisionSettings {
   backend: Backend;
   url: string;
   model: string;
   local_model: string;
   api_key_set: boolean;
+  /** Context window of the local helper, in tokens. */
+  ctx_tokens: number;
+  /** KV cache precision: f16 | q8_0 | q4_0 (q4_0 ≈ 4× the context per GB). */
+  kv_cache: string;
+  /** auto | on | off */
+  flash_attn: string;
 }
 
 export interface SttSettings {
@@ -534,7 +541,10 @@ export interface FrameSettings {
 }
 
 export interface AiSettings {
+  /** Frame descriptions (indexing). */
   vision: VisionSettings;
+  /** Script chat. */
+  chat_model: VisionSettings;
   stt: SttSettings;
   embed: EmbedSettings;
   frames: FrameSettings;
@@ -542,6 +552,8 @@ export interface AiSettings {
 
 export interface BackendsResolution {
   vision: Resolution;
+  /** Script chat (its own backend). */
+  chat: Resolution;
   embeddings: Resolution;
   stt: Resolution;
 }
@@ -552,6 +564,9 @@ export interface VisionSettingsPatch {
   model?: string;
   local_model?: string;
   api_key?: string;
+  ctx_tokens?: number;
+  kv_cache?: string;
+  flash_attn?: string;
 }
 
 export interface SttSettingsPatch {
@@ -572,6 +587,7 @@ export interface FrameSettingsPatch {
 
 export interface AiSettingsPatch {
   vision?: VisionSettingsPatch;
+  chat_model?: VisionSettingsPatch;
   stt?: SttSettingsPatch;
   embed?: EmbedSettingsPatch;
   frames?: FrameSettingsPatch;

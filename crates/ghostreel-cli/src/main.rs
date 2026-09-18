@@ -289,7 +289,9 @@ enum ConfigAction {
     Init,
     /// Set a configuration value.
     Set {
-        /// Key to set (e.g. vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s).
+        /// Key to set: vision.* (frame descriptions) or chat_model.* (script chat) with backend,
+        /// url, model, local_model, ctx_tokens, kv_cache, flash_attn; plus stt.backend, stt.url,
+        /// embed.backend, embed.url, frames.max_interval_s.
         key: String,
         /// Value to assign.
         value: String,
@@ -385,10 +387,38 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                             other => bail!("invalid backend '{other}'; expected 'auto', 'local', or 'server'"),
                         }
                     };
+                    // vision.* = frame descriptions, chat_model.* = the script chat.
+                    let (section, field) = key.split_once('.').unwrap_or((key.as_str(), ""));
+                    if matches!(section, "vision" | "chat_model" | "chat-model")
+                        && matches!(
+                            field,
+                            "backend" | "url" | "model" | "local_model" | "ctx_tokens" | "kv_cache" | "flash_attn"
+                        )
+                    {
+                        let mut llm = if section == "vision" { cfg.vision.clone() } else { cfg.chat_model() };
+                        match field {
+                            "backend" => llm.backend = parse_backend(&value)?,
+                            "url" => llm.url = value.clone(),
+                            "model" => llm.model = value.clone(),
+                            "local_model" => llm.local_model = value.clone(),
+                            "ctx_tokens" => {
+                                llm.ctx_tokens =
+                                    value.parse().with_context(|| format!("{key} must be a number, got '{value}'"))?
+                            }
+                            "kv_cache" => llm.kv_cache = value.clone(),
+                            _ => llm.flash_attn = value.clone(),
+                        }
+                        llm.validate(section).map_err(|e| anyhow::anyhow!("{e}"))?;
+                        if section == "vision" {
+                            cfg.vision = llm;
+                        } else {
+                            cfg.chat_model = Some(llm);
+                        }
+                        cfg.save(&paths.config_file)?;
+                        println!("{key} = {value:?}");
+                        return Ok(ExitCode::SUCCESS);
+                    }
                     match key.as_str() {
-                        "vision.backend" => cfg.vision.backend = parse_backend(&value)?,
-                        "vision.url" => cfg.vision.url = value.clone(),
-                        "vision.model" => cfg.vision.model = value.clone(),
                         "stt.backend" => cfg.stt.backend = parse_backend(&value)?,
                         "stt.url" => cfg.stt.url = value.clone(),
                         "embed.backend" | "embeddings.backend" => cfg.embed.backend = parse_backend(&value)?,
@@ -403,7 +433,9 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                             cfg.frames.max_interval_s = v;
                         }
                         other => bail!(
-                            "unknown or unsupported config key '{other}'; supported keys: vision.backend, vision.url, vision.model, stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s"
+                            "unknown or unsupported config key '{other}'; supported keys: \
+                             vision.* and chat_model.* (backend, url, model, local_model, ctx_tokens, kv_cache, flash_attn), \
+                             stt.backend, stt.url, embed.backend, embed.url, frames.max_interval_s"
                         ),
                     }
                     cfg.save(&paths.config_file)?;
@@ -848,7 +880,7 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
         ScriptAction::Chat { project, session, message } => {
             let p = db.require_project(&project)?;
             let config = Config::load(&paths.config_file)?;
-            let vision_setup = runtime::resolve_vision(paths, &config).await;
+            let vision_setup = runtime::resolve_chat(paths, &config).await;
             eprintln!("Chat model: {}", vision_setup.describe());
             let backend = ghostreel_core::chat::ChatBackend::from_vision_setup(&vision_setup).await?;
 
@@ -1319,7 +1351,12 @@ fn print_report(r: &Report) {
     }
 
     println!("\nAI backends");
-    print_backend("vision", &r.vision);
+    print_backend("frame descriptions", &r.vision);
+    print_backend("script chat", &r.chat);
+    println!(
+        "  local windows: descriptions {} tokens (kv {}), chat {} tokens (kv {})",
+        r.local_runtime.describe_ctx, r.local_runtime.describe_kv, r.local_runtime.chat_ctx, r.local_runtime.chat_kv
+    );
     print_backend("embeddings", &r.embeddings);
     print_backend("stt", &r.stt);
 

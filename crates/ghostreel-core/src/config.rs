@@ -42,6 +42,10 @@ impl std::fmt::Display for Backend {
     }
 }
 
+/// Settings for one model-using capability. Frame descriptions (`[vision]`) and the script chat
+/// (`[chat_model]`) each have their own: describing a keyframe is a short prompt plus one image run
+/// hundreds of times, while a script chat needs room for tool results and a whole draft, so they
+/// want different context windows even though both run the same helper binary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisionConfig {
@@ -53,7 +57,21 @@ pub struct VisionConfig {
     pub api_key: String,
     /// Local vision model catalog id (pair: model + projector). Default: "bonsai-27b".
     pub local_model: String,
+    /// Context window for the local helper, in tokens (2048–131072).
+    pub ctx_tokens: u32,
+    /// KV cache precision for the local helper: `f16`, `q8_0` or `q4_0`. `q4_0` holds roughly 4×
+    /// the context of `f16` in the same VRAM (what highllama runs with).
+    pub kv_cache: String,
+    /// Flash attention for the local helper: `auto`, `on` or `off`.
+    pub flash_attn: String,
 }
+
+/// Context window of the frame-description helper: a short prompt plus one image.
+pub const DESCRIBE_CTX_TOKENS: u32 = 8192;
+/// Context window of the script chat: tool results plus a whole draft.
+pub const CHAT_CTX_TOKENS: u32 = 32768;
+pub const KV_CACHE_KINDS: &[&str] = &["f16", "q8_0", "q4_0"];
+pub const FLASH_ATTN_KINDS: &[&str] = &["auto", "on", "off"];
 
 impl Default for VisionConfig {
     fn default() -> Self {
@@ -63,7 +81,33 @@ impl Default for VisionConfig {
             model: String::new(),
             api_key: String::new(),
             local_model: "bonsai-27b".into(),
+            ctx_tokens: DESCRIBE_CTX_TOKENS,
+            kv_cache: "q4_0".into(),
+            flash_attn: "auto".into(),
         }
+    }
+}
+
+impl VisionConfig {
+    pub fn validate(&self, section: &str) -> Result<(), String> {
+        if !(2048..=131_072).contains(&self.ctx_tokens) {
+            return Err(format!("{section}.ctx_tokens must be between 2048 and 131072, got {}", self.ctx_tokens));
+        }
+        if !KV_CACHE_KINDS.contains(&self.kv_cache.as_str()) {
+            return Err(format!(
+                "{section}.kv_cache must be one of {}, got '{}'",
+                KV_CACHE_KINDS.join(", "),
+                self.kv_cache
+            ));
+        }
+        if !FLASH_ATTN_KINDS.contains(&self.flash_attn.as_str()) {
+            return Err(format!(
+                "{section}.flash_attn must be one of {}, got '{}'",
+                FLASH_ATTN_KINDS.join(", "),
+                self.flash_attn
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -151,7 +195,12 @@ impl FramesConfig {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Frame descriptions (indexing).
     pub vision: VisionConfig,
+    /// Script chat. Absent in configs written before the split: it then follows `vision`, with the
+    /// chat's bigger context window.
+    #[serde(default)]
+    pub chat_model: Option<VisionConfig>,
     pub embed: EmbedConfig,
     pub stt: SttConfig,
     pub models: ModelsConfig,
@@ -160,6 +209,22 @@ pub struct Config {
 }
 
 impl Config {
+    /// The script chat's model settings: its own `[chat_model]` section, or the frame-description
+    /// settings with the chat's larger context window when the file predates the split.
+    pub fn chat_model(&self) -> VisionConfig {
+        match &self.chat_model {
+            Some(c) => c.clone(),
+            None => VisionConfig { ctx_tokens: CHAT_CTX_TOKENS, ..self.vision.clone() },
+        }
+    }
+
+    /// Check every section that has rules. Returns the first problem as a message.
+    pub fn validate(&self) -> Result<(), String> {
+        self.vision.validate("vision")?;
+        self.chat_model().validate("chat_model")?;
+        self.frames.validate()
+    }
+
     /// Load `path`, or defaults when the file does not exist.
     pub fn load(path: &Path) -> Result<Self, Error> {
         match std::fs::read_to_string(path) {
@@ -185,6 +250,49 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_and_chat_have_their_own_model_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Defaults: same model, different windows.
+        let cfg = Config::default();
+        assert_eq!(cfg.vision.ctx_tokens, DESCRIBE_CTX_TOKENS);
+        assert_eq!(cfg.chat_model().ctx_tokens, CHAT_CTX_TOKENS);
+        assert_eq!(cfg.chat_model().local_model, cfg.vision.local_model);
+        assert_eq!(cfg.vision.kv_cache, "q4_0");
+
+        // A file written before the split: the chat inherits vision's backend and model.
+        std::fs::write(
+            &path,
+            "[vision]\nbackend = \"server\"\nurl = \"http://x:1/v1\"\nlocal_model = \"qwen2.5-vl-3b\"\n",
+        )
+        .unwrap();
+        let old = Config::load(&path).unwrap();
+        let chat = old.chat_model();
+        assert_eq!(chat.backend, Backend::Server);
+        assert_eq!(chat.url, "http://x:1/v1");
+        assert_eq!(chat.local_model, "qwen2.5-vl-3b");
+        assert_eq!(chat.ctx_tokens, CHAT_CTX_TOKENS, "but with the chat's window");
+
+        // Once set, the two are independent and survive a roundtrip.
+        let mut cfg = Config::default();
+        cfg.vision.ctx_tokens = 4096;
+        cfg.chat_model = Some(VisionConfig { ctx_tokens: 65536, kv_cache: "q8_0".into(), ..VisionConfig::default() });
+        cfg.save(&path).unwrap();
+        let back = Config::load(&path).unwrap();
+        assert_eq!(back, cfg);
+        assert_eq!(back.vision.ctx_tokens, 4096);
+        assert_eq!(back.chat_model().ctx_tokens, 65536);
+        assert_eq!(back.chat_model().kv_cache, "q8_0");
+
+        // Validation.
+        assert!(VisionConfig { ctx_tokens: 1024, ..VisionConfig::default() }.validate("vision").is_err());
+        assert!(VisionConfig { kv_cache: "q2_k".into(), ..VisionConfig::default() }.validate("vision").is_err());
+        assert!(VisionConfig { flash_attn: "maybe".into(), ..VisionConfig::default() }.validate("chat_model").is_err());
+        assert!(back.validate().is_ok());
+    }
 
     #[test]
     fn missing_file_gives_defaults() {

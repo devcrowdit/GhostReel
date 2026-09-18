@@ -80,6 +80,12 @@ ffmpeg/ffprobe are bundled. On first start open **Models** and download what you
 GhostReel also picks up models you already have (GhostPen's whisper models, LM Studio) instead
 of downloading them again. The whole setup fits an **8 GB GPU** (RTX 3070).
 
+**Frame descriptions and the script chat are configured separately** (Models page, or `ghostreel config set
+vision.* / chat_model.*`): describing a keyframe is a short prompt plus one image, while the chat needs room for
+search results and a whole draft. Defaults: 8k context for descriptions, 32k for the chat, both with a `q4_0` KV
+cache and flash attention, which is what fits a 32k window on an 8 GB card (an `f16` cache would need 4 GB for the
+cache alone).
+
 ---
 
 ## Two ways to run the models

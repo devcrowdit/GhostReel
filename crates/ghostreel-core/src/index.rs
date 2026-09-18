@@ -974,7 +974,7 @@ async fn start_describer(
     match &rt.vision {
         VisionSetup::Server(s) => Ok(Describer::Server(s.clone())),
         VisionSetup::Unavailable(why) => Err(why.clone()),
-        VisionSetup::Local { helper, models_dir, model, mmproj, found } => {
+        VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime } => {
             let mut paths = Vec::new();
             for spec in [model, mmproj] {
                 if let Some(p) = found.iter().find(|p| p.file_name().is_some_and(|n| n == spec.file_name.as_str())) {
@@ -1003,6 +1003,7 @@ async fn start_describer(
                 vision: Some((paths[0].clone(), paths[1].clone())),
                 embed: None,
                 cpu: false,
+                runtime: runtime.clone(),
             };
             LocalLlm::start(&models).await.map(|l| Describer::Local(Box::new(l))).map_err(|e| e.to_string())
         }
@@ -1763,6 +1764,7 @@ done
                 model,
                 mmproj,
                 found: vec![fake_model, fake_mmproj],
+                runtime: Default::default(),
             },
             ..local.clone()
         };

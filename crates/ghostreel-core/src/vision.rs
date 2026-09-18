@@ -184,6 +184,29 @@ pub struct LocalModels {
     pub vision: Option<(PathBuf, PathBuf)>,
     pub embed: Option<PathBuf>,
     pub cpu: bool,
+    /// Context window, KV cache precision and flash attention for this helper. Frame descriptions
+    /// and the script chat run the same binary with different values (see `config::VisionConfig`).
+    pub runtime: HelperRuntime,
+}
+
+/// How much room the helper gets, and how it spends VRAM on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperRuntime {
+    pub ctx_tokens: u32,
+    pub kv_cache: String,
+    pub flash_attn: String,
+}
+
+impl Default for HelperRuntime {
+    fn default() -> Self {
+        Self { ctx_tokens: crate::config::DESCRIBE_CTX_TOKENS, kv_cache: "q4_0".into(), flash_attn: "auto".into() }
+    }
+}
+
+impl From<&crate::config::VisionConfig> for HelperRuntime {
+    fn from(c: &crate::config::VisionConfig) -> Self {
+        Self { ctx_tokens: c.ctx_tokens, kv_cache: c.kv_cache.clone(), flash_attn: c.flash_attn.clone() }
+    }
 }
 
 impl LocalLlm {
@@ -198,6 +221,12 @@ impl LocalLlm {
         if m.cpu {
             cmd.arg("--cpu");
         }
+        cmd.arg("--ctx")
+            .arg(m.runtime.ctx_tokens.to_string())
+            .arg("--kv-type")
+            .arg(&m.runtime.kv_cache)
+            .arg("--flash-attn")
+            .arg(&m.runtime.flash_attn);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -421,7 +450,13 @@ done
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let models = LocalModels { helper, vision: Some(("m".into(), "p".into())), embed: None, cpu: false };
+        let models = LocalModels {
+            helper,
+            vision: Some(("m".into(), "p".into())),
+            embed: None,
+            cpu: false,
+            runtime: Default::default(),
+        };
         let mut llm = LocalLlm::start(&models).await.unwrap();
         assert_eq!(llm.embed_dim, Some(3));
         let d = llm.describe(Path::new("/x.jpg"), None).await.unwrap();
@@ -439,7 +474,13 @@ done
         std::fs::write(&helper, "#!/bin/sh\necho 'ghostreel-llm: loading m.gguf: out of memory' >&2\nexit 1\n")
             .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let models = LocalModels { helper, vision: Some(("m".into(), "p".into())), embed: None, cpu: false };
+        let models = LocalModels {
+            helper,
+            vision: Some(("m".into(), "p".into())),
+            embed: None,
+            cpu: false,
+            runtime: Default::default(),
+        };
         let err = LocalLlm::start(&models).await.err().unwrap();
         assert!(err.to_string().contains("out of memory"), "{err}");
     }

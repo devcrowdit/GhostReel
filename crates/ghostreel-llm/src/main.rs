@@ -42,10 +42,23 @@ struct Args {
     embed_model: Option<String>,
     ctx: u32,
     ngl: u32,
+    /// KV cache precision: `f16`, `q8_0` or `q4_0`. `q4_0` holds ~4× the context of `f16` in the
+    /// same VRAM, at some quality cost (what highllama runs with).
+    kv_type: String,
+    /// `auto`, `on` or `off`.
+    flash_attn: String,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { model: None, mmproj: None, embed_model: None, ctx: 8192, ngl: 999 };
+    let mut a = Args {
+        model: None,
+        mmproj: None,
+        embed_model: None,
+        ctx: 8192,
+        ngl: 999,
+        kv_type: "q8_0".into(),
+        flash_attn: "auto".into(),
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or(format!("{arg} needs a value"));
@@ -56,13 +69,26 @@ fn parse_args() -> Result<Args, String> {
             "--ctx" => a.ctx = val()?.parse().map_err(|_| "--ctx needs a number")?,
             "--ngl" => a.ngl = val()?.parse().map_err(|_| "--ngl needs a number")?,
             "--cpu" => a.ngl = 0,
+            "--kv-type" => {
+                a.kv_type = val()?;
+                if !["f16", "q8_0", "q4_0"].contains(&a.kv_type.as_str()) {
+                    return Err(format!("--kv-type must be f16, q8_0 or q4_0 (got {})", a.kv_type));
+                }
+            }
+            "--flash-attn" => {
+                a.flash_attn = val()?;
+                if !["auto", "on", "off"].contains(&a.flash_attn.as_str()) {
+                    return Err(format!("--flash-attn must be auto, on or off (got {})", a.flash_attn));
+                }
+            }
             "--version" => {
                 println!("ghostreel-llm {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "-h" | "--help" => {
                 println!(
-                    "usage: ghostreel-llm [--model m.gguf --mmproj p.gguf] [--embed-model e.gguf] [--ctx N] [--ngl N|--cpu]"
+                    "usage: ghostreel-llm [--model m.gguf --mmproj p.gguf] [--embed-model e.gguf] [--ctx N] \
+[--kv-type f16|q8_0|q4_0] [--flash-attn auto|on|off] [--ngl N|--cpu]"
                 );
                 std::process::exit(0);
             }
@@ -285,6 +311,7 @@ fn run() -> Result<(), String> {
         ),
         None => None,
     };
+    let mut effective_ctx = args.ctx;
     let mut vision = match (&vision_model, &args.mmproj) {
         (Some(model), Some(mmproj)) => {
             let mtmd = MtmdContext::init_from_file(
@@ -294,18 +321,38 @@ fn run() -> Result<(), String> {
             )
             .map_err(|e| format!("loading {mmproj}: {e:?}"))?;
             let n_batch = 512;
-            let ctx = model
-                .new_context(
-                    &backend,
-                    LlamaContextParams::default()
-                        .with_n_ctx(NonZeroU32::new(args.ctx))
-                        .with_n_batch(n_batch)
-                        .with_n_ubatch(n_batch)
-                        .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
-                        .with_type_k(KvCacheType::Q8_0)
-                        .with_type_v(KvCacheType::Q8_0),
-                )
-                .map_err(|e| format!("vision context: {e}"))?;
+            let kv = match args.kv_type.as_str() {
+                "f16" => KvCacheType::F16,
+                "q4_0" => KvCacheType::Q4_0,
+                _ => KvCacheType::Q8_0,
+            };
+            let flash = match args.flash_attn.as_str() {
+                "on" => llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED,
+                "off" => llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED,
+                _ => llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO,
+            };
+            let params = |ctx_tokens: u32| {
+                LlamaContextParams::default()
+                    .with_n_ctx(NonZeroU32::new(ctx_tokens))
+                    .with_n_batch(n_batch)
+                    .with_n_ubatch(n_batch)
+                    .with_flash_attention_policy(flash)
+                    .with_type_k(kv)
+                    .with_type_v(kv)
+            };
+            // Out of VRAM for the asked-for window: half it once rather than failing to start.
+            let (ctx, ctx_tokens) = match model.new_context(&backend, params(args.ctx)) {
+                Ok(c) => (c, args.ctx),
+                Err(first) => {
+                    let smaller = (args.ctx / 2).max(2048);
+                    eprintln!("ghostreel-llm: {} ctx failed ({first}); retrying with {smaller}", args.ctx);
+                    let c = model
+                        .new_context(&backend, params(smaller))
+                        .map_err(|e| format!("vision context: {e} (after {first})"))?;
+                    (c, smaller)
+                }
+            };
+            effective_ctx = ctx_tokens;
             Some(Vision { model, mtmd, ctx, n_batch })
         }
         _ => None,
@@ -338,9 +385,16 @@ fn run() -> Result<(), String> {
     };
 
     let dim = embed_model.as_ref().map(|m| m.n_embd());
-    reply(
-        json!({ "ready": true, "vision": vision.is_some(), "embed_dim": dim, "load_secs": t0.elapsed().as_secs_f64() }),
-    );
+    reply(json!({
+        "ready": true,
+        "vision": vision.is_some(),
+        "embed_dim": dim,
+        "ctx": effective_ctx,
+        "kv_type": args.kv_type,
+        "flash_attn": args.flash_attn,
+        "ngl": args.ngl,
+        "load_secs": t0.elapsed().as_secs_f64(),
+    }));
 
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
