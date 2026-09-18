@@ -39,6 +39,10 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - name: Create draft release
         id: create
         uses: actions/github-script@v8
@@ -52,6 +56,16 @@ jobs:
             });
             const existing = releases.find((r) => r.tag_name === tag);
             if (existing) { core.info(`Reusing release ${existing.id} for ${tag}`); return existing.id; }
+            // The release notes are this version's section of CHANGELOG.md, when it has one:
+            // "## [0.1.6] — date" up to the next "## ". The download line stays on top.
+            const fs = require("fs");
+            let notes = "";
+            try {
+              const version = tag.replace(/^v/, "");
+              const log = fs.readFileSync("CHANGELOG.md", "utf8");
+              const m = log.match(new RegExp(`^## \\[${version.replace(/\./g, "\\.")}\\][^\n]*\n([\\s\\S]*?)(?=^## |\\Z)`, "m"));
+              if (m) notes = m[1].trim();
+            } catch (e) { core.warning(`no CHANGELOG.md section for ${tag}: ${e.message}`); }
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner, repo: context.repo.repo,
               tag_name: tag, target_commitish: context.sha, name: `GhostReel ${tag}`,
@@ -59,6 +73,7 @@ jobs:
                 "**Windows:** `GhostReel_*_x64-setup.exe` · **Linux:** `.AppImage` or `.deb` · **CLI only:** `ghostreel-cli-*`.",
                 "",
                 "GPU acceleration needs an NVIDIA driver 570+ (CUDA 12.8 runtime is bundled). On first start open **Models** and download the models.",
+                ...(notes ? ["", "---", "", notes] : []),
               ].join("\n"),
               draft: true, prerelease: false,
             });

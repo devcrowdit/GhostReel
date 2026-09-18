@@ -210,6 +210,58 @@ fn enforce_grounding_and_pacing(
     cfg: &crate::config::ScriptConfig,
 ) -> Vec<Issue> {
     let mut issues = Vec::new();
+    // A clip on a stretch the camera shakes through is moved to the nearest steady stretch of
+    // the same shot, or dropped when there is none. Telling the model was not enough: the same
+    // stretch of a clip measured at eleven times the sway limit was cut into four scripts.
+    for beat in &mut s.beats {
+        let mut kept = Vec::with_capacity(beat.clips.len());
+        for mut c in beat.clips.drain(..) {
+            let windows = db.motion_windows(c.video_id).unwrap_or_default();
+            if windows.is_empty() || cfg.max_shake_jerk <= 0.0 {
+                kept.push(c);
+                continue;
+            }
+            let limit = crate::steadiness::shake_limit(&windows, cfg.max_shake_jerk, cfg.shake_relative);
+            let spans = crate::steadiness::shaky_spans_with_sway(&windows, c.in_s, c.out_s, limit, cfg.max_sway);
+            let len = c.out_s - c.in_s;
+            let shaky_s: f64 = spans.iter().map(|(a, b)| (b.min(c.out_s) - a.max(c.in_s)).max(0.0)).sum();
+            if len <= 0.0 || shaky_s <= len * 0.5 {
+                kept.push(c);
+                continue;
+            }
+            match crate::steadiness::steady_stretch_near(&windows, c.in_s, len, limit, cfg.max_sway) {
+                Some(start) => {
+                    issues.push(Issue {
+                        severity: IssueSeverity::Info,
+                        beat_id: Some(beat.id.clone()),
+                        clip_index: None,
+                        message: format!(
+                            "moved clip off a shaky stretch: video #{} {:.1}–{:.1} s → {:.1}–{:.1} s",
+                            c.video_id,
+                            c.in_s,
+                            c.out_s,
+                            start,
+                            start + len
+                        ),
+                    });
+                    c.in_s = start;
+                    c.out_s = start + len;
+                    kept.push(c);
+                }
+                None => issues.push(Issue {
+                    severity: IssueSeverity::Warning,
+                    beat_id: Some(beat.id.clone()),
+                    clip_index: None,
+                    message: format!(
+                        "dropped clip: the camera shakes through video #{} {:.1}–{:.1} s and nothing steady \
+                         of that length exists in it",
+                        c.video_id, c.in_s, c.out_s
+                    ),
+                }),
+            }
+        }
+        beat.clips = kept;
+    }
     // A clip with no transcript in its range cannot carry source audio, whatever the model said.
     // Left alone, a scenery shot marked "source" reads as "someone speaks here", which is exactly
     // the case the editing rules tell the model to leave narration empty for — so a whole script
@@ -735,6 +787,11 @@ pub fn dispatch_tool_limited(
                 file: String,
                 start_s: f64,
                 end_s: f64,
+                /// static, tripod, stabilised, handheld — the model picks clips straight from a
+                /// hit, so what it needs to know about the camera has to be here.
+                camera: &'static str,
+                /// The hit lies on a stretch the camera shakes through.
+                shaky: bool,
                 snippet: String,
             }
 
@@ -743,11 +800,18 @@ pub fn dispatch_tool_limited(
                 grounding.add(hit.video_id, hit.start_s, hit.end_s);
                 let file = hit.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 let snippet: String = hit.snippet.chars().take(200).collect();
+                let windows = db.motion_windows(hit.video_id).unwrap_or_default();
+                let limit = crate::steadiness::shake_limit(&windows, max_shake, shake_relative);
+                let shaky =
+                    !crate::steadiness::shaky_spans_with_sway(&windows, hit.start_s, hit.end_s, limit, max_sway)
+                        .is_empty();
                 compact.push(CompactHit {
                     video_id: hit.video_id,
                     file,
                     start_s: (hit.start_s * 100.0).round() / 100.0,
                     end_s: (hit.end_s * 100.0).round() / 100.0,
+                    camera: crate::steadiness::camera_style(&windows).as_str(),
+                    shaky,
                     snippet,
                 });
             }
@@ -1447,7 +1511,7 @@ HOW TO EDIT
    - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
-5a. list_videos and get_video report the camera work: static, tripod, stabilised or handheld. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
+5a. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
@@ -2620,6 +2684,66 @@ mod tests {
 
     use crate::projects::NewProject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn a_clip_on_a_shaky_stretch_is_moved_to_the_steady_part_of_the_shot() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 18.6)", []).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen) VALUES (1, ?1, 'a.mp4', 1, 0, 0)",
+                [folder.id],
+            )
+            .unwrap();
+        db.conn.execute("INSERT INTO frames(video_id, t_s, description_json) VALUES (1, 9.0, '{}')", []).unwrap();
+        // Measured like the clip that kept getting picked: violent for eight seconds, then steady.
+        let w = |a: f64, b: f64, jerk: f64, sway: f64| crate::steadiness::Window {
+            start_s: a,
+            end_s: b,
+            jerk,
+            motion: 0.5,
+            sway,
+        };
+        db.set_motion_windows(
+            1,
+            &[
+                w(0.0, 4.0, 3.25, 11.1),
+                w(4.0, 8.0, 0.77, 2.46),
+                w(8.0, 12.0, 0.18, 0.02),
+                w(12.0, 16.0, 0.11, 0.02),
+                w(16.0, 18.6, 0.14, 0.03),
+            ],
+        )
+        .unwrap();
+        let mut grounding = Grounding::default();
+        grounding.add(1, 0.0, 18.6);
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: Some("some words".into()),
+                on_screen_text: None,
+                notes: None,
+                clips: vec![ScriptClip { video_id: 1, in_s: 0.5, out_s: 4.7, audio: Audio::Mute, why: None }],
+            }],
+        };
+        let issues = enforce_grounding_and_pacing(&db, p.id, &mut script, &grounding, false, &sc());
+        let c = &script.beats[0].clips[0];
+        assert!(
+            (c.in_s - 8.0).abs() < 1e-9 && (c.out_s - 12.2).abs() < 1e-9,
+            "moved to the steady run: {c:?} {issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.message.contains("moved clip off a shaky stretch")), "{issues:?}");
+    }
+
     #[test]
     fn an_unopened_clip_is_verified_against_the_footage_not_thrown_away() {
         use crate::script::{Audio, Beat, ScriptClip};

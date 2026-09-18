@@ -606,6 +606,42 @@ pub async fn measure(
     Ok(out)
 }
 
+/// Start of the steady stretch nearest `near_s` that can hold a clip `len_s` long, or `None`.
+/// Steady means every window in it is under both lines; the candidate closest to where the
+/// model put the clip wins, so the shot stays as much the same as it can.
+pub fn steady_stretch_near(windows: &[Window], near_s: f64, len_s: f64, max_jerk: f64, max_sway: f64) -> Option<f64> {
+    let steady = |w: &Window| w.jerk <= max_jerk && (max_sway <= 0.0 || w.sway <= max_sway);
+    let mut best: Option<f64> = None;
+    let mut consider = |start: f64| {
+        if best.is_none_or(|b| (start - near_s).abs() < (b - near_s).abs()) {
+            best = Some(start);
+        }
+    };
+    let mut run_start: Option<f64> = None;
+    let mut run_end = 0.0;
+    let mut close_run = |run_start: &mut Option<f64>, run_end: f64| {
+        if let Some(rs) = run_start.take()
+            && run_end - rs >= len_s
+        {
+            // The clip can sit anywhere in the run; the nearest legal start to the original.
+            let start = near_s.clamp(rs, run_end - len_s);
+            consider(start);
+        }
+    };
+    for w in windows {
+        if steady(w) {
+            if run_start.is_none() {
+                run_start = Some(w.start_s);
+            }
+            run_end = w.end_s;
+        } else {
+            close_run(&mut run_start, run_end);
+        }
+    }
+    close_run(&mut run_start, run_end);
+    best
+}
+
 /// The worst shake over the windows a clip touches, or `None` when nothing was measured there.
 pub fn jerk_in_range(windows: &[Window], in_s: f64, out_s: f64) -> Option<f64> {
     windows.iter().filter(|w| w.end_s > in_s && w.start_s < out_s).map(|w| w.jerk).max_by(|a, b| a.total_cmp(b))
@@ -776,6 +812,25 @@ mod tests {
         let sway_sway = median(&path_stats(&sway).iter().map(|(_, _, w)| *w).collect::<Vec<_>>());
         assert!(pan_sway < 0.05, "a pan wastes nothing: {pan_sway}");
         assert!(sway_sway > 10.0 * pan_sway.max(0.01), "a sway wastes all of it: {sway_sway}");
+    }
+
+    #[test]
+    fn a_clip_moves_to_the_nearest_steady_stretch_of_its_shot() {
+        let w = |start_s: f64, end_s: f64, jerk: f64, sway: f64| Window { start_s, end_s, jerk, motion: 0.0, sway };
+        // Shaky for the first eight seconds, steady after.
+        let windows = [
+            w(0.0, 4.0, 3.2, 11.0),
+            w(4.0, 8.0, 0.8, 2.5),
+            w(8.0, 12.0, 0.2, 0.0),
+            w(12.0, 16.0, 0.1, 0.0),
+            w(16.0, 18.6, 0.1, 0.0),
+        ];
+        // A 4.2 s clip at 0.5 s lands at the start of the steady run.
+        assert_eq!(steady_stretch_near(&windows, 0.5, 4.2, 1.0, 1.0), Some(8.0));
+        // Nothing steady long enough: none.
+        assert_eq!(steady_stretch_near(&windows, 0.5, 20.0, 1.0, 1.0), None);
+        // A clip already inside the steady run keeps its place.
+        assert_eq!(steady_stretch_near(&windows, 10.0, 4.0, 1.0, 1.0), Some(10.0));
     }
 
     #[test]
