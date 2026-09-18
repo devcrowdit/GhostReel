@@ -1,3 +1,4 @@
+import type { SteadinessView } from "./api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   clock,
@@ -6,6 +7,7 @@ import {
   mediaUrl,
   openExternal,
   videoFrames,
+  videoSteadiness,
   videoTranscript,
   type FrameRow,
   type TranscriptSegment,
@@ -45,6 +47,7 @@ export default function VideoPanel({
   const player = useRef<HTMLVideoElement>(null);
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
   const [frames, setFrames] = useState<FrameRow[]>([]);
+  const [steadiness, setSteadiness] = useState<SteadinessView | null>(null);
   const [activeFrame, setActiveFrame] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
   const [now, setNow] = useState(0);
@@ -59,6 +62,11 @@ export default function VideoPanel({
   useEffect(() => {
     videoFrames(video.id).then(setFrames).catch(() => setFrames([]));
   }, [video.id, video.frames]);
+  useEffect(() => {
+    setSteadiness(null);
+    videoSteadiness(video.id).then(setSteadiness).catch(() => setSteadiness(null));
+  }, [video.id, video.frames]);
+  const shaky = (steadiness?.windows ?? []).filter((w) => steadiness!.max_shake > 0 && w.jerk > steadiness!.max_shake);
   useEffect(() => {
     setPlayError(false);
     setSrc(null);
@@ -149,6 +157,26 @@ export default function VideoPanel({
         )}
       </div>
 
+      {video.duration_s != null && steadiness && steadiness.windows.length > 0 && (
+        <div
+          className="shake-bar"
+          title={shaky.length ? "Red: the camera shakes here — cut around it. Click to jump." : "Camera steady throughout"}
+        >
+          {shaky.map((w) => (
+            <span
+              key={w.start_s}
+              className="shaky"
+              style={{
+                left: `${(w.start_s / video.duration_s!) * 100}%`,
+                width: `${((w.end_s - w.start_s) / video.duration_s!) * 100}%`,
+              }}
+              title={`shaky ${clock(w.start_s)}–${clock(w.end_s)} (${w.jerk.toFixed(2)})`}
+              onClick={() => jump(w.start_s)}
+            />
+          ))}
+          <span className="playhead" style={{ left: `${(now / video.duration_s!) * 100}%` }} />
+        </div>
+      )}
       {frames.length > 0 && (
         <div className="frame-strip">
           {frames.map((f) => (

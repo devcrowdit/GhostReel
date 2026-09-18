@@ -137,6 +137,21 @@ pub struct Runtime {
     pub frames: Option<crate::frames::FrameOptions>,
     pub vision: VisionSetup,
     pub embed: EmbedSetup,
+    /// How steady the camera is, measured alongside keyframes. `None` skips it (tests).
+    pub steadiness: Option<SteadinessOptions>,
+}
+
+/// Window and stride used when measuring how steady a video is, from `[script]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SteadinessOptions {
+    pub window_s: f64,
+    pub stride_s: f64,
+}
+
+impl From<&crate::config::ScriptConfig> for Option<SteadinessOptions> {
+    fn from(c: &crate::config::ScriptConfig) -> Self {
+        (c.max_shake_jerk > 0.0).then_some(SteadinessOptions { window_s: c.shake_window_s, stride_s: c.shake_stride_s })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +199,7 @@ pub async fn resolve(paths: &Paths, config: &Config) -> Result<Runtime, crate::E
         frames: Some(crate::frames::FrameOptions::from_config(&config.frames)),
         vision,
         embed,
+        steadiness: (&config.script).into(),
     })
 }
 

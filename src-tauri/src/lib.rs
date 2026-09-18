@@ -122,7 +122,7 @@ fn project_view(project_id: i64) -> CmdResult<ProjectView> {
         project: db.project(project_id).map_err(err)?,
         folders,
         status: index::status(&db, Some(project_id)).map_err(err)?,
-        videos: index::videos(&db, Some(project_id)).map_err(err)?,
+        videos: index::videos_with_shake(&db, Some(project_id), shake_limit()).map_err(err)?,
         excluded: db
             .excluded_videos(project_id)
             .map_err(err)?
@@ -782,6 +782,26 @@ fn video_transcript(video_id: i64) -> CmdResult<Vec<TranscriptSegment>> {
     index::transcript(&open_db()?, video_id).map_err(err)
 }
 
+/// `script.max_shake_jerk` from the config; 0 when unset or the check is off.
+fn shake_limit() -> f64 {
+    paths().map(|p| Config::load(&p.config_file).unwrap_or_default().script.max_shake_jerk).unwrap_or(0.0)
+}
+
+/// How steady the camera is through one video, window by window, plus the limit the app calls
+/// shaky — so the panel can mark the stretches to cut around.
+#[derive(Serialize)]
+struct SteadinessView {
+    windows: Vec<ghostreel_core::steadiness::Window>,
+    max_shake: f64,
+}
+
+#[tauri::command]
+fn video_steadiness(video_id: i64) -> CmdResult<SteadinessView> {
+    let p = paths()?;
+    let db = Db::open(&p.db_file()).map_err(err)?;
+    Ok(SteadinessView { windows: db.motion_windows(video_id).map_err(err)?, max_shake: shake_limit() })
+}
+
 #[tauri::command]
 fn video_frames(video_id: i64) -> CmdResult<Vec<FrameRow>> {
     let p = paths()?;
@@ -941,6 +961,7 @@ pub fn run() {
             set_chat_system_prompt,
             video_transcript,
             video_frames,
+            video_steadiness,
             search,
             open_external,
             media_base,

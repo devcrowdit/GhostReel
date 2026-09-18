@@ -25,6 +25,7 @@ pub mod projects;
 pub mod runtime;
 pub mod script;
 pub mod search;
+pub mod steadiness;
 pub mod stt;
 pub mod vision;
 pub mod watch;

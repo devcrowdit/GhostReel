@@ -853,6 +853,7 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 embedder,
                 system_prompt: Some(config.chat.system_prompt.clone()),
                 max_tool_rounds: config.chat_model().max_tool_rounds,
+                script: config.script.clone(),
             };
 
             let t0 = std::time::Instant::now();

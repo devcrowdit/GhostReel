@@ -138,37 +138,30 @@ pub struct ChatContext {
     pub system_prompt: Option<String>,
     /// `chat_model.max_tool_rounds`; 0 = the backend's own default.
     pub max_tool_rounds: u32,
+    /// The `[script]` settings: clip lengths, target tolerances, narration pace, research budget.
+    pub script: crate::config::ScriptConfig,
 }
 
 /// How much footage each brain gets to look at before drafting.
 ///
-/// A local model pays for every round out of a context it barely has, so it stays modest. A
-/// server or a coding-agent CLI has room to search, watch and read transcripts until it actually
-/// knows the material, which is what separates a teaser built from three voices from one built
-/// from the first clip that matched.
-const LOCAL_TOOL_ROUNDS: u32 = 10;
-const ROOMY_TOOL_ROUNDS: u32 = 24;
+/// This is a stop against a model that loops, not a research budget: a good editor watches until
+/// it knows the material, and the difference between a teaser built from one clip and one built
+/// from four voices is how much it looked. Models stop on their own when they have enough — the
+/// runs that mattered here used 8 to 15 rounds of it.
+///
+/// A local model is the exception: every round's result is appended to a transcript it re-reads
+/// in full, so rounds eat the context the draft itself needs.
 
-/// Slack around grounded ranges (search moments are approximate).
-const GROUNDING_SLACK_S: f64 = 5.0;
 /// Clips longer than this are pacing mistakes (the model pasted a whole tool range). Generous, so
 /// people talking can stay on screen for whole sentences.
-const MAX_CLIP_S: f64 = 30.0;
-/// Over-long clips are trimmed to this length (keeping their start).
-const TRIMMED_CLIP_S: f64 = 20.0;
-/// Shorter clips flash by before viewers can see or read them.
-const MIN_CLIP_S: f64 = 3.0;
-/// Total duration further than this fraction from the target triggers one redraft.
-const TARGET_TOLERANCE: f64 = TARGET_OVERSHOOT - 1.0;
-
 /// Pacing problems the model can fix in a redraft: clips too long or too short, and (when
 /// `enforce_target`) a total far from the target.
-pub fn pacing_issues(script: &Script, enforce_target: bool) -> Vec<Issue> {
+pub fn pacing_issues(script: &Script, enforce_target: bool, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
     let mut issues = Vec::new();
     for beat in &script.beats {
         for (i, c) in beat.clips.iter().enumerate() {
             let len = c.out_s - c.in_s;
-            if len > MAX_CLIP_S {
+            if len > cfg.max_clip_s {
                 issues.push(Issue {
                     severity: IssueSeverity::Warning,
                     beat_id: Some(beat.id.clone()),
@@ -178,14 +171,14 @@ pub fn pacing_issues(script: &Script, enforce_target: bool) -> Vec<Issue> {
                         c.video_id, c.in_s, c.out_s
                     ),
                 });
-            } else if len < MIN_CLIP_S {
+            } else if len < cfg.min_clip_s {
                 issues.push(Issue {
                     severity: IssueSeverity::Warning,
                     beat_id: Some(beat.id.clone()),
                     clip_index: Some(i),
                     message: format!(
-                        "clip is only {len:.1} s (video #{} {:.1}–{:.1}); hold each shot at least {MIN_CLIP_S:.0} s so viewers can see and read it",
-                        c.video_id, c.in_s, c.out_s
+                        "clip is only {len:.1} s (video #{} {:.1}–{:.1}); hold each shot at least {:.0} s so viewers can see and read it",
+                        c.video_id, c.in_s, c.out_s, cfg.min_clip_s
                     ),
                 });
             }
@@ -193,7 +186,7 @@ pub fn pacing_issues(script: &Script, enforce_target: bool) -> Vec<Issue> {
     }
     if let Some(target) = script.target_duration_s.filter(|t| *t > 0.0 && enforce_target) {
         let total = script.total_duration_s();
-        if (total - target).abs() > target * TARGET_TOLERANCE {
+        if (total - target).abs() > target * (cfg.target_overshoot - 1.0) {
             issues.push(Issue {
                 severity: IssueSeverity::Warning,
                 beat_id: None,
@@ -214,6 +207,7 @@ fn enforce_grounding_and_pacing(
     s: &mut Script,
     grounding: &Grounding,
     enforce_target: bool,
+    cfg: &crate::config::ScriptConfig,
 ) -> Vec<Issue> {
     let mut issues = Vec::new();
     // A clip with no transcript in its range cannot carry source audio, whatever the model said.
@@ -257,34 +251,65 @@ fn enforce_grounding_and_pacing(
     for beat in &mut s.beats {
         let mut kept = Vec::with_capacity(beat.clips.len());
         for c in beat.clips.drain(..) {
-            if !is_video_in_project(db, project_id, c.video_id) || !grounding.is_grounded(c.video_id, c.in_s, c.out_s) {
+            if !is_video_in_project(db, project_id, c.video_id) {
                 issues.push(Issue {
                     severity: IssueSeverity::Warning,
                     beat_id: Some(beat.id.clone()),
                     clip_index: None,
-                    message: format!(
-                        "dropped clip not grounded in tool results: video #{} {:.1}–{:.1} s",
-                        c.video_id, c.in_s, c.out_s
-                    ),
+                    message: format!("dropped clip from video #{} — not in this project", c.video_id),
                 });
                 continue;
+            }
+            if !grounding.is_grounded(c.video_id, c.in_s, c.out_s, cfg.grounding_slack_s) {
+                // The model reached for footage it never opened. That used to be fatal for the
+                // clip, and with enough ungrounded picks a whole script collapsed to nothing —
+                // the loudest failure in this pipeline, and it got worse the more the model
+                // explored. But "not looked at" is not the same as "not real": if the range sits
+                // inside the video and we have described keyframes or speech for it, the footage
+                // exists and we know what is in it, so keep it and say it went unchecked.
+                match verify_clip(db, c.video_id, c.in_s, c.out_s) {
+                    Some(seen) => {
+                        issues.push(Issue {
+                            severity: IssueSeverity::Info,
+                            beat_id: Some(beat.id.clone()),
+                            clip_index: None,
+                            message: format!(
+                                "kept an unopened clip after checking the footage: video #{} {:.1}–{:.1} s — {seen}",
+                                c.video_id, c.in_s, c.out_s
+                            ),
+                        });
+                    }
+                    None => {
+                        issues.push(Issue {
+                            severity: IssueSeverity::Warning,
+                            beat_id: Some(beat.id.clone()),
+                            clip_index: None,
+                            message: format!(
+                                "dropped clip: nothing indexed at video #{} {:.1}–{:.1} s",
+                                c.video_id, c.in_s, c.out_s
+                            ),
+                        });
+                        continue;
+                    }
+                }
             }
             kept.push(c);
         }
         for (i, c) in kept.iter_mut().enumerate() {
-            if c.out_s - c.in_s > MAX_CLIP_S {
+            if c.out_s - c.in_s > cfg.max_clip_s {
                 issues.push(Issue {
                     severity: IssueSeverity::Info,
                     beat_id: Some(beat.id.clone()),
                     clip_index: Some(i),
                     message: format!(
-                        "trimmed {:.1} s clip to {TRIMMED_CLIP_S:.0} s (video #{} from {:.1} s)",
+                        "trimmed {:.1} s clip to {:.0} s (video #{} from {:.1} s)",
                         c.out_s - c.in_s,
+                        cfg.trimmed_clip_s,
                         c.video_id,
                         c.in_s
                     ),
                 });
-                c.out_s = c.in_s + TRIMMED_CLIP_S;
+                c.out_s = c.in_s + cfg.trimmed_clip_s;
             }
         }
         beat.clips = kept;
@@ -300,7 +325,7 @@ fn enforce_grounding_and_pacing(
             message: format!("dropped {repeats} clip(s) that repeated footage already used earlier"),
         });
     }
-    let merged = merge_contiguous_clips(s);
+    let merged = merge_contiguous_clips(s, cfg);
     if merged > 0 {
         issues.push(Issue {
             severity: IssueSeverity::Info,
@@ -310,7 +335,7 @@ fn enforce_grounding_and_pacing(
         });
     }
     // Pad before trimming, so the target is met with the people's pauses already in.
-    pad_speech(db, s);
+    pad_speech(db, s, cfg);
     // Padding can grow two clips of the same video into each other: check again.
     let overlapped = drop_repeated_footage(s);
     if overlapped > 0 {
@@ -323,7 +348,7 @@ fn enforce_grounding_and_pacing(
     }
     let before = s.total_duration_s();
     let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
-    if enforce_target && fit_speech_to_target(db, s) | trim_to_target_with(s, speaking) {
+    if enforce_target && fit_speech_to_target(db, s, cfg) | trim_to_target_with(s, speaking, cfg) {
         issues.push(Issue {
             severity: IssueSeverity::Info,
             beat_id: None,
@@ -347,10 +372,8 @@ impl Grounding {
 
     /// Check if a clip lies inside a grounded range for that video (±5 s slack at both ends).
     /// Containment, not overlap: a 45 s clip touching a 5 s search hit is not grounded.
-    pub fn is_grounded(&self, video_id: i64, in_s: f64, out_s: f64) -> bool {
-        self.ranges
-            .iter()
-            .any(|&(vid, s, e)| vid == video_id && in_s >= s - GROUNDING_SLACK_S && out_s <= e + GROUNDING_SLACK_S)
+    pub fn is_grounded(&self, video_id: i64, in_s: f64, out_s: f64, slack: f64) -> bool {
+        self.ranges.iter().any(|&(vid, s, e)| vid == video_id && in_s >= s - slack && out_s <= e + slack)
     }
 
     /// Record grounding ranges from a tool invocation.
@@ -647,8 +670,19 @@ pub fn dispatch_tool(
     args: &Value,
     grounding: &mut Grounding,
     vector: Option<&[f32]>,
+    cfg: &crate::config::ScriptConfig,
 ) -> (String, String) {
-    dispatch_tool_limited(db, data_dir, project_id, tool, args, grounding, vector, LOCAL_TOOL_RESULT_CHARS)
+    dispatch_tool_limited(
+        db,
+        data_dir,
+        project_id,
+        tool,
+        args,
+        grounding,
+        vector,
+        cfg.local_tool_result_chars,
+        cfg.max_shake_jerk,
+    )
 }
 
 /// Tool results for the local helper (8k context) stay small.
@@ -667,6 +701,7 @@ pub fn dispatch_tool_limited(
     grounding: &mut Grounding,
     vector: Option<&[f32]>,
     max_chars: usize,
+    max_shake: f64,
 ) -> (String, String) {
     match tool {
         "search_moments" => {
@@ -892,6 +927,20 @@ pub fn dispatch_tool_limited(
             // which then reads as "people speak here" and suppresses the beat's narration.
             let speech_end = if range_end == f64::MAX { duration_s.unwrap_or(0.0) } else { range_end };
             let has_speech = clip_has_speech(db, video_id, range_start, speech_end);
+            // How steady the camera is here. No frame description mentions it, and a shaky shot
+            // looks wrong in a cut whatever it shows.
+            let measured = db.motion_windows(video_id).unwrap_or_default();
+            let shaky_spans = crate::steadiness::shaky_spans(&measured, range_start, speech_end, max_shake);
+            // Timestamps, not a verdict on the whole file: most of a shaky clip is usually fine,
+            // and the editor is choosing a range, not a video.
+            let shaky_at: Vec<String> = shaky_spans.iter().map(|(a, b)| format!("{a:.1}-{b:.1}")).collect();
+            let steady = if measured.is_empty() {
+                "unknown"
+            } else if shaky_at.is_empty() {
+                "yes"
+            } else {
+                "not everywhere — see shaky_at"
+            };
 
             let mut obj = json!({
                 "video_id": video_id,
@@ -903,6 +952,8 @@ pub fn dispatch_tool_limited(
                 "language": language,
                 "has_speech": has_speech,
                 "audio": if has_speech { "source" } else { "mute" },
+                "steady": steady,
+                "shaky_at": shaky_at,
                 "frames": frames,
             });
 
@@ -1012,7 +1063,13 @@ pub fn dispatch_tool_limited(
 }
 
 /// Check grounding and project constraints for a script. Returns error issues for ungrounded clips.
-pub fn check_grounding(db: &Db, project_id: i64, script: &Script, grounding: &Grounding) -> Vec<Issue> {
+pub fn check_grounding(
+    db: &Db,
+    project_id: i64,
+    script: &Script,
+    grounding: &Grounding,
+    cfg: &crate::config::ScriptConfig,
+) -> Vec<Issue> {
     let mut issues = Vec::new();
     for beat in &script.beats {
         for (clip_idx, clip) in beat.clips.iter().enumerate() {
@@ -1023,7 +1080,7 @@ pub fn check_grounding(db: &Db, project_id: i64, script: &Script, grounding: &Gr
                     clip_index: Some(clip_idx),
                     message: format!("video #{} does not belong to project", clip.video_id),
                 });
-            } else if !grounding.is_grounded(clip.video_id, clip.in_s, clip.out_s) {
+            } else if !grounding.is_grounded(clip.video_id, clip.in_s, clip.out_s, cfg.grounding_slack_s) {
                 issues.push(Issue {
                     severity: IssueSeverity::Error,
                     beat_id: Some(beat.id.clone()),
@@ -1039,22 +1096,164 @@ pub fn check_grounding(db: &Db, project_id: i64, script: &Script, grounding: &Gr
     issues
 }
 
-/// A script is "off target" when its clips add up to more than this factor of the target duration.
-const TARGET_OVERSHOOT: f64 = 1.25;
-/// Shortest clip automatic trimming leaves.
-const MIN_TRIMMED_CLIP_S: f64 = 4.0;
-
 /// Last resort when the model ignores the target: shorten every clip proportionally (keeping its
-/// in point, never below 4 s). Returns whether anything changed.
-pub fn trim_to_target(script: &mut Script) -> bool {
-    trim_to_target_with(script, |_| false)
+/// in point, never below `script.min_trimmed_clip_s`). Returns whether anything changed.
+pub fn trim_to_target(script: &mut Script, cfg: &crate::config::ScriptConfig) -> bool {
+    trim_to_target_with(script, |_| false, cfg)
 }
 
 /// [`trim_to_target`] that leaves `keep` clips (people speaking) whole and shortens the others.
-fn trim_to_target_with(script: &mut Script, keep: impl Fn(&ScriptClip) -> bool) -> bool {
+/// Fit a cut to its target in one pass.
+///
+/// Three mechanisms used to shorten a script independently — speech capped to a share of the
+/// target, b-roll trimmed proportionally, and a final pass doing both again — each measuring from
+/// its own view of the total. Together they overshot badly: a cut sitting at 58.6 s against a 60 s
+/// target came out at 29.5 s. One pass, measuring once, cannot do that.
+///
+/// Over target, the pictures give way first and the speaking clips only if that was not enough;
+/// under it, the pictures are held longer. Speech is never stretched: a sentence is as long as it
+/// is, and the rest is dead air.
+fn fit_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> bool {
     let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
     let total = script.total_duration_s();
-    if total <= target * TARGET_OVERSHOOT {
+    let slack = target * (cfg.final_target_tolerance - 1.0);
+    if (total - target).abs() <= slack {
+        return false;
+    }
+    if total < target {
+        return grow_to_target(db, script, cfg);
+    }
+
+    let speaking: Vec<bool> =
+        script.beats.iter().flat_map(|b| &b.clips).map(|c| clip_has_speech(db, c.video_id, c.in_s, c.out_s)).collect();
+    let spoken: f64 = script
+        .beats
+        .iter()
+        .flat_map(|b| &b.clips)
+        .zip(&speaking)
+        .filter(|(_, s)| **s)
+        .map(|(c, _)| c.out_s - c.in_s)
+        .sum();
+    let pictures = total - spoken;
+
+    // What the pictures must come down to, never below the floor for each shot.
+    let picture_floor: f64 = speaking.iter().filter(|s| !**s).count() as f64 * cfg.min_trimmed_clip_s;
+    let want_pictures = (target - spoken).max(picture_floor).min(pictures);
+    let picture_factor = if pictures > 0.0 { want_pictures / pictures } else { 1.0 };
+
+    // Only if trimming every picture still leaves it long does speech give way, and then no
+    // further than the share of the target it is allowed.
+    let after_pictures = spoken + want_pictures;
+    let speech_factor = if after_pictures > target && spoken > 0.0 {
+        ((target - want_pictures) / spoken).clamp(cfg.speech_budget * target / spoken.max(1e-9), 1.0)
+    } else {
+        1.0
+    };
+
+    let mut changed = false;
+    let mut i = 0;
+    for beat in &mut script.beats {
+        for c in &mut beat.clips {
+            let factor = if speaking[i] { speech_factor } else { picture_factor };
+            i += 1;
+            if factor >= 1.0 {
+                continue;
+            }
+            let len = c.out_s - c.in_s;
+            let new_len = (len * factor).max(cfg.min_trimmed_clip_s).min(len);
+            if (new_len - len).abs() > 0.05 {
+                c.out_s = c.in_s + new_len;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Hold the b-roll longer when the cut came in short.
+///
+/// Two independent mechanisms shorten a script — speech is capped at a share of the target, and
+/// b-roll is trimmed proportionally — so together they undershoot, and a 60 s teaser lands at 49 s
+/// with no way back. Speaking clips are left alone: they are as long as the sentence is. Scenery
+/// can simply be held, up to what the footage actually has.
+fn grow_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> bool {
+    let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
+    let total = script.total_duration_s();
+    if total >= target * 0.97 {
+        return false;
+    }
+    let mut room: Vec<(usize, usize, f64)> = Vec::new();
+    for (bi, beat) in script.beats.iter().enumerate() {
+        // A narrated beat can only be held as long as its voice-over lasts, or the picture runs
+        // on in silence after the last word — the very gap content_issues complains about.
+        let mut beat_room = f64::MAX;
+        let words = beat.narration.as_deref().map(|n| n.split_whitespace().count()).unwrap_or(0);
+        if words > 0 {
+            let spoken_s = words as f64 / cfg.narration_words_per_s;
+            let beat_s: f64 = beat.clips.iter().map(|c| c.out_s - c.in_s).sum();
+            beat_room = (spoken_s - beat_s).max(0.0);
+        }
+        if beat_room <= 0.1 {
+            continue;
+        }
+        let mut left = beat_room;
+        for (ci, c) in beat.clips.iter().enumerate() {
+            if left <= 0.1 {
+                break;
+            }
+            if clip_has_speech(db, c.video_id, c.in_s, c.out_s) {
+                continue;
+            }
+            let duration: Option<f64> = db
+                .conn
+                .query_row("SELECT duration_s FROM videos WHERE id = ?1", [c.video_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let ceiling = duration.unwrap_or(c.out_s).min(c.in_s + cfg.max_clip_s);
+            let spare = (ceiling - c.out_s).min(left);
+            if spare > 0.1 {
+                room.push((bi, ci, spare));
+                left -= spare;
+            }
+        }
+    }
+    let spare_total: f64 = room.iter().map(|(_, _, s)| s).sum();
+    if spare_total <= 0.0 {
+        return false;
+    }
+    let needed = target - total;
+    let share = (needed / spare_total).min(1.0);
+    let mut changed = false;
+    for (bi, ci, spare) in room {
+        let add = spare * share;
+        if add > 0.1 {
+            script.beats[bi].clips[ci].out_s += add;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn trim_to_target_with(
+    script: &mut Script,
+    keep: impl Fn(&ScriptClip) -> bool,
+    cfg: &crate::config::ScriptConfig,
+) -> bool {
+    trim_to_target_within(script, keep, cfg.target_overshoot, cfg)
+}
+
+/// `trim_to_target_with` with an explicit tolerance. The draft stage is loose — the model may yet
+/// redraft — but the last pass before saving has no such luxury: whatever it leaves is the length
+/// the user gets, and a cut left 18% long is one the report then complains about.
+fn trim_to_target_within(
+    script: &mut Script,
+    keep: impl Fn(&ScriptClip) -> bool,
+    tolerance: f64,
+    cfg: &crate::config::ScriptConfig,
+) -> bool {
+    let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
+    let total = script.total_duration_s();
+    if total <= target * tolerance {
         return false;
     }
     let kept: f64 = script.beats.iter().flat_map(|b| &b.clips).filter(|c| keep(c)).map(|c| c.out_s - c.in_s).sum();
@@ -1069,7 +1268,7 @@ fn trim_to_target_with(script: &mut Script, keep: impl Fn(&ScriptClip) -> bool) 
             continue;
         }
         let len = clip.out_s - clip.in_s;
-        let new_len = (len * factor).max(MIN_TRIMMED_CLIP_S).min(len);
+        let new_len = (len * factor).max(cfg.min_trimmed_clip_s).min(len);
         if new_len < len {
             clip.out_s = clip.in_s + new_len;
             changed = true;
@@ -1146,14 +1345,14 @@ fn drop_repeated_footage(script: &mut Script) -> usize {
 
 /// When the speaking clips alone overrun the target, shorten each proportionally, cutting after a
 /// whole sentence (plus the tail) rather than mid-word. Returns whether anything changed.
-fn fit_speech_to_target(db: &Db, script: &mut Script) -> bool {
+fn fit_speech_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> bool {
     let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
     let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
     let spoken: f64 =
         script.beats.iter().flat_map(|b| &b.clips).filter(|c| speaking(c)).map(|c| c.out_s - c.in_s).sum();
     // Leave room for the other shots: speech may use up to 70 % of the target.
     let budget = target * 0.7;
-    if spoken <= budget * TARGET_OVERSHOOT {
+    if spoken <= budget * cfg.target_overshoot {
         return false;
     }
     let factor = budget / spoken;
@@ -1174,9 +1373,9 @@ fn fit_speech_to_target(db: &Db, script: &mut Script) -> bool {
             })
             .unwrap_or_default();
         // Last sentence end that fits with its tail; at least the first sentence.
-        let cut = ends.iter().copied().rfind(|e| e + SPEECH_TAIL_S <= max_out).or(ends.first().copied());
+        let cut = ends.iter().copied().rfind(|e| e + cfg.speech_tail_s <= max_out).or(ends.first().copied());
         if let Some(e) = cut {
-            let out = (e + SPEECH_TAIL_S).min(c.out_s);
+            let out = (e + cfg.speech_tail_s).min(c.out_s);
             if out < c.out_s - 0.05 {
                 c.out_s = out;
                 changed = true;
@@ -1188,7 +1387,7 @@ fn fit_speech_to_target(db: &Db, script: &mut Script) -> bool {
 
 /// Back-to-back clips of the same video in one beat (`0-6`, `6-16`, `16-23`) are jump cuts inside a
 /// single continuous take: join them. Returns how many cuts were removed.
-fn merge_contiguous_clips(script: &mut Script) -> usize {
+fn merge_contiguous_clips(script: &mut Script, cfg: &crate::config::ScriptConfig) -> usize {
     let mut merged = 0;
     for beat in &mut script.beats {
         let mut out: Vec<ScriptClip> = Vec::with_capacity(beat.clips.len());
@@ -1196,7 +1395,7 @@ fn merge_contiguous_clips(script: &mut Script) -> usize {
             if let Some(prev) = out.last_mut()
                 && prev.video_id == c.video_id
                 && (c.in_s - prev.out_s).abs() <= 0.5
-                && c.out_s - prev.in_s <= MAX_CLIP_S
+                && c.out_s - prev.in_s <= cfg.max_clip_s
             {
                 prev.out_s = prev.out_s.max(c.out_s);
                 if c.audio == crate::script::Audio::Source {
@@ -1227,9 +1426,10 @@ HOW TO EDIT
    - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
+5a. get_video reports steadiness, and lists the shaky stretches of a video as shaky_at timestamps (\"12.0-16.0\"). A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
-7. Length: the clips add up to the length the user asked for; set target_duration_s to it. If the user gave no length, choose what the material supports (usually 60-180 s).
+7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
 8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
 9. Always reply in the user's language.
 ";
@@ -1345,7 +1545,7 @@ fn allowed_clips_text(grounding: &Grounding) -> String {
 ///
 /// Kept separate from the asking so that no database handle is alive across an await — the
 /// connection is not `Send`, and `run_turn`'s future has to be.
-fn narration_jobs(db: &Db, script: &Script) -> Vec<(usize, String)> {
+fn narration_jobs(db: &Db, script: &Script, cfg: &crate::config::ScriptConfig) -> Vec<(usize, String)> {
     let mut jobs = Vec::new();
     for (idx, beat) in script.beats.iter().enumerate() {
         let beat_s: f64 = beat.clips.iter().map(|c| c.out_s - c.in_s).sum();
@@ -1354,7 +1554,7 @@ fn narration_jobs(db: &Db, script: &Script) -> Vec<(usize, String)> {
         if !empty || has_speech || beat_s < 2.0 {
             continue;
         }
-        let words = (beat_s * NARRATION_WORDS_PER_S).round().max(5.0) as usize;
+        let words = (beat_s * cfg.narration_words_per_s).round().max(5.0) as usize;
         let seen: Vec<String> =
             beat.clips.iter().flat_map(|c| frame_summaries(db, c.video_id, c.in_s, c.out_s, 3)).collect();
         let purpose = if beat.purpose.trim().is_empty() { "introduce what is on screen" } else { beat.purpose.trim() };
@@ -1404,13 +1604,12 @@ async fn fill_missing_narration(
 }
 
 /// Spoken voice-over rate used to check that narration fills its beat.
-const NARRATION_WORDS_PER_S: f64 = 2.5;
+
 /// Narration covering less than this share of its beat triggers a redraft.
-const MIN_NARRATION_COVERAGE: f64 = 0.6;
 
 /// Editorial problems the model can fix in a redraft: narration too short for its beat, and clips
 /// over footage the tools know nothing about (no speech and no described keyframe nearby).
-pub fn content_issues(db: &Db, script: &Script) -> Vec<Issue> {
+pub fn content_issues(db: &Db, script: &Script, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
     let mut issues = Vec::new();
     let mut seen_narration: Vec<String> = Vec::new();
     for beat in &script.beats {
@@ -1434,8 +1633,8 @@ pub fn content_issues(db: &Db, script: &Script) -> Vec<Issue> {
         let words = beat.narration.as_deref().map(|n| n.split_whitespace().count()).unwrap_or(0);
         let has_speech = beat.clips.iter().any(|c| clip_has_speech(db, c.video_id, c.in_s, c.out_s));
         if words > 0 || !has_speech {
-            let spoken_s = words as f64 / NARRATION_WORDS_PER_S;
-            if beat_s > 0.0 && spoken_s < beat_s * MIN_NARRATION_COVERAGE {
+            let spoken_s = words as f64 / cfg.narration_words_per_s;
+            if beat_s > 0.0 && spoken_s < beat_s * cfg.min_narration_coverage {
                 issues.push(Issue {
                     severity: IssueSeverity::Warning,
                     beat_id: Some(beat.id.clone()),
@@ -1443,7 +1642,7 @@ pub fn content_issues(db: &Db, script: &Script) -> Vec<Issue> {
                     message: format!(
                         "narration is {words} words (~{spoken_s:.0} s spoken) but the beat runs {beat_s:.0} s; \
                          write about {:.0} words or shorten the beat",
-                        beat_s * NARRATION_WORDS_PER_S
+                        beat_s * cfg.narration_words_per_s
                     ),
                 });
             }
@@ -1477,6 +1676,41 @@ fn clip_has_speech(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bool {
         .unwrap_or(false)
 }
 
+/// What is actually at a clip's range, when the model never opened it: a short description of the
+/// nearest keyframe or the words spoken there. `None` when the range falls outside the video or
+/// nothing was indexed for it, which is the only case worth throwing the clip away for.
+fn verify_clip(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> Option<String> {
+    let duration: Option<f64> =
+        db.conn.query_row("SELECT duration_s FROM videos WHERE id = ?1", [video_id], |r| r.get(0)).ok().flatten();
+    if in_s < 0.0 || out_s <= in_s || duration.is_some_and(|d| out_s > d + 1.0) {
+        return None;
+    }
+    let said: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT text FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 \
+             ORDER BY start_s LIMIT 1",
+            params![video_id, in_s, out_s],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(t) = said.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        return Some(format!("says \"{}\"", t.chars().take(60).collect::<String>()));
+    }
+    let seen: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT description_json FROM frames WHERE video_id = ?1 AND t_s >= ?2 - 2.0 AND t_s <= ?3 + 2.0 \
+             AND description_json IS NOT NULL ORDER BY t_s LIMIT 1",
+            params![video_id, in_s, out_s],
+            |r| r.get(0),
+        )
+        .ok();
+    seen.and_then(|j| serde_json::from_str::<Value>(&j).ok())
+        .and_then(|v| v["description"].as_str().map(|d| d.chars().take(60).collect::<String>()))
+        .map(|d| format!("shows {d}"))
+}
+
 /// A described keyframe inside the clip, or shortly before it (the view it continues from).
 fn clip_has_described_frame(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bool {
     db.conn
@@ -1490,16 +1724,15 @@ fn clip_has_described_frame(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bo
 }
 
 /// Silence kept after the last words of a speaking clip, so the cut doesn't clip the person off.
-const SPEECH_TAIL_S: f64 = 1.5;
+
 /// Breath kept before the first words.
-const SPEECH_LEAD_S: f64 = 0.5;
+
 /// Never extend a clip further than this to finish a sentence.
-const MAX_SPEECH_EXTEND_S: f64 = 12.0;
 
 /// Let speaking clips breathe: finish the sentence the clip is in, then hold ~1.5 s of the person
 /// before cutting (without running into their next sentence), and start slightly before the first
 /// words. Runs after [`snap_to_segments`], which lands cuts exactly on segment boundaries.
-fn pad_speech(db: &Db, script: &mut Script) -> usize {
+fn pad_speech(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> usize {
     let mut changed = 0;
     for c in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
         let Ok(mut st) = db
@@ -1519,23 +1752,23 @@ fn pad_speech(db: &Db, script: &mut Script) -> usize {
         let (old_in, old_out) = (c.in_s, c.out_s);
 
         let speech_end = segs[last].1;
-        let mut out = speech_end + SPEECH_TAIL_S;
+        let mut out = speech_end + cfg.speech_tail_s;
         if let Some(next) = segs.get(last + 1) {
             out = out.min((next.0 - 0.3).max(speech_end));
         }
-        let out = out.min(old_out + MAX_SPEECH_EXTEND_S).min(duration);
+        let out = out.min(old_out + cfg.max_speech_extend_s).min(duration);
         if out > c.out_s {
             c.out_s = out;
         }
 
         let speech_start = segs[first].0;
-        let mut lead = (speech_start - SPEECH_LEAD_S).max(0.0);
+        let mut lead = (speech_start - cfg.speech_lead_s).max(0.0);
         if first > 0 {
             lead = lead.max(segs[first - 1].1);
         }
         // Also pulls a clip that starts mid-sentence back to the start of that sentence.
         if c.in_s > lead {
-            c.in_s = lead.max(old_in - MAX_SPEECH_EXTEND_S);
+            c.in_s = lead.max(old_in - cfg.max_speech_extend_s);
         }
         if (c.in_s, c.out_s) != (old_in, old_out) {
             changed += 1;
@@ -1671,8 +1904,8 @@ pub async fn run_turn(
     // A configured budget wins; otherwise the backend decides how much research it can afford.
     let rounds_budget = match (ctx.max_tool_rounds, &ctx.backend) {
         (n, _) if n > 0 => n,
-        (_, ChatBackend::Local { .. }) => LOCAL_TOOL_ROUNDS,
-        _ => ROOMY_TOOL_ROUNDS,
+        (_, ChatBackend::Local { .. }) => ctx.script.local_tool_rounds,
+        _ => ctx.script.roomy_tool_rounds,
     };
 
     let (session_id, is_new_session) = match session_id {
@@ -1842,7 +2075,8 @@ pub async fn run_turn(
                         &tool_args,
                         &mut grounding,
                         vector.as_deref(),
-                        SERVER_TOOL_RESULT_CHARS,
+                        ctx.script.roomy_tool_result_chars,
+                        ctx.script.max_shake_jerk,
                     );
 
                     on_event(ChatEvent::ToolFinished { tool: tool_name.clone(), summary: summary.clone() });
@@ -1915,9 +2149,9 @@ pub async fn run_turn(
 
             let redraft_reasons = match &script_res {
                 Ok(s) => {
-                    let mut i = check_grounding(&ctx.db, project_id, s, &grounding);
-                    i.extend(pacing_issues(s, enforce_target));
-                    i.extend(content_issues(&ctx.db, s));
+                    let mut i = check_grounding(&ctx.db, project_id, s, &grounding, &ctx.script);
+                    i.extend(pacing_issues(s, enforce_target, &ctx.script));
+                    i.extend(content_issues(&ctx.db, s, &ctx.script));
                     i
                 }
                 Err(_) => Vec::new(),
@@ -1958,7 +2192,8 @@ pub async fn run_turn(
                 if requested_s.is_some() {
                     s.target_duration_s = requested_s;
                 }
-                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, &mut s, &grounding, enforce_target);
+                pre_issues =
+                    enforce_grounding_and_pacing(&ctx.db, project_id, &mut s, &grounding, enforce_target, &ctx.script);
                 parsed_script = Some(s);
             }
 
@@ -2008,6 +2243,7 @@ pub async fn run_turn(
                             &args,
                             &mut grounding,
                             vector.as_deref(),
+                            &ctx.script,
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
                         let empty = is_empty_search(&tool, &summary);
@@ -2079,9 +2315,9 @@ pub async fn run_turn(
             // local model's first answer is final, and its usual miss — beats with a purpose but
             // no narration — reached the user as a finished script full of silent beats.
             if let Some(s) = &parsed_script {
-                let mut reasons = check_grounding(&ctx.db, project_id, s, &grounding);
-                reasons.extend(pacing_issues(s, enforce_target));
-                reasons.extend(content_issues(&ctx.db, s));
+                let mut reasons = check_grounding(&ctx.db, project_id, s, &grounding, &ctx.script);
+                reasons.extend(pacing_issues(s, enforce_target, &ctx.script));
+                reasons.extend(content_issues(&ctx.db, s, &ctx.script));
                 if !reasons.is_empty() {
                     on_event(ChatEvent::Drafting);
                     let issue_text: Vec<String> = reasons.iter().map(|i| i.message.clone()).collect();
@@ -2110,9 +2346,10 @@ pub async fn run_turn(
                 if requested_s.is_some() {
                     s.target_duration_s = requested_s;
                 }
-                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
+                pre_issues =
+                    enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target, &ctx.script);
                 // Muting happens above, so by now the beats that need a voice-over are known.
-                let jobs = narration_jobs(&ctx.db, s);
+                let jobs = narration_jobs(&ctx.db, s, &ctx.script);
                 let filled = fill_missing_narration(helper, s, jobs).await;
                 if filled > 0 {
                     pre_issues.push(Issue {
@@ -2172,7 +2409,8 @@ pub async fn run_turn(
                             &args,
                             &mut grounding,
                             vector.as_deref(),
-                            SERVER_TOOL_RESULT_CHARS,
+                            ctx.script.roomy_tool_result_chars,
+                            ctx.script.max_shake_jerk,
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
                         let empty = is_empty_search(&tool, &summary);
@@ -2233,7 +2471,8 @@ pub async fn run_turn(
                 if requested_s.is_some() {
                     s.target_duration_s = requested_s;
                 }
-                pre_issues = enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target);
+                pre_issues =
+                    enforce_grounding_and_pacing(&ctx.db, project_id, s, &grounding, enforce_target, &ctx.script);
             }
         }
     }
@@ -2244,7 +2483,7 @@ pub async fn run_turn(
     if let Some(mut s) = parsed_script {
         if s.clip_count() > 0 && !s.beats.is_empty() {
             let _ = snap_to_segments(&ctx.db, &mut s)?;
-            pad_speech(&ctx.db, &mut s);
+            pad_speech(&ctx.db, &mut s, &ctx.script);
             clamp_to_duration(&ctx.db, &mut s);
             let muted = mute_silent_clips(&ctx.db, &mut s);
             if muted > 0 {
@@ -2255,7 +2494,27 @@ pub async fn run_turn(
                     message: format!("muted {muted} clip(s) without speech under the narration"),
                 });
             }
-            issues.extend(content_issues(&ctx.db, &s));
+            // snap_to_segments and pad_speech above pull clips out to whole sentences, which
+            // undoes the trim enforce_grounding_and_pacing just made: an interview-led cut came
+            // out 37% over target because the last word on the subject was padding, not trimming.
+            // Fit once more, now that the clips are their final length.
+            if enforce_target {
+                let before = s.total_duration_s();
+                if fit_to_target(&ctx.db, &mut s, &ctx.script) {
+                    // Trimming can cut a sentence short again; re-snap, then accept the result.
+                    let _ = snap_to_segments(&ctx.db, &mut s)?;
+                    issues.push(Issue {
+                        severity: IssueSeverity::Info,
+                        beat_id: None,
+                        clip_index: None,
+                        message: format!(
+                            "fitted to target after padding: {before:.1} s → {:.1} s",
+                            s.total_duration_s()
+                        ),
+                    });
+                }
+            }
+            issues.extend(content_issues(&ctx.db, &s, &ctx.script));
             issues.extend(validate(&ctx.db, project_id, &s)?);
             let sid = save_version(&ctx.db, project_id, &s, Some(session_id))?;
             script_id = Some(sid);
@@ -2321,9 +2580,63 @@ pub async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Default script settings for tests.
+    fn sc() -> crate::config::ScriptConfig {
+        crate::config::ScriptConfig::default()
+    }
+
     use crate::projects::NewProject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn an_unopened_clip_is_verified_against_the_footage_not_thrown_away() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 60.0)", []).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen) VALUES (1, ?1, 'a.mp4', 1, 0, 0)",
+                [folder.id],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO frames(video_id, t_s, description_json) VALUES (1, 2.0, '{\"description\":\"a hillside\"}')",
+                [],
+            )
+            .unwrap();
 
+        // The model opened nothing, so nothing is grounded by tool results.
+        let grounding = Grounding::default();
+        let clip = |in_s: f64, out_s: f64| ScriptClip { video_id: 1, in_s, out_s, audio: Audio::Mute, why: None };
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: Some("some words about the hillside here".into()),
+                on_screen_text: None,
+                notes: None,
+                // Real footage it never opened, then a range past the end of the video.
+                clips: vec![clip(0.0, 5.0), clip(9000.0, 9005.0)],
+            }],
+        };
+        let issues = enforce_grounding_and_pacing(&db, p.id, &mut script, &grounding, false, &sc());
+        let kept: Vec<(f64, f64)> = script.beats.iter().flat_map(|b| &b.clips).map(|c| (c.in_s, c.out_s)).collect();
+        assert_eq!(kept, vec![(0.0, 5.0)], "real footage survives, invented footage does not: {issues:?}");
+        assert!(
+            issues.iter().any(|i| i.message.contains("kept an unopened clip") && i.message.contains("a hillside")),
+            "should report what it checked: {issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.message.contains("nothing indexed")), "should drop the unreal one: {issues:?}");
+    }
     #[test]
     fn local_action_parsing() {
         let tool_json = r#"{"action":"tool","tool":"search_moments","args":{"query":"unbox","limit":5}}"#;
@@ -2369,15 +2682,15 @@ mod tests {
         g.add(1, 10.0, 20.0);
 
         // Within range
-        assert!(g.is_grounded(1, 12.0, 18.0));
+        assert!(g.is_grounded(1, 12.0, 18.0, sc().grounding_slack_s));
         // Overlap within 5s slack (e.g. 5.0 to 12.0 overlaps 10.0..20.0)
-        assert!(g.is_grounded(1, 6.0, 11.0));
+        assert!(g.is_grounded(1, 6.0, 11.0, sc().grounding_slack_s));
         // Completely outside slack
-        assert!(!g.is_grounded(1, 0.0, 4.0));
+        assert!(!g.is_grounded(1, 0.0, 4.0, sc().grounding_slack_s));
         // Different video
-        assert!(!g.is_grounded(2, 12.0, 18.0));
+        assert!(!g.is_grounded(2, 12.0, 18.0, sc().grounding_slack_s));
         // Overlapping but far outside: a whole-window clip touching the hit is not grounded
-        assert!(!g.is_grounded(1, 0.0, 45.0));
+        assert!(!g.is_grounded(1, 0.0, 45.0, sc().grounding_slack_s));
     }
 
     #[test]
@@ -2399,10 +2712,10 @@ mod tests {
                 notes: None,
             }],
         };
-        let issues = pacing_issues(&s, true);
+        let issues = pacing_issues(&s, true, &sc());
         // two over-long clips + total far from target
         assert_eq!(issues.len(), 3);
-        assert_eq!(pacing_issues(&s, false).len(), 2, "revisions don't enforce the target");
+        assert_eq!(pacing_issues(&s, false, &sc()).len(), 2, "revisions don't enforce the target");
 
         let mut db = Db::open_in_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -2420,12 +2733,12 @@ mod tests {
         let mut g = Grounding::default();
         g.add(1, 0.0, 400.0);
         let mut revision = s.clone();
-        enforce_grounding_and_pacing(&db, p.id, &mut revision, &g, false);
-        assert!(revision.total_duration_s() > 20.0 * TARGET_OVERSHOOT, "revision keeps its length");
-        let applied = enforce_grounding_and_pacing(&db, p.id, &mut s, &g, true);
+        enforce_grounding_and_pacing(&db, p.id, &mut revision, &g, false, &sc());
+        assert!(revision.total_duration_s() > 20.0 * sc().target_overshoot, "revision keeps its length");
+        let applied = enforce_grounding_and_pacing(&db, p.id, &mut s, &g, true, &sc());
         assert!(!applied.is_empty());
-        assert!(s.beats[0].clips.iter().all(|c| c.out_s - c.in_s <= TRIMMED_CLIP_S + 1e-9));
-        assert!(s.total_duration_s() <= 20.0 * TARGET_OVERSHOOT);
+        assert!(s.beats[0].clips.iter().all(|c| c.out_s - c.in_s <= sc().trimmed_clip_s + 1e-9));
+        assert!(s.total_duration_s() <= 20.0 * sc().target_overshoot);
     }
 
     #[test]
@@ -2544,7 +2857,7 @@ mod tests {
                 ),
             ],
         };
-        let issues = content_issues(&db, &s);
+        let issues = content_issues(&db, &s, &sc());
         let msgs: Vec<_> = issues.iter().map(|i| (i.beat_id.clone().unwrap(), i.clip_index)).collect();
         assert_eq!(msgs, vec![("views".to_string(), None), ("dead".to_string(), Some(0))], "{issues:?}");
 
@@ -2557,14 +2870,14 @@ mod tests {
             .unwrap();
         let mut talk = s.clone();
         talk.beats[1].clips[0] = clip(100.0, 110.0);
-        pad_speech(&db, &mut talk);
+        pad_speech(&db, &mut talk, &sc());
         let c = &talk.beats[1].clips[0];
         assert!((c.in_s - 99.5).abs() < 1e-9, "{c:?}");
         assert!((c.out_s - 110.7).abs() < 1e-9, "stops before the next sentence: {c:?}");
         db.conn.execute("DELETE FROM transcript_segments WHERE text = 'next'", []).unwrap();
         let mut talk = s.clone();
         talk.beats[1].clips[0] = clip(100.0, 105.0);
-        pad_speech(&db, &mut talk);
+        pad_speech(&db, &mut talk, &sc());
         assert!((talk.beats[1].clips[0].out_s - 111.5).abs() < 1e-9, "finishes the sentence, then holds");
 
         assert_eq!(mute_silent_clips(&db, &mut s), 2);
@@ -2621,18 +2934,18 @@ mod tests {
         let mut grounding = Grounding::default();
 
         // 1. list_videos
-        let (res, sum) = dispatch_tool(&db, tmp.path(), p.id, "list_videos", &json!({}), &mut grounding, None);
+        let (res, sum) = dispatch_tool(&db, tmp.path(), p.id, "list_videos", &json!({}), &mut grounding, None, &sc());
         assert!(res.len() <= 1500);
         assert!(res.contains("clip.mp4"));
         assert_eq!(sum, "1 videos");
 
         // 2. get_video
         let (res, sum) =
-            dispatch_tool(&db, tmp.path(), p.id, "get_video", &json!({"video_id": 10}), &mut grounding, None);
+            dispatch_tool(&db, tmp.path(), p.id, "get_video", &json!({"video_id": 10}), &mut grounding, None, &sc());
         assert!(res.len() <= 1500);
         assert!(res.contains("Hands holding a green board"));
         assert!(sum.contains("30s"));
-        assert!(grounding.is_grounded(10, 0.0, 30.0));
+        assert!(grounding.is_grounded(10, 0.0, 30.0, sc().grounding_slack_s));
 
         // 3. get_transcript
         let (res, sum) = dispatch_tool(
@@ -2643,21 +2956,30 @@ mod tests {
             &json!({"video_id": 10, "start_s": 0.0, "end_s": 6.0}),
             &mut grounding,
             None,
+            &sc(),
         );
         assert!(res.len() <= 1500);
         assert!(res.contains("welcome to cm5 unboxing"));
         assert_eq!(sum, "2 segments");
 
         // 4. search_moments (keyword only)
-        let (res, sum) =
-            dispatch_tool(&db, tmp.path(), p.id, "search_moments", &json!({"query": "unboxing"}), &mut grounding, None);
+        let (res, sum) = dispatch_tool(
+            &db,
+            tmp.path(),
+            p.id,
+            "search_moments",
+            &json!({"query": "unboxing"}),
+            &mut grounding,
+            None,
+            &sc(),
+        );
         assert!(res.len() <= 1500);
         assert!(res.contains("unboxing"));
         assert_eq!(sum, "1 hits");
 
         // 5. Foreign video rejected
         let (res, sum) =
-            dispatch_tool(&db, tmp.path(), p.id, "get_video", &json!({"video_id": 999}), &mut grounding, None);
+            dispatch_tool(&db, tmp.path(), p.id, "get_video", &json!({"video_id": 999}), &mut grounding, None, &sc());
         assert!(res.contains("error"));
         assert!(sum.contains("error"));
     }
@@ -2796,6 +3118,7 @@ mod tests {
             embedder: None,
             system_prompt: None,
             max_tool_rounds: 0,
+            script: sc(),
         };
 
         let res =
@@ -2910,6 +3233,7 @@ mod tests {
             embedder: None,
             system_prompt: None,
             max_tool_rounds: 0,
+            script: sc(),
         };
 
         let res = run_turn(&mut ctx, p.id, None, "Make video", &mut |_| {}).await.unwrap();

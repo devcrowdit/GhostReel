@@ -373,6 +373,7 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                 <th>Size</th>
                 <th>Format</th>
                 <th>Speech</th>
+                <th>Camera</th>
                 <th>Frames</th>
                 <th>State</th>
               </tr>
@@ -404,6 +405,17 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                   </td>
                   <td>
                     <SpeechCell v={v} />
+                  </td>
+                  <td>
+                    {v.shaky_s > 0 ? (
+                      <span className="tag warn" title="Stretches where the camera shakes; open the video to see them">
+                        shaky {Math.round(v.shaky_s)}s
+                      </span>
+                    ) : v.frames ? (
+                      <span className="muted">steady</span>
+                    ) : (
+                      <span className="muted">–</span>
+                    )}
                   </td>
                   <td className="muted">{v.frames || "–"}</td>
                   <td>

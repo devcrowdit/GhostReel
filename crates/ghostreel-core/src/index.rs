@@ -914,6 +914,19 @@ async fn run_frame_jobs(
         match result {
             Ok(frames) => {
                 store_frames(db, video_id, &rt.data_dir, &frames)?;
+                // Measure how steady the camera is while we are already on this file. A failure
+                // here is not worth failing the stage for: the footage is still usable, the
+                // editor simply will not be told to avoid it.
+                if let Some(opts) = rt.steadiness {
+                    match crate::steadiness::measure(&rt.ffmpeg, &path, duration, opts.window_s, opts.stride_s).await {
+                        Ok(windows) => {
+                            let _ = db.set_motion_windows(video_id, &windows);
+                        }
+                        Err(e) => {
+                            on_event(Event::JobFailed { video_id, stage: "steadiness".into(), error: e.to_string() });
+                        }
+                    }
+                }
                 on_event(Event::JobDone { video_id, stage: STAGE.into() });
                 done += 1;
             }
@@ -1465,6 +1478,9 @@ pub struct VideoRow {
     pub transcribe: Option<String>,
     /// Keyframes stored.
     pub frames: i64,
+    /// Seconds where the camera measured shakier than the configured limit (0 = none, or not
+    /// measured, or the check is off).
+    pub shaky_s: f64,
 }
 
 /// Videos visible to a project (or all), one row per content with its first path.
@@ -1508,16 +1524,24 @@ pub fn status(db: &Db, project_id: Option<i64>) -> Result<Status, Error> {
 }
 
 pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> {
+    videos_with_shake(db, project_id, 0.0)
+}
+
+/// [`videos`], also totalling the seconds each one measured shakier than `max_shake`
+/// (`script.max_shake_jerk`; 0 reports none).
+pub fn videos_with_shake(db: &Db, project_id: Option<i64>, max_shake: f64) -> Result<Vec<VideoRow>, Error> {
     let mut st = db.conn.prepare(&format!(
         "SELECT v.id, sc.path, sc.copies, v.size, v.duration_s, v.width, v.height, v.fps, COALESCE(v.vfr, 0),
                 v.vcodec, v.has_audio, v.status, v.error, v.language,
                 (SELECT COUNT(*) FROM transcript_segments t WHERE t.video_id = v.id),
                 (SELECT j.state FROM jobs j WHERE j.video_id = v.id AND j.stage = 'transcribe'),
-                (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id)
+                (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id),
+                (SELECT COALESCE(SUM(m.end_s - m.start_s), 0) FROM motion_windows m
+                  WHERE m.video_id = v.id AND ?2 > 0 AND m.jerk > ?2)
            FROM ({SCOPE}) sc JOIN videos v ON v.id = sc.video_id
           ORDER BY sc.path"
     ))?;
-    let rows = st.query_map([project_id], |r| {
+    let rows = st.query_map(rusqlite::params![project_id, max_shake], |r| {
         Ok(VideoRow {
             id: r.get(0)?,
             path: PathBuf::from(r.get::<_, String>(1)?),
@@ -1536,6 +1560,7 @@ pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> 
             segments: r.get(14)?,
             transcribe: r.get(15)?,
             frames: r.get(16)?,
+            shaky_s: r.get(17)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -1580,6 +1605,7 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             frames: None,
             vision: VisionSetup::Unavailable("not configured in this test".into()),
             embed: EmbedSetup::Unavailable("not configured in this test".into()),
+            steadiness: None,
         }
     }
 
@@ -1798,6 +1824,7 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             frames: None,
             vision: VisionSetup::Unavailable("not configured in this test".into()),
             embed: EmbedSetup::Unavailable("not configured in this test".into()),
+            steadiness: None,
         };
         let mut events = Vec::new();
         let s = run(&mut db, &unavailable, &opts, |e| events.push(e)).await.unwrap();

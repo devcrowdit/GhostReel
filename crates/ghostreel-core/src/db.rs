@@ -224,6 +224,19 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (project_id, video_id)
     );
     "#,
+    // v5 — how steady the camera is, in windows across each video. Measured from the pictures at
+    // index time: no frame description says whether the operator was on a tripod, and a shaky shot
+    // looks bad in a cut whatever is in it.
+    r#"
+    CREATE TABLE motion_windows (
+        video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        start_s REAL NOT NULL,
+        end_s REAL NOT NULL,
+        jerk REAL NOT NULL,
+        PRIMARY KEY (video_id, start_s)
+    );
+    CREATE INDEX idx_motion_windows_video ON motion_windows(video_id);
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -273,6 +286,28 @@ impl Db {
 
     pub fn schema_version(&self) -> Result<u32, Error> {
         Ok(self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// Record how steady a video is, window by window, replacing any earlier measurement.
+    pub fn set_motion_windows(&self, video_id: i64, windows: &[crate::steadiness::Window]) -> Result<(), Error> {
+        self.conn.execute("DELETE FROM motion_windows WHERE video_id = ?1", [video_id])?;
+        let mut st =
+            self.conn.prepare("INSERT INTO motion_windows(video_id, start_s, end_s, jerk) VALUES (?1, ?2, ?3, ?4)")?;
+        for w in windows {
+            st.execute(rusqlite::params![video_id, w.start_s, w.end_s, w.jerk])?;
+        }
+        Ok(())
+    }
+
+    /// The steadiness windows of a video, in order.
+    pub fn motion_windows(&self, video_id: i64) -> Result<Vec<crate::steadiness::Window>, Error> {
+        let mut st = self
+            .conn
+            .prepare("SELECT start_s, end_s, jerk FROM motion_windows WHERE video_id = ?1 ORDER BY start_s")?;
+        let rows = st.query_map([video_id], |r| {
+            Ok(crate::steadiness::Window { start_s: r.get(0)?, end_s: r.get(1)?, jerk: r.get(2)? })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
     }
 
     fn migrate(&mut self) -> Result<(), Error> {

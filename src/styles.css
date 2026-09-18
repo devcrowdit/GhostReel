@@ -1541,3 +1541,28 @@ form.rename input { font-size: 1.6rem; font-weight: 700; padding: 2px 8px; min-w
 .prompt-actions { justify-content: space-between; margin-top: 8px; }
 
 pre.cli-test-result { background: var(--panel, #171a21); border: 1px solid var(--line, #262a35); border-radius: 8px; padding: 10px; font-size: 0.78rem; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+
+/* Where the camera shakes, across the whole video; red stretches are the ones to cut around. */
+.shake-bar {
+  position: relative;
+  height: 8px;
+  margin: 6px 0 10px;
+  border-radius: 4px;
+  background: var(--border, #2a2a33);
+  overflow: hidden;
+}
+.shake-bar .shaky {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #d9534f;
+  cursor: pointer;
+}
+.shake-bar .playhead {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--fg, #fff);
+  pointer-events: none;
+}

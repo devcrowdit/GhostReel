@@ -177,6 +177,131 @@ impl VisionConfig {
     }
 }
 
+/// Every number the script generator uses to turn a draft into a timeline.
+///
+/// These were constants, which meant a house style could only be changed by rebuilding. They are
+/// deliberately plain seconds, words and fractions: a documentary cut and a fast promo disagree
+/// about nearly all of them, and so do two editors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptConfig {
+    /// Slack around a range a tool returned, when checking a clip came from real footage (s).
+    pub grounding_slack_s: f64,
+    /// Longer than this and the model pasted a whole tool range rather than choosing a shot (s).
+    pub max_clip_s: f64,
+    /// Over-long clips are cut back to this, keeping their start (s).
+    pub trimmed_clip_s: f64,
+    /// Shorter than this and a shot flashes past before it can be read (s).
+    pub min_clip_s: f64,
+    /// Trimming to fit never takes a shot below this (s).
+    pub min_trimmed_clip_s: f64,
+    /// How far over target a draft may sit before it is squeezed (1.25 = 25% over).
+    pub target_overshoot: f64,
+    /// The last pass before saving works to this (1.02 = 2% over). Whatever it leaves is final.
+    pub final_target_tolerance: f64,
+    /// Share of the target that speaking clips may fill, leaving room for the pictures (0.7).
+    pub speech_budget: f64,
+    /// Spoken words per second, for checking narration covers its beat.
+    pub narration_words_per_s: f64,
+    /// Narration shorter than this share of its beat is reported as a gap (0.6).
+    pub min_narration_coverage: f64,
+    /// Held after someone's last word before cutting away (s).
+    pub speech_tail_s: f64,
+    /// Held before someone's first word (s).
+    pub speech_lead_s: f64,
+    /// A clip is never stretched further than this to reach whole sentences (s).
+    pub max_speech_extend_s: f64,
+    /// Tool rounds for a local model, whose context every result is spent from.
+    pub local_tool_rounds: u32,
+    /// Tool rounds for a server or CLI brain: a stop against looping, not a research budget.
+    pub roomy_tool_rounds: u32,
+    /// Characters of tool result a local model is given.
+    pub local_tool_result_chars: usize,
+    /// Characters of tool result a server or CLI brain is given.
+    pub roomy_tool_result_chars: usize,
+    /// Above this frame-to-frame change in camera motion, a shot is called shaky and the editor is
+    /// told to prefer something else. Steady footage measured well under 0.2 here; handheld ran
+    /// several times that. 0 turns the check off.
+    pub max_shake_jerk: f64,
+    /// Seconds measured at a time when checking how steady a video is.
+    pub shake_window_s: f64,
+    /// Seconds between the start of one measured window and the next. Equal to the window by
+    /// default, so every second of a video is covered: the shaky stretches are reported as
+    /// timestamps, and a gap between windows would hide one.
+    pub shake_stride_s: f64,
+}
+
+impl Default for ScriptConfig {
+    fn default() -> Self {
+        Self {
+            grounding_slack_s: 5.0,
+            max_clip_s: 30.0,
+            trimmed_clip_s: 20.0,
+            min_clip_s: 3.0,
+            min_trimmed_clip_s: 4.0,
+            target_overshoot: 1.25,
+            final_target_tolerance: 1.02,
+            speech_budget: 0.7,
+            narration_words_per_s: 2.5,
+            min_narration_coverage: 0.6,
+            speech_tail_s: 1.5,
+            speech_lead_s: 0.5,
+            max_speech_extend_s: 12.0,
+            local_tool_rounds: 10,
+            roomy_tool_rounds: 60,
+            local_tool_result_chars: 1500,
+            roomy_tool_result_chars: 8000,
+            max_shake_jerk: 0.35,
+            shake_window_s: 4.0,
+            shake_stride_s: 4.0,
+        }
+    }
+}
+
+impl ScriptConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let positive: [(&str, f64); 9] = [
+            ("max_clip_s", self.max_clip_s),
+            ("trimmed_clip_s", self.trimmed_clip_s),
+            ("min_clip_s", self.min_clip_s),
+            ("min_trimmed_clip_s", self.min_trimmed_clip_s),
+            ("narration_words_per_s", self.narration_words_per_s),
+            ("speech_tail_s", self.speech_tail_s),
+            ("max_speech_extend_s", self.max_speech_extend_s),
+            ("target_overshoot", self.target_overshoot),
+            ("final_target_tolerance", self.final_target_tolerance),
+        ];
+        for (name, v) in positive {
+            if !(v > 0.0) {
+                return Err(format!("script.{name} must be greater than 0, got {v}"));
+            }
+        }
+        if self.min_clip_s > self.max_clip_s {
+            return Err("script.min_clip_s cannot exceed script.max_clip_s".into());
+        }
+        if self.target_overshoot < 1.0 || self.final_target_tolerance < 1.0 {
+            return Err("script target tolerances are multipliers of the target, so at least 1.0".into());
+        }
+        for (name, v) in
+            [("speech_budget", self.speech_budget), ("min_narration_coverage", self.min_narration_coverage)]
+        {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(format!("script.{name} is a fraction between 0 and 1, got {v}"));
+            }
+        }
+        if self.max_shake_jerk < 0.0 {
+            return Err(format!("script.max_shake_jerk cannot be negative, got {}", self.max_shake_jerk));
+        }
+        if self.shake_window_s <= 0.0 || self.shake_stride_s <= 0.0 {
+            return Err("script shake window and stride must be greater than 0".into());
+        }
+        if self.local_tool_rounds == 0 || self.roomy_tool_rounds == 0 {
+            return Err("script tool rounds must be at least 1".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedConfig {
@@ -272,6 +397,9 @@ pub struct Config {
     pub models: ModelsConfig,
     pub frames: FramesConfig,
     pub chat: ChatConfig,
+    /// The script generator's timing and research settings.
+    #[serde(default)]
+    pub script: ScriptConfig,
 }
 
 impl Config {
@@ -353,6 +481,33 @@ impl Config {
             }
             return Ok(());
         }
+        if section == "script" {
+            let f = &mut self.script;
+            match field {
+                "grounding_slack_s" => f.grounding_slack_s = num(key, value)?,
+                "max_clip_s" => f.max_clip_s = num(key, value)?,
+                "trimmed_clip_s" => f.trimmed_clip_s = num(key, value)?,
+                "min_clip_s" => f.min_clip_s = num(key, value)?,
+                "min_trimmed_clip_s" => f.min_trimmed_clip_s = num(key, value)?,
+                "target_overshoot" => f.target_overshoot = num(key, value)?,
+                "final_target_tolerance" => f.final_target_tolerance = num(key, value)?,
+                "speech_budget" => f.speech_budget = num(key, value)?,
+                "narration_words_per_s" => f.narration_words_per_s = num(key, value)?,
+                "min_narration_coverage" => f.min_narration_coverage = num(key, value)?,
+                "speech_tail_s" => f.speech_tail_s = num(key, value)?,
+                "speech_lead_s" => f.speech_lead_s = num(key, value)?,
+                "max_speech_extend_s" => f.max_speech_extend_s = num(key, value)?,
+                "local_tool_rounds" => f.local_tool_rounds = num(key, value)?,
+                "roomy_tool_rounds" => f.roomy_tool_rounds = num(key, value)?,
+                "local_tool_result_chars" => f.local_tool_result_chars = num(key, value)?,
+                "roomy_tool_result_chars" => f.roomy_tool_result_chars = num(key, value)?,
+                "max_shake_jerk" => f.max_shake_jerk = num(key, value)?,
+                "shake_window_s" => f.shake_window_s = num(key, value)?,
+                "shake_stride_s" => f.shake_stride_s = num(key, value)?,
+                other => return Err(format!("unknown config key 'script.{other}'")),
+            }
+            return self.script.validate();
+        }
         match key {
             "stt.backend" => self.stt.backend = backend(value)?,
             "stt.url" => self.stt.url = value.to_string(),
@@ -382,6 +537,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.vision.validate("vision")?;
         self.chat_model().validate("chat_model")?;
+        self.script.validate()?;
         self.frames.validate()
     }
 

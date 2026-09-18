@@ -130,6 +130,19 @@ export interface VideoRow {
   segments: number;
   transcribe: string | null;
   frames: number;
+  /** Seconds the camera measured shaky; 0 = none, unmeasured, or the check is off. */
+  shaky_s: number;
+}
+
+/** One measured stretch of a video: `jerk` is camera shake as % of frame width per frame. */
+export interface MotionWindow {
+  start_s: number;
+  end_s: number;
+  jerk: number;
+}
+export interface SteadinessView {
+  windows: MotionWindow[];
+  max_shake: number;
 }
 
 export interface FrameRow {
@@ -141,6 +154,7 @@ export interface FrameRow {
 }
 
 export const videoFrames = (videoId: number) => invoke<FrameRow[]>("video_frames", { videoId });
+export const videoSteadiness = (videoId: number) => invoke<SteadinessView>("video_steadiness", { videoId });
 
 export interface TranscriptSegment {
   start: number;
