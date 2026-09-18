@@ -389,8 +389,7 @@ pub fn tools_definition() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search query terms" },
-                        "kind": { "type": "string", "enum": ["moment", "transcript", "frame"], "description": "Chunk kind" },
-                        "limit": { "type": "integer", "description": "Max results (1-8, default 6)" }
+                        "limit": { "type": "integer", "description": "Max results (1-20, default 10)" }
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -624,9 +623,11 @@ pub fn dispatch_tool_limited(
                 Some(q) if !q.trim().is_empty() => q,
                 _ => return (json!({"error": "missing or invalid query"}).to_string(), "error: missing query".into()),
             };
-            let kind = args.get("kind").and_then(|v| v.as_str()).map(|k| vec![k.to_string()]);
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(6).clamp(1, 8) as usize;
-            let opts = SearchOptions { project_id: Some(project_id), limit, kinds: kind };
+            // Exactly what the Library search box does: whole project, every kind of chunk. A
+            // `kind` filter here hid everything whenever that part of the index wasn't built yet
+            // (frame descriptions still running) while the same words sat in the speech.
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 20) as usize;
+            let opts = SearchOptions { project_id: Some(project_id), limit, kinds: None };
 
             let hits = match search_with_vector(db, data_dir, query, vector, &opts) {
                 Ok(h) => h,
@@ -1185,7 +1186,7 @@ pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>, 
     prompt.push_str(
         "\n\nTOOLS (use them generously before writing; your clips can only come from what they return)\n\
          - list_videos(): every video with a short summary.\n\
-         - search_moments(query, kind, limit): find moments by meaning or keyword (speech, on-screen text, visuals).\n\
+         - search_moments(query, limit): find moments by meaning or keyword across speech, on-screen text and visuals.\n\
          - get_video(video_id, start_s, end_s): keyframe descriptions - what is actually visible and when.\n\
          - get_transcript(video_id, start_s, end_s): what people say, with timestamps.\n\n\
          CLIP RANGES: in_s/out_s must lie inside ranges returned by the tools; never use a video_id or range you \
