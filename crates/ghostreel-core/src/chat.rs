@@ -1230,7 +1230,10 @@ fn fit_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig
     // further than the share of the target it is allowed.
     let after_pictures = spoken + want_pictures;
     let speech_factor = if after_pictures > target && spoken > 0.0 {
-        ((target - want_pictures) / spoken).clamp(cfg.speech_budget * target / spoken.max(1e-9), 1.0)
+        // Speech gives way no further than its share of the target, or than what the pictures
+        // present can actually cover — whichever leaves it longer.
+        let floor = (cfg.speech_budget * target).max(target - want_pictures) / spoken;
+        ((target - want_pictures) / spoken).clamp(floor.min(1.0), 1.0)
     } else {
         1.0
     };
@@ -1435,8 +1438,12 @@ fn fit_speech_to_target(db: &Db, script: &mut Script, cfg: &crate::config::Scrip
     let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
     let spoken: f64 =
         script.beats.iter().flat_map(|b| &b.clips).filter(|c| speaking(c)).map(|c| c.out_s - c.in_s).sum();
-    // Leave room for the other shots: speech may use up to 70 % of the target.
-    let budget = target * 0.7;
+    let pictures: f64 =
+        script.beats.iter().flat_map(|b| &b.clips).filter(|c| !speaking(c)).map(|c| c.out_s - c.in_s).sum();
+    // Leave room for the other shots — but only for the ones that exist. Holding speech to a
+    // fixed share of the target assumes pictures will fill the rest, and an interview-led cut has
+    // none to fill it with: a 60 s teaser came out at 41.6 s, which is exactly the share.
+    let budget = (cfg.speech_budget * target).max(target - pictures);
     if spoken <= budget * cfg.target_overshoot {
         return false;
     }
@@ -2684,6 +2691,57 @@ mod tests {
 
     use crate::projects::NewProject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn an_interview_only_cut_is_not_held_to_the_speech_share() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        db.conn
+            .execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 600.0)", [])
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen) VALUES (1, ?1, 'a.mp4', 1, 0, 0)",
+                [folder.id],
+            )
+            .unwrap();
+        // Speech throughout: every clip is someone talking, and whole sentences end on the second.
+        for i in 0..80 {
+            db.conn
+                .execute(
+                    "INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES (1, ?1, ?2, 'a sentence')",
+                    params![i as f64, (i + 1) as f64],
+                )
+                .unwrap();
+        }
+        let clip = |in_s: f64, out_s: f64| ScriptClip { video_id: 1, in_s, out_s, audio: Audio::Source, why: None };
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: Some(60.0),
+            fps: Default::default(),
+            width: None,
+            height: None,
+            // 75 s of interview and no pictures at all.
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: Some(String::new()),
+                on_screen_text: None,
+                notes: None,
+                clips: vec![clip(0.0, 25.0), clip(25.0, 50.0), clip(50.0, 75.0)],
+            }],
+        };
+        // The draft stage tolerates an overrun (the model may still redraft); the final pass
+        // before saving is the one that has to land on the target.
+        assert!(fit_to_target(&db, &mut script, &sc()));
+        let total = script.total_duration_s();
+        // It fills the target, rather than stopping at the 70 % share of it.
+        assert!(total > 55.0, "an interview-only cut may fill the target: {total}");
+        assert!(total <= 62.0, "but not overrun it: {total}");
+    }
+
     #[test]
     fn a_clip_on_a_shaky_stretch_is_moved_to_the_steady_part_of_the_shot() {
         use crate::script::{Audio, Beat, ScriptClip};

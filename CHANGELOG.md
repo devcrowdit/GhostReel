@@ -5,6 +5,15 @@ versions follow [SemVer](https://semver.org/) while the project is 0.x (minor = 
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-09-18
+
+### Fixed
+- **An interview-led cut came in at 70 % of its target.** Speech was held to a fixed share of the
+  length (70 %) to leave room for the pictures — but a teaser built from what people say has no
+  pictures to fill the rest, so a 60 s target produced 41.6 s, exactly the share. Speech now gives
+  way only as far as the pictures actually present can cover; the same prompt and footage now
+  lands at 60.7 s. The share was also hardcoded rather than read from `script.speech_budget`.
+
 ## [0.1.6] — 2026-09-18
 
 The standalone script chat went from producing empty, silent scripts to complete, narrated,
@@ -105,5 +114,6 @@ is and the editor cuts around the shaky stretches; camera originals play in the 
 
 See the git history: `git log v0.1.5`.
 
-[Unreleased]: https://github.com/highercomve/GhostReel/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/highercomve/GhostReel/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/highercomve/GhostReel/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/highercomve/GhostReel/compare/v0.1.5...v0.1.6
