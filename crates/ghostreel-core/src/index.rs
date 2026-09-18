@@ -1528,7 +1528,7 @@ pub fn status(db: &Db, project_id: Option<i64>) -> Result<Status, Error> {
 }
 
 pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> {
-    videos_with_shake(db, project_id, 0.0, 0.0)
+    videos_with_shake(db, project_id, 0.0, 0.0, 0.0)
 }
 
 /// [`videos`], also classifying each one's camera work and totalling the seconds it measured
@@ -1539,6 +1539,7 @@ pub fn videos_with_shake(
     project_id: Option<i64>,
     max_shake: f64,
     shake_relative: f64,
+    max_sway: f64,
 ) -> Result<Vec<VideoRow>, Error> {
     let mut st = db.conn.prepare(&format!(
         "SELECT v.id, sc.path, sc.copies, v.size, v.duration_s, v.width, v.height, v.fps, COALESCE(v.vfr, 0),
@@ -1580,7 +1581,11 @@ pub fn videos_with_shake(
         row.camera = crate::steadiness::camera_style(&windows).as_str().to_string();
         if max_shake > 0.0 && !windows.is_empty() {
             let limit = crate::steadiness::shake_limit(&windows, max_shake, shake_relative);
-            row.shaky_s = windows.iter().filter(|w| w.jerk > limit).map(|w| w.end_s - w.start_s).sum();
+            row.shaky_s = windows
+                .iter()
+                .filter(|w| w.jerk > limit || (max_sway > 0.0 && w.sway > max_sway))
+                .map(|w| w.end_s - w.start_s)
+                .sum();
         }
     }
     Ok(out)

@@ -67,7 +67,16 @@ pub struct Window {
     /// the frame width per frame. Tells a locked-off shot from a pan from a gimbal walk.
     #[serde(default)]
     pub motion: f64,
+    /// Movement that goes nowhere: within any one second, the path length minus the net
+    /// displacement, as a percentage of the frame width per second. A pan, however uneven, goes
+    /// somewhere and scores near zero; a hand swaying at 1 Hz travels and comes back, and that is
+    /// what the eye reads as unsteady even when there is no tremor.
+    #[serde(default)]
+    pub sway: f64,
 }
+
+/// Span over which movement must be undone to count as sway, in seconds.
+const SWAY_SPAN_S: f64 = 1.0;
 
 /// What kind of camera work a clip is, read from its windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,6 +109,9 @@ impl CameraStyle {
 /// Shake floor above which a clip is held rather than mounted or stabilised. Static, tripod and
 /// stabilised footage measured 0.2–0.45 here and against vid.stab; handheld 0.6 and up.
 const HANDHELD_FLOOR: f64 = 0.55;
+/// Ordinary sway above which a clip is held: mounted and stabilised footage measured 0.0–0.6
+/// here, an unstabilised walking shot 1.3 and up.
+const HANDHELD_SWAY: f64 = 0.9;
 /// A window whose camera moves less than this share of the width per frame is standing still.
 const STILL_MOTION: f64 = 0.06;
 /// Share of moving windows below which the moves are occasional (a tripod's pans) rather than
@@ -112,7 +124,8 @@ pub fn camera_style(windows: &[Window]) -> CameraStyle {
         return CameraStyle::Unknown;
     }
     let floor = median(&windows.iter().map(|w| w.jerk).collect::<Vec<_>>());
-    if floor >= HANDHELD_FLOOR {
+    let sway = median(&windows.iter().map(|w| w.sway).collect::<Vec<_>>());
+    if floor >= HANDHELD_FLOOR || sway >= HANDHELD_SWAY {
         return CameraStyle::Handheld;
     }
     let moving = windows.iter().filter(|w| w.motion > STILL_MOTION).count() as f64 / windows.len() as f64;
@@ -391,12 +404,12 @@ pub fn motion_between_from(a: &[u8], b: &[u8], guess: (i32, i32)) -> Option<Moti
 /// smoothing rounds off, and for a few frames the gap between them looks like shake. That is a
 /// transient; the median of a window ignores it. Tremor is there on every frame, and it does not.
 pub fn shake_per_frame(motions: &[Option<Motion>]) -> Vec<f64> {
-    path_stats(motions).into_iter().map(|(shake, _)| shake).collect()
+    path_stats(motions).into_iter().map(|(shake, _, _)| shake).collect()
 }
 
-/// Per frame: the shake (path minus its smoothed self) and the intended speed (the smoothed
-/// path's step), both as a percentage of the frame width.
-pub fn path_stats(motions: &[Option<Motion>]) -> Vec<(f64, f64)> {
+/// Per frame: the shake (path minus its smoothed self), the intended speed (the smoothed path's
+/// step) — both as a percentage of the frame width — and the sway (see [`Window::sway`]).
+pub fn path_stats(motions: &[Option<Motion>]) -> Vec<(f64, f64, f64)> {
     if motions.is_empty() {
         return Vec::new();
     }
@@ -450,6 +463,15 @@ pub fn path_stats(motions: &[Option<Motion>]) -> Vec<(f64, f64)> {
         })
         .collect();
     let pct = |v: f64| v / ANALYSIS_W as f64 * 100.0;
+    // Velocity per frame with cuts and misses at rest, for the sway.
+    let vel: Vec<(f64, f64, f64)> = motions
+        .iter()
+        .map(|m| match m {
+            Some(m) if m.dx.abs() <= cut && m.dy.abs() <= cut => (m.dx, m.dy, m.rot * half_w),
+            _ => (0.0, 0.0, 0.0),
+        })
+        .collect();
+    let h = (SWAY_SPAN_S * ANALYSIS_FPS as f64 / 2.0) as usize;
     path.iter()
         .zip(&smoothed)
         .enumerate()
@@ -457,7 +479,17 @@ pub fn path_stats(motions: &[Option<Motion>]) -> Vec<(f64, f64)> {
             let shake = pct(((px - sx).powi(2) + (py - sy).powi(2) + (pr - sr).powi(2)).sqrt());
             let (qx, qy, qr) = if i == 0 { smoothed[0] } else { smoothed[i - 1] };
             let speed = pct(((sx - qx).powi(2) + (sy - qy).powi(2) + (sr - qr).powi(2)).sqrt());
-            (shake, speed)
+            let (a, b) = (i.saturating_sub(h), (i + h + 1).min(vel.len()));
+            let (mut total, mut nx, mut ny, mut nr) = (0.0, 0.0, 0.0, 0.0);
+            for (vx, vy, vr) in &vel[a..b] {
+                total += (vx * vx + vy * vy + vr * vr).sqrt();
+                nx += vx;
+                ny += vy;
+                nr += vr;
+            }
+            let net = (nx * nx + ny * ny + nr * nr).sqrt();
+            let sway = pct(total - net) / SWAY_SPAN_S;
+            (shake, speed, sway)
         })
         .collect()
 }
@@ -545,11 +577,12 @@ pub async fn measure(
     let stats = path_stats(&motions);
     let per_window = (window_s * ANALYSIS_FPS as f64).round().max(1.0) as usize;
     let mut out: Vec<Window> = Vec::new();
-    let chunks: Vec<&[(f64, f64)]> = stats.chunks(per_window).collect();
-    let summarise = |c: &[(f64, f64)]| {
-        let shake: Vec<f64> = c.iter().map(|(s, _)| *s).collect();
-        let speed: Vec<f64> = c.iter().map(|(_, m)| *m).collect();
-        (median(&shake), median(&speed))
+    let chunks: Vec<&[(f64, f64, f64)]> = stats.chunks(per_window).collect();
+    let summarise = |c: &[(f64, f64, f64)]| {
+        let shake: Vec<f64> = c.iter().map(|(s, _, _)| *s).collect();
+        let speed: Vec<f64> = c.iter().map(|(_, m, _)| *m).collect();
+        let sway: Vec<f64> = c.iter().map(|(_, _, w)| *w).collect();
+        (median(&shake), median(&speed), median(&sway))
     };
     for (i, chunk) in chunks.iter().enumerate() {
         let start_s = i as f64 * window_s;
@@ -559,15 +592,16 @@ pub async fn measure(
         // the window before it instead.
         if i > 0 && chunk.len() < per_window / 2 {
             let last = out.last_mut().expect("a previous window");
-            let merged: Vec<(f64, f64)> = chunks[i - 1].iter().chain(chunk.iter()).copied().collect();
-            let (jerk, motion) = summarise(&merged);
+            let merged: Vec<(f64, f64, f64)> = chunks[i - 1].iter().chain(chunk.iter()).copied().collect();
+            let (jerk, motion, sway) = summarise(&merged);
             last.end_s = end_s;
             last.jerk = jerk;
             last.motion = motion;
+            last.sway = sway;
             continue;
         }
-        let (jerk, motion) = summarise(chunk);
-        out.push(Window { start_s, end_s, jerk, motion });
+        let (jerk, motion, sway) = summarise(chunk);
+        out.push(Window { start_s, end_s, jerk, motion, sway });
     }
     Ok(out)
 }
@@ -584,11 +618,23 @@ pub fn jerk_in_range(windows: &[Window], in_s: f64, out_s: f64) -> Option<f64> {
 /// condemning all of it throws away the steady minutes. The editor picks ranges, so it is told
 /// which ranges to avoid.
 pub fn shaky_spans(windows: &[Window], in_s: f64, out_s: f64, max_jerk: f64) -> Vec<(f64, f64)> {
+    shaky_spans_with_sway(windows, in_s, out_s, max_jerk, 0.0)
+}
+
+/// [`shaky_spans`] also counting windows whose sway exceeds `max_sway` (0 ignores sway).
+pub fn shaky_spans_with_sway(
+    windows: &[Window],
+    in_s: f64,
+    out_s: f64,
+    max_jerk: f64,
+    max_sway: f64,
+) -> Vec<(f64, f64)> {
     if max_jerk <= 0.0 {
         return Vec::new();
     }
+    let unsteady = |w: &Window| w.jerk > max_jerk || (max_sway > 0.0 && w.sway > max_sway);
     let mut spans: Vec<(f64, f64)> = Vec::new();
-    for w in windows.iter().filter(|w| w.end_s > in_s && w.start_s < out_s && w.jerk > max_jerk) {
+    for w in windows.iter().filter(|w| w.end_s > in_s && w.start_s < out_s && unsteady(w)) {
         let (start, end) = (w.start_s.max(in_s), w.end_s.min(out_s));
         match spans.last_mut() {
             // Touching or overlapping windows describe one shaky stretch, not several.
@@ -673,7 +719,7 @@ mod tests {
 
     #[test]
     fn shaky_stretches_are_reported_with_their_timestamps() {
-        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0 };
+        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0, sway: 0.0 };
         let windows = [w(0.0, 4.0, 1.2), w(4.0, 8.0, 1.4), w(8.0, 12.0, 0.1), w(12.0, 16.0, 0.9)];
         assert_eq!(shaky_spans(&windows, 0.0, 20.0, 0.5), vec![(0.0, 8.0), (12.0, 16.0)]);
         assert_eq!(shaky_spans(&windows, 5.0, 10.0, 0.5), vec![(5.0, 8.0)]);
@@ -695,7 +741,7 @@ mod tests {
 
     #[test]
     fn camera_style_reads_the_kind_of_camera_work() {
-        let w = |jerk: f64, motion: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion };
+        let w = |jerk: f64, motion: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion, sway: 0.0 };
         assert_eq!(camera_style(&[]), CameraStyle::Unknown);
         assert_eq!(camera_style(&[w(0.3, 0.0), w(0.3, 0.01), w(0.4, 0.0)]), CameraStyle::Static);
         // Mostly still, one deliberate pan.
@@ -708,7 +754,7 @@ mod tests {
 
     #[test]
     fn the_shake_limit_follows_the_clip_own_baseline() {
-        let w = |jerk: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion: 0.0 };
+        let w = |jerk: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion: 0.0, sway: 0.0 };
         // A tripod's baseline is under the floor, so the floor applies.
         assert_eq!(shake_limit(&[w(0.4), w(0.45), w(0.4)], 1.0, 2.0), 1.0);
         // Handheld footage is judged against twice its own ordinary shake.
@@ -717,9 +763,24 @@ mod tests {
         assert_eq!(shake_limit(&[w(0.8), w(0.9)], 1.0, 0.0), 1.0);
     }
 
+    /// A pan goes somewhere: its movement is not wasted. A sway comes back: all of it is.
+    #[test]
+    fn sway_is_movement_that_comes_back_not_a_pan() {
+        let pan: Vec<Option<Motion>> =
+            (0..90).map(|_| Some(Motion { dx: 2.0, dy: 0.0, rot: 0.0, scale: 1.0 })).collect();
+        // 1 Hz: half a second right, half a second left, same speed.
+        let sway: Vec<Option<Motion>> = (0..90)
+            .map(|i| Some(Motion { dx: if (i / 15) % 2 == 0 { 2.0 } else { -2.0 }, dy: 0.0, rot: 0.0, scale: 1.0 }))
+            .collect();
+        let pan_sway = median(&path_stats(&pan).iter().map(|(_, _, w)| *w).collect::<Vec<_>>());
+        let sway_sway = median(&path_stats(&sway).iter().map(|(_, _, w)| *w).collect::<Vec<_>>());
+        assert!(pan_sway < 0.05, "a pan wastes nothing: {pan_sway}");
+        assert!(sway_sway > 10.0 * pan_sway.max(0.01), "a sway wastes all of it: {sway_sway}");
+    }
+
     #[test]
     fn range_lookup_takes_the_worst_window_it_touches() {
-        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0 };
+        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0, sway: 0.0 };
         let windows = [w(0.0, 4.0, 0.2), w(15.0, 19.0, 1.8), w(30.0, 34.0, 0.3)];
         assert_eq!(jerk_in_range(&windows, 0.0, 5.0), Some(0.2));
         assert_eq!(jerk_in_range(&windows, 3.0, 18.0), Some(1.8));

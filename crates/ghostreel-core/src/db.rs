@@ -242,6 +242,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE motion_windows ADD COLUMN motion REAL NOT NULL DEFAULT 0;
     "#,
+    // v7 — sway: movement within a second that is undone. The slow back-and-forth of an
+    // unstabilised walking shot has no tremor to measure, and this is what catches it.
+    r#"
+    ALTER TABLE motion_windows ADD COLUMN sway REAL NOT NULL DEFAULT 0;
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -296,21 +301,28 @@ impl Db {
     /// Record how steady a video is, window by window, replacing any earlier measurement.
     pub fn set_motion_windows(&self, video_id: i64, windows: &[crate::steadiness::Window]) -> Result<(), Error> {
         self.conn.execute("DELETE FROM motion_windows WHERE video_id = ?1", [video_id])?;
-        let mut st =
-            self.conn.prepare("INSERT INTO motion_windows(video_id, start_s, end_s, jerk) VALUES (?1, ?2, ?3, ?4)")?;
+        let mut st = self.conn.prepare(
+            "INSERT INTO motion_windows(video_id, start_s, end_s, jerk, motion, sway) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
         for w in windows {
-            st.execute(rusqlite::params![video_id, w.start_s, w.end_s, w.jerk])?;
+            st.execute(rusqlite::params![video_id, w.start_s, w.end_s, w.jerk, w.motion, w.sway])?;
         }
         Ok(())
     }
 
     /// The steadiness windows of a video, in order.
     pub fn motion_windows(&self, video_id: i64) -> Result<Vec<crate::steadiness::Window>, Error> {
-        let mut st = self
-            .conn
-            .prepare("SELECT start_s, end_s, jerk, motion FROM motion_windows WHERE video_id = ?1 ORDER BY start_s")?;
+        let mut st = self.conn.prepare(
+            "SELECT start_s, end_s, jerk, motion, sway FROM motion_windows WHERE video_id = ?1 ORDER BY start_s",
+        )?;
         let rows = st.query_map([video_id], |r| {
-            Ok(crate::steadiness::Window { start_s: r.get(0)?, end_s: r.get(1)?, jerk: r.get(2)?, motion: r.get(3)? })
+            Ok(crate::steadiness::Window {
+                start_s: r.get(0)?,
+                end_s: r.get(1)?,
+                jerk: r.get(2)?,
+                motion: r.get(3)?,
+                sway: r.get(4)?,
+            })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
     }

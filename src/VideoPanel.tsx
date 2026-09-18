@@ -66,7 +66,9 @@ export default function VideoPanel({
     setSteadiness(null);
     videoSteadiness(video.id).then(setSteadiness).catch(() => setSteadiness(null));
   }, [video.id, video.frames]);
-  const shaky = (steadiness?.windows ?? []).filter((w) => steadiness!.max_shake > 0 && w.jerk > steadiness!.limit);
+  const shaky = (steadiness?.windows ?? []).filter(
+    (w) => steadiness!.max_shake > 0 && (w.jerk > steadiness!.limit || (steadiness!.max_sway > 0 && w.sway > steadiness!.max_sway)),
+  );
   useEffect(() => {
     setPlayError(false);
     setSrc(null);
@@ -173,7 +175,7 @@ export default function VideoPanel({
                 left: `${(w.start_s / video.duration_s!) * 100}%`,
                 width: `${((w.end_s - w.start_s) / video.duration_s!) * 100}%`,
               }}
-              title={`shaky ${clock(w.start_s)}–${clock(w.end_s)} (${w.jerk.toFixed(2)})`}
+              title={`shaky ${clock(w.start_s)}–${clock(w.end_s)} (tremor ${w.jerk.toFixed(2)}, sway ${w.sway.toFixed(2)})`}
               onClick={() => jump(w.start_s)}
             />
           ))}
