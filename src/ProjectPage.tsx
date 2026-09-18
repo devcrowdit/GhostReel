@@ -407,12 +407,18 @@ export default function ProjectPage({ projectId, onChanged }: { projectId: numbe
                     <SpeechCell v={v} />
                   </td>
                   <td>
-                    {v.shaky_s > 0 ? (
-                      <span className="tag warn" title="Stretches where the camera shakes; open the video to see them">
-                        shaky {Math.round(v.shaky_s)}s
-                      </span>
-                    ) : v.steadiness_measured ? (
-                      <span className="muted">steady</span>
+                    {v.steadiness_measured ? (
+                      <>
+                        <span className={v.camera === "handheld" ? "" : "muted"}>{v.camera}</span>
+                        {v.shaky_s > 0 && (
+                          <span
+                            className="tag warn"
+                            title="Stretches shakier than this clip's own level; open the video to see them"
+                          >
+                            shaky {Math.round(v.shaky_s)}s
+                          </span>
+                        )}
+                      </>
                     ) : (
                       <span className="muted">–</span>
                     )}

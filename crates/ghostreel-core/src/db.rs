@@ -237,6 +237,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_motion_windows_video ON motion_windows(video_id);
     "#,
+    // v6 — how fast the camera moves on purpose in each window, alongside how much it shakes.
+    // Together they say whether a clip is locked off, on a tripod, stabilised or handheld.
+    r#"
+    ALTER TABLE motion_windows ADD COLUMN motion REAL NOT NULL DEFAULT 0;
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -303,9 +308,9 @@ impl Db {
     pub fn motion_windows(&self, video_id: i64) -> Result<Vec<crate::steadiness::Window>, Error> {
         let mut st = self
             .conn
-            .prepare("SELECT start_s, end_s, jerk FROM motion_windows WHERE video_id = ?1 ORDER BY start_s")?;
+            .prepare("SELECT start_s, end_s, jerk, motion FROM motion_windows WHERE video_id = ?1 ORDER BY start_s")?;
         let rows = st.query_map([video_id], |r| {
-            Ok(crate::steadiness::Window { start_s: r.get(0)?, end_s: r.get(1)?, jerk: r.get(2)? })
+            Ok(crate::steadiness::Window { start_s: r.get(0)?, end_s: r.get(1)?, jerk: r.get(2)?, motion: r.get(3)? })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
     }

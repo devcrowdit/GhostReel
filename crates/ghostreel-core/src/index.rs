@@ -1483,6 +1483,8 @@ pub struct VideoRow {
     pub shaky_s: f64,
     /// Whether the camera was measured at all: "steady" is only a verdict when it was.
     pub steadiness_measured: bool,
+    /// static, tripod, stabilised, handheld, or unknown.
+    pub camera: String,
 }
 
 /// Videos visible to a project (or all), one row per content with its first path.
@@ -1526,25 +1528,28 @@ pub fn status(db: &Db, project_id: Option<i64>) -> Result<Status, Error> {
 }
 
 pub fn videos(db: &Db, project_id: Option<i64>) -> Result<Vec<VideoRow>, Error> {
-    videos_with_shake(db, project_id, 0.0)
+    videos_with_shake(db, project_id, 0.0, 0.0)
 }
 
-/// [`videos`], also totalling the seconds each one measured shakier than `max_shake`
-/// (`script.max_shake_jerk`; 0 reports none).
-pub fn videos_with_shake(db: &Db, project_id: Option<i64>, max_shake: f64) -> Result<Vec<VideoRow>, Error> {
+/// [`videos`], also classifying each one's camera work and totalling the seconds it measured
+/// shakier than its limit (`script.max_shake_jerk` raised by `script.shake_relative` times the
+/// clip's own level; a `max_shake` of 0 reports none).
+pub fn videos_with_shake(
+    db: &Db,
+    project_id: Option<i64>,
+    max_shake: f64,
+    shake_relative: f64,
+) -> Result<Vec<VideoRow>, Error> {
     let mut st = db.conn.prepare(&format!(
         "SELECT v.id, sc.path, sc.copies, v.size, v.duration_s, v.width, v.height, v.fps, COALESCE(v.vfr, 0),
                 v.vcodec, v.has_audio, v.status, v.error, v.language,
                 (SELECT COUNT(*) FROM transcript_segments t WHERE t.video_id = v.id),
                 (SELECT j.state FROM jobs j WHERE j.video_id = v.id AND j.stage = 'transcribe'),
-                (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id),
-                (SELECT COALESCE(SUM(m.end_s - m.start_s), 0) FROM motion_windows m
-                  WHERE m.video_id = v.id AND ?2 > 0 AND m.jerk > ?2),
-                EXISTS (SELECT 1 FROM motion_windows m WHERE m.video_id = v.id)
+                (SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id)
            FROM ({SCOPE}) sc JOIN videos v ON v.id = sc.video_id
           ORDER BY sc.path"
     ))?;
-    let rows = st.query_map(rusqlite::params![project_id, max_shake], |r| {
+    let rows = st.query_map([project_id], |r| {
         Ok(VideoRow {
             id: r.get(0)?,
             path: PathBuf::from(r.get::<_, String>(1)?),
@@ -1563,11 +1568,22 @@ pub fn videos_with_shake(db: &Db, project_id: Option<i64>, max_shake: f64) -> Re
             segments: r.get(14)?,
             transcribe: r.get(15)?,
             frames: r.get(16)?,
-            shaky_s: r.get(17)?,
-            steadiness_measured: r.get(18)?,
+            shaky_s: 0.0,
+            steadiness_measured: false,
+            camera: String::new(),
         })
     })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut out: Vec<VideoRow> = rows.collect::<Result<_, _>>()?;
+    for row in &mut out {
+        let windows = db.motion_windows(row.id).unwrap_or_default();
+        row.steadiness_measured = !windows.is_empty();
+        row.camera = crate::steadiness::camera_style(&windows).as_str().to_string();
+        if max_shake > 0.0 && !windows.is_empty() {
+            let limit = crate::steadiness::shake_limit(&windows, max_shake, shake_relative);
+            row.shaky_s = windows.iter().filter(|w| w.jerk > limit).map(|w| w.end_s - w.start_s).sum();
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

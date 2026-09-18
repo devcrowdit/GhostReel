@@ -134,6 +134,8 @@ export interface VideoRow {
   shaky_s: number;
   /** False until the camera has been measured; "steady" means nothing before that. */
   steadiness_measured: boolean;
+  /** static, tripod, stabilised, handheld, or unknown. */
+  camera: string;
 }
 
 /** One measured stretch of a video: `jerk` is camera shake as % of frame width per frame. */
@@ -141,10 +143,15 @@ export interface MotionWindow {
   start_s: number;
   end_s: number;
   jerk: number;
+  /** How fast the camera moves on purpose, % of frame width per frame. */
+  motion: number;
 }
 export interface SteadinessView {
   windows: MotionWindow[];
   max_shake: number;
+  /** The line this clip is judged against (floor, or a multiple of its own level). */
+  limit: number;
+  camera: string;
 }
 
 export interface FrameRow {

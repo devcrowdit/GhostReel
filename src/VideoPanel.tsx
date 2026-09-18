@@ -66,7 +66,7 @@ export default function VideoPanel({
     setSteadiness(null);
     videoSteadiness(video.id).then(setSteadiness).catch(() => setSteadiness(null));
   }, [video.id, video.frames]);
-  const shaky = (steadiness?.windows ?? []).filter((w) => steadiness!.max_shake > 0 && w.jerk > steadiness!.max_shake);
+  const shaky = (steadiness?.windows ?? []).filter((w) => steadiness!.max_shake > 0 && w.jerk > steadiness!.limit);
   useEffect(() => {
     setPlayError(false);
     setSrc(null);
@@ -160,7 +160,10 @@ export default function VideoPanel({
       {video.duration_s != null && steadiness && steadiness.windows.length > 0 && (
         <div
           className="shake-bar"
-          title={shaky.length ? "Red: the camera shakes here — cut around it. Click to jump." : "Camera steady throughout"}
+          title={
+            (steadiness.camera !== "unknown" ? `${steadiness.camera} camera. ` : "") +
+            (shaky.length ? "Red: shakier than this clip's own level — cut around it. Click to jump." : "Steady throughout")
+          }
         >
           {shaky.map((w) => (
             <span

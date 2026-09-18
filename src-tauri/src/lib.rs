@@ -122,7 +122,7 @@ fn project_view(project_id: i64) -> CmdResult<ProjectView> {
         project: db.project(project_id).map_err(err)?,
         folders,
         status: index::status(&db, Some(project_id)).map_err(err)?,
-        videos: index::videos_with_shake(&db, Some(project_id), shake_limit()).map_err(err)?,
+        videos: index::videos_with_shake(&db, Some(project_id), shake_limit(), shake_relative()).map_err(err)?,
         excluded: db
             .excluded_videos(project_id)
             .map_err(err)?
@@ -787,19 +787,31 @@ fn shake_limit() -> f64 {
     paths().map(|p| Config::load(&p.config_file).unwrap_or_default().script.max_shake_jerk).unwrap_or(0.0)
 }
 
+/// `script.shake_relative` from the config.
+fn shake_relative() -> f64 {
+    paths().map(|p| Config::load(&p.config_file).unwrap_or_default().script.shake_relative).unwrap_or(0.0)
+}
+
 /// How steady the camera is through one video, window by window, plus the limit the app calls
 /// shaky — so the panel can mark the stretches to cut around.
 #[derive(Serialize)]
 struct SteadinessView {
     windows: Vec<ghostreel_core::steadiness::Window>,
+    /// The global floor.
     max_shake: f64,
+    /// The line this clip is judged against: the floor, or a multiple of its own level.
+    limit: f64,
+    camera: String,
 }
 
 #[tauri::command]
 fn video_steadiness(video_id: i64) -> CmdResult<SteadinessView> {
     let p = paths()?;
     let db = Db::open(&p.db_file()).map_err(err)?;
-    Ok(SteadinessView { windows: db.motion_windows(video_id).map_err(err)?, max_shake: shake_limit() })
+    let windows = db.motion_windows(video_id).map_err(err)?;
+    let limit = ghostreel_core::steadiness::shake_limit(&windows, shake_limit(), shake_relative());
+    let camera = ghostreel_core::steadiness::camera_style(&windows).as_str().to_string();
+    Ok(SteadinessView { windows, max_shake: shake_limit(), limit, camera })
 }
 
 #[tauri::command]

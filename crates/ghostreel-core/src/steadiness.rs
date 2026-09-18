@@ -60,9 +60,80 @@ const CUT_FRACTION: f64 = 0.25;
 pub struct Window {
     pub start_s: f64,
     pub end_s: f64,
-    /// RMS of the camera's high-frequency movement, as a percentage of the frame width per
-    /// frame. A tripod sits near 0; handheld footage runs well above 0.5.
+    /// The camera's high-frequency movement, as a percentage of the frame width per frame. A
+    /// tripod sits near 0; handheld footage runs well above 0.5.
     pub jerk: f64,
+    /// How fast the camera is moving on purpose — the smoothed path's speed, as a percentage of
+    /// the frame width per frame. Tells a locked-off shot from a pan from a gimbal walk.
+    #[serde(default)]
+    pub motion: f64,
+}
+
+/// What kind of camera work a clip is, read from its windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraStyle {
+    /// Nothing measured yet.
+    Unknown,
+    /// Locked off: neither moving nor shaking.
+    Static,
+    /// Steady, with occasional deliberate moves — pans on a head.
+    Tripod,
+    /// Steady while moving continuously — a gimbal, a stabilised action camera, a slider.
+    Stabilised,
+    /// Held: the shake floor is up whatever the camera is doing.
+    Handheld,
+}
+
+impl CameraStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CameraStyle::Unknown => "unknown",
+            CameraStyle::Static => "static",
+            CameraStyle::Tripod => "tripod",
+            CameraStyle::Stabilised => "stabilised",
+            CameraStyle::Handheld => "handheld",
+        }
+    }
+}
+
+/// Shake floor above which a clip is held rather than mounted or stabilised. Static, tripod and
+/// stabilised footage measured 0.2–0.45 here and against vid.stab; handheld 0.6 and up.
+const HANDHELD_FLOOR: f64 = 0.55;
+/// A window whose camera moves less than this share of the width per frame is standing still.
+const STILL_MOTION: f64 = 0.06;
+/// Share of moving windows below which the moves are occasional (a tripod's pans) rather than
+/// continuous (a gimbal).
+const TRIPOD_MOVING_SHARE: f64 = 0.4;
+
+/// Classify a clip's camera work from its measured windows.
+pub fn camera_style(windows: &[Window]) -> CameraStyle {
+    if windows.is_empty() {
+        return CameraStyle::Unknown;
+    }
+    let floor = median(&windows.iter().map(|w| w.jerk).collect::<Vec<_>>());
+    if floor >= HANDHELD_FLOOR {
+        return CameraStyle::Handheld;
+    }
+    let moving = windows.iter().filter(|w| w.motion > STILL_MOTION).count() as f64 / windows.len() as f64;
+    if moving == 0.0 {
+        CameraStyle::Static
+    } else if moving < TRIPOD_MOVING_SHARE {
+        CameraStyle::Tripod
+    } else {
+        CameraStyle::Stabilised
+    }
+}
+
+/// The line above which a stretch of this clip counts as shaky: the global floor, or a multiple
+/// of the clip's own baseline, whichever is higher. Handheld footage is judged against itself —
+/// its ordinary stretches are what it is, the ones worse than that are the ones to avoid.
+pub fn shake_limit(windows: &[Window], max_jerk: f64, relative: f64) -> f64 {
+    if windows.is_empty() || relative <= 0.0 {
+        return max_jerk;
+    }
+    let baseline = median(&windows.iter().map(|w| w.jerk).collect::<Vec<_>>());
+    max_jerk.max(relative * baseline)
 }
 
 /// The camera's movement from one frame to the next.
@@ -320,6 +391,12 @@ pub fn motion_between_from(a: &[u8], b: &[u8], guess: (i32, i32)) -> Option<Moti
 /// smoothing rounds off, and for a few frames the gap between them looks like shake. That is a
 /// transient; the median of a window ignores it. Tremor is there on every frame, and it does not.
 pub fn shake_per_frame(motions: &[Option<Motion>]) -> Vec<f64> {
+    path_stats(motions).into_iter().map(|(shake, _)| shake).collect()
+}
+
+/// Per frame: the shake (path minus its smoothed self) and the intended speed (the smoothed
+/// path's step), both as a percentage of the frame width.
+pub fn path_stats(motions: &[Option<Motion>]) -> Vec<(f64, f64)> {
     if motions.is_empty() {
         return Vec::new();
     }
@@ -359,9 +436,8 @@ pub fn shake_per_frame(motions: &[Option<Motion>]) -> Vec<f64> {
             path[j as usize]
         }
     };
-    path.iter()
-        .enumerate()
-        .map(|(i, (px, py, pr))| {
+    let smoothed: Vec<(f64, f64, f64)> = (0..path.len())
+        .map(|i| {
             let (mut sx, mut sy, mut sr, mut sw) = (0.0, 0.0, 0.0, 0.0);
             for (k, w) in (-radius..=radius).zip(&weights) {
                 let (qx, qy, qr) = at(i as i64 + k);
@@ -370,8 +446,18 @@ pub fn shake_per_frame(motions: &[Option<Motion>]) -> Vec<f64> {
                 sr += w * qr;
                 sw += w;
             }
-            let (ex, ey, er) = (px - sx / sw, py - sy / sw, pr - sr / sw);
-            (ex * ex + ey * ey + er * er).sqrt() / ANALYSIS_W as f64 * 100.0
+            (sx / sw, sy / sw, sr / sw)
+        })
+        .collect();
+    let pct = |v: f64| v / ANALYSIS_W as f64 * 100.0;
+    path.iter()
+        .zip(&smoothed)
+        .enumerate()
+        .map(|(i, ((px, py, pr), (sx, sy, sr)))| {
+            let shake = pct(((px - sx).powi(2) + (py - sy).powi(2) + (pr - sr).powi(2)).sqrt());
+            let (qx, qy, qr) = if i == 0 { smoothed[0] } else { smoothed[i - 1] };
+            let speed = pct(((sx - qx).powi(2) + (sy - qy).powi(2) + (sr - qr).powi(2)).sqrt());
+            (shake, speed)
         })
         .collect()
 }
@@ -456,10 +542,15 @@ pub async fn measure(
         }
     }
 
-    let shake = shake_per_frame(&motions);
+    let stats = path_stats(&motions);
     let per_window = (window_s * ANALYSIS_FPS as f64).round().max(1.0) as usize;
     let mut out: Vec<Window> = Vec::new();
-    let chunks: Vec<&[f64]> = shake.chunks(per_window).collect();
+    let chunks: Vec<&[(f64, f64)]> = stats.chunks(per_window).collect();
+    let summarise = |c: &[(f64, f64)]| {
+        let shake: Vec<f64> = c.iter().map(|(s, _)| *s).collect();
+        let speed: Vec<f64> = c.iter().map(|(_, m)| *m).collect();
+        (median(&shake), median(&speed))
+    };
     for (i, chunk) in chunks.iter().enumerate() {
         let start_s = i as f64 * window_s;
         let end_s = (start_s + window_s).min(duration_s);
@@ -468,14 +559,15 @@ pub async fn measure(
         // the window before it instead.
         if i > 0 && chunk.len() < per_window / 2 {
             let last = out.last_mut().expect("a previous window");
-            let prev_n = chunks[i - 1].len();
-            let merged: Vec<f64> = chunks[i - 1].iter().chain(chunk.iter()).copied().collect();
+            let merged: Vec<(f64, f64)> = chunks[i - 1].iter().chain(chunk.iter()).copied().collect();
+            let (jerk, motion) = summarise(&merged);
             last.end_s = end_s;
-            last.jerk = median(&merged);
-            debug_assert!(prev_n >= chunk.len());
+            last.jerk = jerk;
+            last.motion = motion;
             continue;
         }
-        out.push(Window { start_s, end_s, jerk: median(chunk) });
+        let (jerk, motion) = summarise(chunk);
+        out.push(Window { start_s, end_s, jerk, motion });
     }
     Ok(out)
 }
@@ -581,7 +673,7 @@ mod tests {
 
     #[test]
     fn shaky_stretches_are_reported_with_their_timestamps() {
-        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk };
+        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0 };
         let windows = [w(0.0, 4.0, 1.2), w(4.0, 8.0, 1.4), w(8.0, 12.0, 0.1), w(12.0, 16.0, 0.9)];
         assert_eq!(shaky_spans(&windows, 0.0, 20.0, 0.5), vec![(0.0, 8.0), (12.0, 16.0)]);
         assert_eq!(shaky_spans(&windows, 5.0, 10.0, 0.5), vec![(5.0, 8.0)]);
@@ -602,8 +694,32 @@ mod tests {
     }
 
     #[test]
+    fn camera_style_reads_the_kind_of_camera_work() {
+        let w = |jerk: f64, motion: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion };
+        assert_eq!(camera_style(&[]), CameraStyle::Unknown);
+        assert_eq!(camera_style(&[w(0.3, 0.0), w(0.3, 0.01), w(0.4, 0.0)]), CameraStyle::Static);
+        // Mostly still, one deliberate pan.
+        assert_eq!(camera_style(&[w(0.3, 0.0), w(0.4, 0.5), w(0.3, 0.0), w(0.3, 0.0)]), CameraStyle::Tripod);
+        // Moving the whole time, without shake: a gimbal.
+        assert_eq!(camera_style(&[w(0.3, 0.4), w(0.3, 0.6), w(0.4, 0.5)]), CameraStyle::Stabilised);
+        // The floor is up: held, however it moves.
+        assert_eq!(camera_style(&[w(0.9, 0.0), w(1.1, 0.2), w(0.8, 0.1)]), CameraStyle::Handheld);
+    }
+
+    #[test]
+    fn the_shake_limit_follows_the_clip_own_baseline() {
+        let w = |jerk: f64| Window { start_s: 0.0, end_s: 4.0, jerk, motion: 0.0 };
+        // A tripod's baseline is under the floor, so the floor applies.
+        assert_eq!(shake_limit(&[w(0.4), w(0.45), w(0.4)], 1.0, 2.0), 1.0);
+        // Handheld footage is judged against twice its own ordinary shake.
+        assert!((shake_limit(&[w(0.8), w(0.9), w(0.85)], 1.0, 2.0) - 1.7).abs() < 1e-9);
+        // Relative judging off: just the floor.
+        assert_eq!(shake_limit(&[w(0.8), w(0.9)], 1.0, 0.0), 1.0);
+    }
+
+    #[test]
     fn range_lookup_takes_the_worst_window_it_touches() {
-        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk };
+        let w = |start_s: f64, end_s: f64, jerk: f64| Window { start_s, end_s, jerk, motion: 0.0 };
         let windows = [w(0.0, 4.0, 0.2), w(15.0, 19.0, 1.8), w(30.0, 34.0, 0.3)];
         assert_eq!(jerk_in_range(&windows, 0.0, 5.0), Some(0.2));
         assert_eq!(jerk_in_range(&windows, 3.0, 18.0), Some(1.8));

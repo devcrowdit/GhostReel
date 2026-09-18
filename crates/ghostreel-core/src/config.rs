@@ -225,6 +225,10 @@ pub struct ScriptConfig {
     /// camera all sit at 0.2–0.45 (the floor), handheld footage at 0.6–1.3 with its worst
     /// stretches around 2. 0 turns the check off.
     pub max_shake_jerk: f64,
+    /// A stretch also has to be this many times shakier than its own clip's ordinary level to be
+    /// called shaky: handheld footage is judged against itself, not condemned wholesale. The
+    /// higher of this and `max_shake_jerk` applies. 0 uses `max_shake_jerk` alone.
+    pub shake_relative: f64,
     /// Seconds measured at a time when checking how steady a video is.
     pub shake_window_s: f64,
     /// Seconds between the start of one measured window and the next. Equal to the window by
@@ -254,6 +258,7 @@ impl Default for ScriptConfig {
             local_tool_result_chars: 1500,
             roomy_tool_result_chars: 8000,
             max_shake_jerk: 1.0,
+            shake_relative: 2.0,
             shake_window_s: 4.0,
             shake_stride_s: 4.0,
         }
@@ -293,6 +298,9 @@ impl ScriptConfig {
         }
         if self.max_shake_jerk < 0.0 {
             return Err(format!("script.max_shake_jerk cannot be negative, got {}", self.max_shake_jerk));
+        }
+        if self.shake_relative < 0.0 {
+            return Err(format!("script.shake_relative cannot be negative, got {}", self.shake_relative));
         }
         if self.shake_window_s <= 0.0 || self.shake_stride_s <= 0.0 {
             return Err("script shake window and stride must be greater than 0".into());
@@ -504,6 +512,7 @@ impl Config {
                 "local_tool_result_chars" => f.local_tool_result_chars = num(key, value)?,
                 "roomy_tool_result_chars" => f.roomy_tool_result_chars = num(key, value)?,
                 "max_shake_jerk" => f.max_shake_jerk = num(key, value)?,
+                "shake_relative" => f.shake_relative = num(key, value)?,
                 "shake_window_s" => f.shake_window_s = num(key, value)?,
                 "shake_stride_s" => f.shake_stride_s = num(key, value)?,
                 other => return Err(format!("unknown config key 'script.{other}'")),

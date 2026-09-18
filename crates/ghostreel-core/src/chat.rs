@@ -682,6 +682,7 @@ pub fn dispatch_tool(
         vector,
         cfg.local_tool_result_chars,
         cfg.max_shake_jerk,
+        cfg.shake_relative,
     )
 }
 
@@ -702,6 +703,7 @@ pub fn dispatch_tool_limited(
     vector: Option<&[f32]>,
     max_chars: usize,
     max_shake: f64,
+    shake_relative: f64,
 ) -> (String, String) {
     match tool {
         "search_moments" => {
@@ -930,7 +932,11 @@ pub fn dispatch_tool_limited(
             // How steady the camera is here. No frame description mentions it, and a shaky shot
             // looks wrong in a cut whatever it shows.
             let measured = db.motion_windows(video_id).unwrap_or_default();
-            let shaky_spans = crate::steadiness::shaky_spans(&measured, range_start, speech_end, max_shake);
+            // Judged against the clip's own ordinary level as well as the floor: a handheld
+            // clip's usual stretches are what it is, the worse ones are what to avoid.
+            let limit = crate::steadiness::shake_limit(&measured, max_shake, shake_relative);
+            let camera = crate::steadiness::camera_style(&measured).as_str();
+            let shaky_spans = crate::steadiness::shaky_spans(&measured, range_start, speech_end, limit);
             // Timestamps, not a verdict on the whole file: most of a shaky clip is usually fine,
             // and the editor is choosing a range, not a video.
             let shaky_at: Vec<String> = shaky_spans.iter().map(|(a, b)| format!("{a:.1}-{b:.1}")).collect();
@@ -953,6 +959,7 @@ pub fn dispatch_tool_limited(
                 "has_speech": has_speech,
                 "audio": if has_speech { "source" } else { "mute" },
                 "steady": steady,
+                "camera": camera,
                 "shaky_at": shaky_at,
                 "frames": frames,
             });
@@ -988,6 +995,8 @@ pub fn dispatch_tool_limited(
                 language: Option<String>,
                 /// Someone talks in this video: it can carry a beat on its own audio.
                 has_speech: bool,
+                /// static, tripod, stabilised, handheld — or unknown before measuring.
+                camera: &'static str,
                 summary: String,
             }
 
@@ -1049,7 +1058,16 @@ pub fn dispatch_tool_limited(
                         r.get::<_, bool>(0)
                     })
                     .unwrap_or(false);
-                videos.push(VideoItem { video_id: vid, file, duration_s, language, has_speech, summary: summary_text });
+                let camera = crate::steadiness::camera_style(&db.motion_windows(vid).unwrap_or_default()).as_str();
+                videos.push(VideoItem {
+                    video_id: vid,
+                    file,
+                    duration_s,
+                    language,
+                    has_speech,
+                    camera,
+                    summary: summary_text,
+                });
             }
 
             let summary = format!("{} videos", videos.len());
@@ -1426,7 +1444,7 @@ HOW TO EDIT
    - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
-5a. get_video reports steadiness, and lists the shaky stretches of a video as shaky_at timestamps (\"12.0-16.0\"). A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
+5a. list_videos and get_video report the camera work: static, tripod, stabilised or handheld. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
@@ -2077,6 +2095,7 @@ pub async fn run_turn(
                         vector.as_deref(),
                         ctx.script.roomy_tool_result_chars,
                         ctx.script.max_shake_jerk,
+                        ctx.script.shake_relative,
                     );
 
                     on_event(ChatEvent::ToolFinished { tool: tool_name.clone(), summary: summary.clone() });
@@ -2411,6 +2430,7 @@ pub async fn run_turn(
                             vector.as_deref(),
                             ctx.script.roomy_tool_result_chars,
                             ctx.script.max_shake_jerk,
+                            ctx.script.shake_relative,
                         );
                         on_event(ChatEvent::ToolFinished { tool: tool.clone(), summary: summary.clone() });
                         let empty = is_empty_search(&tool, &summary);
