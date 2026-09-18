@@ -396,7 +396,7 @@ mod tests {
 
         // Fake claude: echo the JSON response format
         let answer = r#"{\"description\":\"two boards\",\"visible_text\":[],\"objects\":[\"board\"],\"setting\":\"desk\",\"shot\":\"close-up\",\"tags\":[]}"#;
-        let script = format!(r#"echo '{{"result": "{answer}", "cost_usd": 0.04}}'"#);
+        let script = format!(r#"printf '%s\n' '{{"result": "{answer}", "cost_usd": 0.04}}'"#);
         let bin = write_fake_cli(tmp.path(), "claude", &script);
 
         let agent = CliAgent::new(cfg("claude", &bin));
@@ -412,7 +412,7 @@ mod tests {
         std::fs::write(&img, b"fake").unwrap();
 
         let answer = r#"{\"description\":\"a mountain\",\"visible_text\":[],\"objects\":[\"peak\"],\"setting\":\"outdoors\",\"shot\":\"wide\",\"tags\":[]}"#;
-        let script = format!(r#"echo '{{"response": "{answer}", "duration_ms": 1200}}'"#);
+        let script = format!(r#"printf '%s\n' '{{"response": "{answer}", "duration_ms": 1200}}'"#);
         let bin = write_fake_cli(tmp.path(), "agy", &script);
 
         let agent = CliAgent::new(cfg("agy", &bin));
@@ -445,7 +445,7 @@ mod tests {
 
         // claude returns fenced JSON in the result field
         let result_val = r#"```json\n{\"description\":\"a monitor\",\"visible_text\":[],\"objects\":[],\"setting\":\"office\",\"shot\":\"close-up\",\"tags\":[]}\n```"#;
-        let script = format!(r#"echo '{{"result": "{result_val}"}}'  "#);
+        let script = format!(r#"printf '%s\n' '{{"result": "{result_val}"}}'  "#);
         let bin = write_fake_cli(tmp.path(), "claude", &script);
 
         let agent = CliAgent::new(cfg("claude", &bin));
