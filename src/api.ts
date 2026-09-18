@@ -316,6 +316,8 @@ export const mediaUrl = async (path: string) => {
   return `${await mediaBasePromise}?path=${encodeURIComponent(path)}`;
 };
 export const openExternal = (path: string, t: number) => invoke<void>("open_external", { path, t });
+/** What the player should load: the original, or a playable proxy built on first open. */
+export const videoPlayback = (videoId: number) => invoke<{ path: string; proxy: boolean }>("video_playback", { videoId });
 
 export const clock = (s: number) => {
   const t = Math.max(0, Math.floor(s));

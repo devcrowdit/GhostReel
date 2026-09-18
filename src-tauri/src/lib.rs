@@ -822,6 +822,37 @@ fn video_steadiness(video_id: i64) -> CmdResult<SteadinessView> {
     Ok(SteadinessView { windows, max_shake: shake_limit(), limit, max_sway: max_sway(), camera })
 }
 
+/// What the player should load for a video: the original when the browser can play it, else a
+/// proxy built now (and kept) — 4K 10-bit camera files otherwise sit black for a long time.
+#[derive(Serialize)]
+struct PlaybackView {
+    path: PathBuf,
+    proxy: bool,
+}
+
+#[tauri::command]
+async fn video_playback(video_id: i64) -> CmdResult<PlaybackView> {
+    let p = paths()?;
+    let (path, hash): (String, String) = {
+        let db = Db::open(&p.db_file()).map_err(err)?;
+        db.conn
+            .query_row(
+                "SELECT vf.path, v.content_hash FROM videos v JOIN video_files vf ON vf.video_id = v.id WHERE v.id = ?1 LIMIT 1",
+                [video_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(err)?
+    };
+    let original = PathBuf::from(&path);
+    let ffprobe = doctor::locate("ffprobe").ok_or_else(|| "ffprobe not found".to_string())?;
+    if ghostreel_core::preview::plays_natively(&ffprobe, &original).await {
+        return Ok(PlaybackView { path: original, proxy: false });
+    }
+    let ffmpeg = doctor::locate("ffmpeg").ok_or_else(|| "ffmpeg not found".to_string())?;
+    let proxy = ghostreel_core::preview::playback_proxy(&ffmpeg, &p.data_dir, &original, &hash).await.map_err(err)?;
+    Ok(PlaybackView { path: proxy, proxy: true })
+}
+
 #[tauri::command]
 fn video_frames(video_id: i64) -> CmdResult<Vec<FrameRow>> {
     let p = paths()?;
@@ -988,6 +1019,7 @@ pub fn run() {
             video_transcript,
             video_frames,
             video_steadiness,
+            video_playback,
             search,
             open_external,
             media_base,

@@ -5,6 +5,7 @@ import {
   fileName,
   fileUrl,
   mediaUrl,
+  videoPlayback,
   openExternal,
   videoFrames,
   videoSteadiness,
@@ -69,10 +70,29 @@ export default function VideoPanel({
   const shaky = (steadiness?.windows ?? []).filter(
     (w) => steadiness!.max_shake > 0 && (w.jerk > steadiness!.limit || (steadiness!.max_sway > 0 && w.sway > steadiness!.max_sway)),
   );
+  const [preparing, setPreparing] = useState(false);
   useEffect(() => {
+    let cancelled = false;
     setPlayError(false);
     setSrc(null);
-    mediaUrl(video.path).then(setSrc).catch(() => setPlayError(true));
+    setPreparing(true);
+    // A 4K 10-bit camera original sits black in the player for a long time; ask for something
+    // it can play (a proxy, built once), and fall back to the original if that fails.
+    videoPlayback(video.id)
+      .then((pb) => mediaUrl(pb.path))
+      .catch(() => mediaUrl(video.path))
+      .then((url) => {
+        if (!cancelled) setSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setPlayError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setPreparing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [video.id, video.path]);
 
   const jump = (t: number) => {
@@ -149,6 +169,9 @@ export default function VideoPanel({
           onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
           onError={() => setPlayError(true)}
         />
+        {preparing && !src && (
+          <div className="play-error muted">Preparing a playable copy…</div>
+        )}
         {playError && (
           <div className="play-error">
             This video format can't play here.{" "}
