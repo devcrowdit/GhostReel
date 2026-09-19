@@ -75,6 +75,9 @@ pub enum ChatBackend {
         url: String,
         model: String,
         api_key: String,
+        /// The window the server was started with (`chat_model.ctx_tokens`). Every round re-sends
+        /// the whole conversation, so the loop has to know when it is about to run out of room.
+        ctx_tokens: u32,
     },
     Local {
         helper: Box<crate::vision::LocalLlm>,
@@ -92,12 +95,36 @@ impl ChatBackend {
         Self::from_vision_setup(&rt.vision).await
     }
 
+    /// The window this backend is talking to, for deciding when a conversation has grown too
+    /// long to send again. Zero when it does not apply (a CLI agent manages its own).
+    pub fn window_tokens(&self) -> u32 {
+        match self {
+            ChatBackend::Server { ctx_tokens, .. } => *ctx_tokens,
+            ChatBackend::Local { ctx_tokens, .. } => *ctx_tokens,
+            ChatBackend::Cli(_) => 0,
+        }
+    }
+
+    /// Records the window a server was configured with; `from_vision_setup` cannot know it.
+    pub fn with_window(mut self, tokens: u32) -> Self {
+        if let ChatBackend::Server { ctx_tokens, .. } = &mut self {
+            *ctx_tokens = tokens;
+        }
+        self
+    }
+
     /// Chat uses the vision model (Bonsai): the vision server, or the local helper with the model
     /// and mmproj (downloaded once when missing, like the describe stage).
     pub async fn from_vision_setup(setup: &crate::runtime::VisionSetup) -> Result<Self, Error> {
         match setup {
             crate::runtime::VisionSetup::Server(s) => {
-                Ok(ChatBackend::Server { url: s.url.clone(), model: s.model.clone(), api_key: s.api_key.clone() })
+                // The caller sets the window with `with_window`: a VisionSetup does not carry it.
+                Ok(ChatBackend::Server {
+                    url: s.url.clone(),
+                    model: s.model.clone(),
+                    api_key: s.api_key.clone(),
+                    ctx_tokens: 32768,
+                })
             }
             crate::runtime::VisionSetup::Cli(cfg) => Ok(ChatBackend::Cli(crate::cliagent::CliAgent::new(cfg.clone()))),
             crate::runtime::VisionSetup::Local { helper, models_dir, model, mmproj, found, runtime } => {
@@ -685,6 +712,41 @@ pub fn local_final_action_schema() -> Value {
             }
         ]
     })
+}
+
+/// Roughly how much of a context window a conversation takes, at four characters a token.
+fn approx_tokens(messages: &[Value]) -> usize {
+    messages.iter().map(|m| m.to_string().len()).sum::<usize>() / 4
+}
+
+/// Make room for another round by forgetting the oldest tool results.
+///
+/// Every round re-sends the whole conversation, so a model that keeps looking eventually fills the
+/// window — Bonsai 2 made 199 tool calls and the turn died on a raw "exceeds the available context
+/// size" from the server, with nothing drafted. The oldest results are the ones it has already
+/// used or discarded; dropping them keeps the research going. Returns false when there is nothing
+/// left to drop, which means it is time to draft with what we have.
+fn make_room(messages: &mut Vec<Value>, budget_tokens: usize) -> bool {
+    if approx_tokens(messages) <= budget_tokens {
+        return true;
+    }
+    // Keep the system prompt and the first user message: the brief and the rules are why we are
+    // here. Everything between is fair game, oldest first.
+    while approx_tokens(messages) > budget_tokens {
+        let victim = messages
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find(|(_, m)| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .map(|(i, _)| i);
+        match victim {
+            Some(i) => {
+                messages.remove(i);
+            }
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Everything anyone says in the project, with timestamps, laid out for the editor to read
@@ -1647,6 +1709,15 @@ fn merge_contiguous_clips(script: &mut Script, cfg: &crate::config::ScriptConfig
 pub const DEFAULT_EDITOR_PROMPT: &str = "You are a senior documentary and promo video editor working on project \"{project}\" \
 ({fps} fps, {width}x{height}). You cut real footage into a watchable, well-paced story and write the voice-over for it.
 
+HOW THIS WORKS
+The whole project is in front of you before you call anything: WHAT PEOPLE SAY has every word spoken, with the timestamps to cut on. Work in this order.
+ a. Read it. Decide whose sentences carry the story and copy their timestamps exactly.
+ b. For each of those, find a picture of what is being described: search_moments for the subject, then get_video to see the keyframes and the shaky stretches. A range you have not seen returned is a guess, and guesses are dropped.
+ c. Lay the beat out: the speaker's face first, then cut to the picture and give the beat a \"bed\" so their voice keeps running under it.
+ d. Add up the clip lengths and fix the total yourself before you answer.
+ e. Answer with one JSON object and nothing else.
+Before you answer, check: every range came from WHAT PEOPLE SAY or from a tool; every clip with \"source\" audio starts and ends where a sentence does; no clip is under 4 s; the total is within 10% of the target; every beat has a purpose that moves the story on.
+
 HOW TO EDIT
 1. Understand the material first: list the videos, look at the keyframes of the promising ones, and read the transcripts of the videos where people talk.
 2. Build one story out of what the footage actually has, not a list of nice moments: a hook, 3-6 beats that each make one point, and an ending that lands. Each beat follows from the one before - someone names the place, someone says what it is like to live there, someone shows what that looks like. If two clips could swap places without anyone noticing, the piece has no story yet. Every beat has a purpose, and the purpose says how it moves the story on.
@@ -1657,7 +1728,7 @@ HOW TO EDIT
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
 6. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
-7. When the footage has people talking on camera (interviews), build the story out of what they say. Everything anyone says is already in front of you under WHAT PEOPLE SAY - read it before you decide anything, and choose whose words carry the piece from all of the tapes, not from the first speaker you come across. Use get_transcript only for a tape listed as left out there. Cut the clip to whole sentences, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
+7. When the footage has people talking on camera (interviews), build the story out of what they say. Everything anyone says is already in front of you under WHAT PEOPLE SAY - read it before you decide anything, and choose whose words carry the piece from all of the tapes, not from the first speaker you come across. Use get_transcript only for a tape listed as left out there. Cut the clip to whole sentences and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 8. Do not sit on a talking head for a whole beat, and do not bury them either. Show the person first - long enough for a viewer to take in their face, a few seconds - then cut to a picture of what they are describing while they keep talking, and come back to them if the point lands on them. The viewer should recognise that face when it returns later in the piece. To keep a voice running while the picture changes, give the beat a \"bed\": {video_id, in_s, out_s} naming the stretch of speech that carries the whole beat. The beat's clips are then pictures only - their own audio is not played - and you can cut between as many as you like without interrupting the speaker. Use a bed whenever an answer continues under a cutaway; the range must be one speaker talking, on the microphone, ending on a whole sentence. Without a bed the sound stops dead the moment you cut away.
 9. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
 10. Use what people say deliberately: a statement, an explanation, a line with a point to it. Chatter, half-sentences, thinking aloud, banter between takes and answers that go nowhere do not belong in a teaser, however clearly they are recorded - unless the user asks for that kind of material.
@@ -2302,7 +2373,7 @@ pub async fn run_turn(
     let mut pre_issues: Vec<Issue> = Vec::new();
 
     match &mut ctx.backend {
-        ChatBackend::Server { url, model, api_key } => {
+        ChatBackend::Server { url, model, api_key, ctx_tokens } => {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
                 // A local model at 40 tokens a second needs minutes for a long script, and reads the
@@ -2325,9 +2396,15 @@ pub async fn run_turn(
             let mut hinted = false;
             let mut last_assistant_text = String::new();
 
+            // Three quarters of the window for the conversation; the draft needs the rest.
+            let round_budget = (*ctx_tokens as usize).saturating_mul(3) / 4;
             while tool_rounds < rounds_budget {
                 if cancelled() {
                     return Err(Error::Invalid(CANCELLED.into()));
+                }
+                if !make_room(&mut req_messages, round_budget) {
+                    // Nothing left to forget: stop looking and write the script.
+                    break;
                 }
                 tool_rounds += 1;
                 let mut body = json!({
@@ -3341,6 +3418,32 @@ mod tests {
         assert_eq!(end_on_sentences(&db, &mut s, &sc()), 0);
     }
 
+    /// Every round re-sends the whole conversation, so a model that keeps looking fills the
+    /// window. Bonsai 2 made 199 tool calls and the turn died on a raw "exceeds the available
+    /// context size" with nothing drafted.
+    #[test]
+    fn a_long_search_forgets_its_oldest_results_rather_than_overflowing() {
+        let msg = |role: &str, text: &str| json!({ "role": role, "content": text });
+        let mut messages = vec![msg("system", &"rules ".repeat(200)), msg("user", "make me a teaser")];
+        for i in 0..40 {
+            messages.push(msg("assistant", "calling a tool"));
+            messages.push(msg("tool", &format!("result {i} {}", "keyframe description ".repeat(100))));
+        }
+        let before = approx_tokens(&messages);
+        assert!(make_room(&mut messages, before / 2), "room was made");
+        assert!(approx_tokens(&messages) <= before / 2);
+        // The brief and the rules survive; the oldest results are the ones forgotten.
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "make me a teaser");
+        let kept: Vec<&str> = messages.iter().filter_map(|m| m["content"].as_str()).collect();
+        assert!(!kept.iter().any(|c| c.starts_with("result 0 ")), "oldest went first");
+        assert!(kept.iter().any(|c| c.starts_with("result 39 ")), "newest stayed");
+
+        // Nothing left to forget: the caller is told to stop looking and draft.
+        let mut only_prompt = vec![msg("system", &"rules ".repeat(500)), msg("user", "hello")];
+        assert!(!make_room(&mut only_prompt, 10));
+    }
+
     /// The editor reads the tapes before it cuts. Everything spoken goes in the prompt, marked
     /// where it is off the microphone, and when it will not all fit the tapes with the most
     /// speech go first and the rest are named rather than hidden.
@@ -4226,7 +4329,12 @@ mod tests {
         let mut ctx = ChatContext {
             db,
             data_dir: tmp.path().to_path_buf(),
-            backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
+            backend: ChatBackend::Server {
+                url: server_url,
+                model: "test-model".into(),
+                api_key: String::new(),
+                ctx_tokens: 32768,
+            },
             embedder: None,
             system_prompt: None,
             max_tool_rounds: 0,
@@ -4342,7 +4450,12 @@ mod tests {
         let mut ctx = ChatContext {
             db,
             data_dir: tmp.path().to_path_buf(),
-            backend: ChatBackend::Server { url: server_url, model: "test-model".into(), api_key: String::new() },
+            backend: ChatBackend::Server {
+                url: server_url,
+                model: "test-model".into(),
+                api_key: String::new(),
+                ctx_tokens: 32768,
+            },
             embedder: None,
             system_prompt: None,
             max_tool_rounds: 0,
