@@ -358,17 +358,23 @@ impl Db {
         Ok(())
     }
 
-    /// Whether anyone speaks close to the microphone in a range — the test for footage that can
-    /// carry a beat on its own audio.
-    pub fn has_on_mic_speech(&self, video_id: i64, in_s: f64, out_s: f64) -> bool {
-        self.conn
+    /// Whether a clip *opens* on someone close to the microphone.
+    ///
+    /// Not "is there any on-mic speech in range": a clip holding six seconds of the interviewer
+    /// and clipping a third of a second of the subject's "Okay." at the end satisfies that and
+    /// still opens on the wrong voice. What matters is the first thing heard.
+    pub fn opens_on_mic(&self, video_id: i64, in_s: f64, out_s: f64) -> bool {
+        let first: Option<bool> = self
+            .conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 \
-                 AND COALESCE(off_mic, 0) = 0)",
+                "SELECT COALESCE(off_mic, 0) FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 \
+                 AND start_s < ?3 ORDER BY start_s LIMIT 1",
                 rusqlite::params![video_id, in_s, out_s],
                 |r| r.get::<_, bool>(0),
             )
-            .unwrap_or(false)
+            .ok();
+        // No speech at all in range is not a problem for this check; silence opens nothing.
+        first.is_none_or(|off_mic| !off_mic)
     }
 
     fn migrate(&mut self) -> Result<(), Error> {

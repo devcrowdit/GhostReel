@@ -786,7 +786,8 @@ async fn run_transcribe_jobs(
                 // Which track carries the speech, and who is close to the microphone. Measured
                 // here because the transcript gives the stretches worth measuring; a failure is
                 // not worth failing the stage for, it only leaves the editor less informed.
-                if let Ok(tracks) = crate::audio::track_count(&rt.ffprobe, &path).await
+                if rt.measure_audio
+                    && let Ok(tracks) = crate::audio::track_count(&rt.ffprobe, &path).await
                     && tracks > 0
                 {
                     let track = crate::audio::pick_track(&rt.ffmpeg, &path, tracks, duration).await;
@@ -1647,6 +1648,7 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             vision: VisionSetup::Unavailable("not configured in this test".into()),
             embed: EmbedSetup::Unavailable("not configured in this test".into()),
             steadiness: None,
+            measure_audio: false,
         }
     }
 
@@ -1866,6 +1868,7 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
             vision: VisionSetup::Unavailable("not configured in this test".into()),
             embed: EmbedSetup::Unavailable("not configured in this test".into()),
             steadiness: None,
+            measure_audio: false,
         };
         let mut events = Vec::new();
         let s = run(&mut db, &unavailable, &opts, |e| events.push(e)).await.unwrap();
@@ -1885,7 +1888,14 @@ echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height
         };
         let mut events = Vec::new();
         let s = run(&mut db, &local, &opts, |e| events.push(e)).await.unwrap();
-        assert_eq!((s.jobs_done, s.jobs_failed), (3, 0), "1 transcript + 2 frame jobs");
+        let failures: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::JobFailed { video_id, stage, error } => Some(format!("#{video_id} {stage}: {error}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!((s.jobs_done, s.jobs_failed), (3, 0), "1 transcript + 2 frame jobs; failures: {failures:?}");
         let rows = videos(&db, Some(p.id)).unwrap();
         let talk = rows.iter().find(|v| v.path.ends_with("talk.mp4")).unwrap();
         assert_eq!(

@@ -139,6 +139,9 @@ pub struct Runtime {
     pub embed: EmbedSetup,
     /// How steady the camera is, measured alongside keyframes. `None` skips it (tests).
     pub steadiness: Option<SteadinessOptions>,
+    /// Measure which audio track carries the speech and who is off the microphone. Off in tests,
+    /// where the fixtures are not real media and the measurement would run ffmpeg on them.
+    pub measure_audio: bool,
 }
 
 /// Window and stride used when measuring how steady a video is, from `[script]`.
@@ -200,6 +203,7 @@ pub async fn resolve(paths: &Paths, config: &Config) -> Result<Runtime, crate::E
         vision,
         embed,
         steadiness: (&config.script).into(),
+        measure_audio: true,
     })
 }
 

@@ -273,10 +273,10 @@ fn enforce_grounding_and_pacing(
     let mut retimed = 0usize;
     for beat in &mut s.beats {
         for c in &mut beat.clips {
-            if c.audio != crate::script::Audio::Source || db.has_on_mic_speech(c.video_id, c.in_s, c.out_s) {
+            if c.audio != crate::script::Audio::Source || db.opens_on_mic(c.video_id, c.in_s, c.out_s) {
                 continue;
             }
-            // Nothing on-mic in range: move to the first on-mic segment after it, keeping length.
+            // It opens on the interviewer: move to the first on-mic segment, keeping the length.
             let next: Option<f64> = db
                 .conn
                 .query_row(
@@ -1589,22 +1589,24 @@ pub const DEFAULT_EDITOR_PROMPT: &str = "You are a senior documentary and promo 
 
 HOW TO EDIT
 1. Understand the material first: list the videos, look at the keyframes of the promising ones, and read the transcripts of the videos where people talk.
-2. Build a story: a hook, 3-6 beats that each make one point, and a clear ending. Every beat has a purpose.
+2. Build one story out of what the footage actually has, not a list of nice moments: a hook, 3-6 beats that each make one point, and an ending that lands. Each beat follows from the one before - someone names the place, someone says what it is like to live there, someone shows what that looks like. If two clips could swap places without anyone noticing, the piece has no story yet. Every beat has a purpose, and the purpose says how it moves the story on.
 3. Choose only strong shots: a clear subject (people, a landmark, a building, a sign, activity, a striking view). Skip footage whose keyframes describe black or blank frames, blur, transitions, the ground or sky only, empty hillsides with nothing to see, or the same view as the previous clip.
 4. Pacing - slower is better than frantic:
    - hold every shot at least 4 s so viewers can see it and read any text; views and b-roll 5-10 s;
    - when someone speaks, keep the clip from just before their first word to the end of their sentences (use the transcript timestamps; up to ~25 s) with audio \"source\", and never cut the moment they stop: hold 1-2 s of the person on screen after the last word;
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
-5a. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
-6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
-6c. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
-6b. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
-6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
-7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
-7a. You can answer in words instead of drafting: reply with {\"action\":\"reply\",\"text\":...} when the request is ambiguous and one question would settle it, when a message is not about the video (notes, something pasted by mistake), or when the footage cannot support what was asked - say what is missing. A reply leaves the previous version alone, which is better than rebuilding it around a guess. Do not reply to avoid work: when the request is clear, draft.
-8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
-9. Always reply in the user's language.
+6. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
+7. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
+8. Do not sit on a talking head for a whole beat, and do not bury them either. Show the person first - long enough for a viewer to take in their face, a few seconds - then cut to a picture of what they are describing while they keep talking, and come back to them if the point lands on them. The viewer should recognise that face when it returns later in the piece.
+9. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
+10. Use what people say deliberately: a statement, an explanation, a line with a point to it. Chatter, half-sentences, thinking aloud, banter between takes and answers that go nowhere do not belong in a teaser, however clearly they are recorded - unless the user asks for that kind of material.
+11. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
+12. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
+13. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
+14. You can answer in words instead of drafting: reply with {\"action\":\"reply\",\"text\":...} when the request is ambiguous and one question would settle it, when a message is not about the video (notes, something pasted by mistake), or when the footage cannot support what was asked - say what is missing. A reply leaves the previous version alone, which is better than rebuilding it around a guess. Do not reply to avoid work: when the request is clear, draft.
+15. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
+16. Always reply in the user's language.
 ";
 
 /// Construct the system prompt for the editor agent: the editing instructions (`custom` or the
@@ -2587,16 +2589,27 @@ pub async fn run_turn(
             let mut tool_rounds = 0;
             let mut empty_searches = 0usize;
             let mut hinted = false;
+            // What has happened since the tool last spoke: sent on its own when continuing.
+            let mut new_since_last = String::new();
             while tool_rounds < rounds_budget {
                 if cancelled() {
                     return Err(Error::Invalid(CANCELLED.into()));
                 }
                 tool_rounds += 1;
-                let cli_prompt = format!(
-                    "{transcript}<|im_start|>assistant\n\
-                     Reply ONLY with a JSON object matching this schema:\n{schema_json}\n<|im_end|>\n"
-                );
-                let out_str = agent.complete(&cli_prompt).await?;
+                // The first round carries the whole transcript; after that the tool continues its
+                // own conversation and hears only what is new. Re-sending everything each round
+                // grows quadratically — on this project's library agy timed out on round one.
+                let first = tool_rounds == 1;
+                let cli_prompt = if first {
+                    format!(
+                        "{transcript}<|im_start|>assistant\n\
+                         Reply ONLY with a JSON object matching this schema:\n{schema_json}\n<|im_end|>\n"
+                    )
+                } else {
+                    format!("{new_since_last}\nReply ONLY with a JSON object matching the same schema.")
+                };
+                let out_str = agent.complete_continuing(&cli_prompt, !first).await?;
+                new_since_last.clear();
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
                 match action {
                     // Answering in words is a complete turn: nothing is drafted and the previous
@@ -2650,6 +2663,8 @@ pub async fn run_turn(
                         transcript.push_str(&format!(
                             "<|im_start|>assistant\n{out_str}\n<|im_end|>\n<|im_start|>user\nTool result for {tool}:\n{res}{hint}\n<|im_end|>\n"
                         ));
+                        // The same thing, for a tool that is continuing and has the rest already.
+                        new_since_last.push_str(&format!("Tool result for {tool}:\n{res}{hint}\n"));
                     }
                     Ok(LocalAction::Final { script }) => {
                         let mut s = script;
@@ -2678,11 +2693,18 @@ pub async fn run_turn(
                     return Err(Error::Invalid(CANCELLED.into()));
                 }
                 on_event(ChatEvent::Drafting);
-                let cli_final_prompt = format!(
-                    "{transcript}<|im_start|>assistant\n\
-                     Produce the final script. Reply ONLY with a JSON object matching this schema:\n{final_schema_json}\n<|im_end|>\n"
-                );
-                let final_str = agent.complete(&cli_final_prompt).await?;
+                let cli_final_prompt = if tool_rounds > 0 {
+                    format!(
+                        "{new_since_last}\nProduce the final script. Reply ONLY with a JSON object matching this \
+                         schema:\n{final_schema_json}"
+                    )
+                } else {
+                    format!(
+                        "{transcript}<|im_start|>assistant\n\
+                         Produce the final script. Reply ONLY with a JSON object matching this schema:\n{final_schema_json}\n<|im_end|>\n"
+                    )
+                };
+                let final_str = agent.complete_continuing(&cli_final_prompt, tool_rounds > 0).await?;
                 if let Ok(LocalAction::Reply { text }) = serde_json::from_str::<LocalAction>(&final_str) {
                     raw_reply = text;
                 } else if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {

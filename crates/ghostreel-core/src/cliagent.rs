@@ -186,6 +186,32 @@ impl CliAgent {
     }
 
     /// Build argv for a text-only complete call.
+    ///
+    /// With `continued`, the tool picks up its own most recent conversation and `prompt` is only
+    /// what is new. Every round otherwise re-sends the whole transcript as a fresh invocation,
+    /// which grows quadratically: on a 96-video library agy needed more than three minutes for a
+    /// single round and hit the timeout.
+    fn build_argv_complete_from(&self, bin: &Path, prompt: &str, continued: bool) -> Vec<std::ffi::OsString> {
+        let mut args = self.build_argv_complete(bin, prompt);
+        if !continued {
+            return args;
+        }
+        match self.cfg.tool.as_str() {
+            // Both take the flag anywhere; the prompt stays as the new message.
+            "claude" | "agy" => args.insert(1, "--continue".into()),
+            // codex resumes by subcommand: `codex exec resume --last`.
+            "codex" => {
+                if let Some(i) = args.iter().position(|a| a == "exec") {
+                    args.insert(i + 1, "resume".into());
+                    args.insert(i + 2, "--last".into());
+                }
+            }
+            // opencode has no continue; it keeps re-sending.
+            _ => {}
+        }
+        args
+    }
+
     fn build_argv_complete(&self, bin: &Path, prompt: &str) -> Vec<std::ffi::OsString> {
         let mut args: Vec<std::ffi::OsString> = Vec::new();
         match self.cfg.tool.as_str() {
@@ -197,6 +223,9 @@ impl CliAgent {
                 args.push("json".into());
                 args.push("--allowedTools".into());
                 args.push("none".into());
+                // Nothing here edits anything: the agent is asked for JSON, and a prompt it
+                // cannot answer is a turn that hangs until the timeout.
+                args.push("--dangerously-skip-permissions".into());
                 if !self.cfg.model.is_empty() {
                     args.push("--model".into());
                     args.push(self.cfg.model.clone().into());
@@ -225,6 +254,7 @@ impl CliAgent {
             }
             "codex" => {
                 args.extend(codex_exec_prefix(bin));
+                args.push("--dangerously-bypass-approvals-and-sandbox".into());
                 if !self.cfg.model.is_empty() {
                     args.push("-m".into());
                     args.push(self.cfg.model.clone().into());
@@ -357,9 +387,15 @@ impl CliAgent {
 
     /// Send a plain text prompt and return the first JSON object in the response.
     pub async fn complete(&self, prompt: &str) -> Result<String, Error> {
+        self.complete_continuing(prompt, false).await
+    }
+
+    /// `complete`, optionally continuing the tool's own most recent conversation so only the new
+    /// message is sent.
+    pub async fn complete_continuing(&self, prompt: &str, continued: bool) -> Result<String, Error> {
         let bin =
             self.available().ok_or_else(|| Error::Vision(format!("CLI tool '{}' not found on PATH", self.cfg.tool)))?;
-        let args = self.build_argv_complete(&bin, prompt);
+        let args = self.build_argv_complete_from(&bin, prompt, continued);
         let raw = self.run_cli(&bin, &args).await?;
         let text = Self::extract_text(&self.cfg.tool, &raw)?;
         Self::extract_json_object(&text)
