@@ -30,6 +30,20 @@ pub struct PlannedSegment {
     pub audio_track: u32,
 }
 
+/// The sound running under a beat: where it sits on the preview timeline and where it comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BedSpan {
+    pub beat_id: String,
+    pub video_id: i64,
+    pub path: PathBuf,
+    /// Range inside the source file.
+    pub in_s: f64,
+    pub out_s: f64,
+    /// Where the beat starts on the preview timeline.
+    pub timeline_start_s: f64,
+    pub audio_track: u32,
+}
+
 /// A beat's span on the preview timeline for on-screen titles and narration captions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BeatSpan {
@@ -179,7 +193,9 @@ pub fn plan_segments(script: &Script, media: &HashMap<i64, ResolvedMedia>) -> Re
                 out_s,
                 timeline_start_s,
                 beat_id: beat.id.clone(),
-                mute: clip.audio == Audio::Mute,
+                // A beat with a bed is carried by the bed; its pictures play silent, or the
+                // speaker would be heard twice, a few seconds out of step with themselves.
+                mute: clip.audio == Audio::Mute || beat.bed.is_some(),
                 has_audio: res.has_audio,
                 audio_track: res.audio_track,
             });
@@ -212,6 +228,33 @@ pub fn plan_beat_spans(script: &Script, segments: &[PlannedSegment]) -> Vec<Beat
         });
     }
     spans
+}
+
+/// Where each beat's audio bed sits on the timeline, and which file it is cut from.
+pub fn plan_bed_spans(
+    script: &Script,
+    segments: &[PlannedSegment],
+    media: &HashMap<i64, ResolvedMedia>,
+) -> Vec<BedSpan> {
+    let mut beds = Vec::new();
+    for beat in &script.beats {
+        let Some(bed) = &beat.bed else { continue };
+        let Some(res) = media.get(&bed.video_id) else { continue };
+        let Some(first) = segments.iter().find(|s| s.beat_id == beat.id) else { continue };
+        if bed.duration_s() <= 0.0 {
+            continue;
+        }
+        beds.push(BedSpan {
+            beat_id: beat.id.clone(),
+            video_id: bed.video_id,
+            path: res.path.clone(),
+            in_s: bed.in_s,
+            out_s: bed.out_s,
+            timeline_start_s: first.timeline_start_s,
+            audio_track: res.audio_track,
+        });
+    }
+    beds
 }
 
 /// Format seconds into SubRip timestamp format `HH:MM:SS,mmm`.
@@ -345,6 +388,7 @@ pub fn render_preview(
     }
 
     let beat_spans = plan_beat_spans(&stored.script, &segments);
+    let bed_spans = plan_bed_spans(&stored.script, &segments, &media);
     let encoder = pick_encoder(ffmpeg);
 
     let proxies_dir = data_dir.join("proxies");
@@ -506,7 +550,8 @@ pub fn render_preview(
     let has_narration = opts.burn_narration && beat_spans.iter().any(|b| b.narration.is_some());
     let burn_pass_needed = has_titles || has_narration;
 
-    let concat_output = if burn_pass_needed {
+    let bed_pass_needed = !bed_spans.is_empty();
+    let concat_output = if burn_pass_needed || bed_pass_needed {
         out_path.with_extension(format!("concat.tmp.{}.mp4", std::process::id()))
     } else {
         out_path.clone()
@@ -529,6 +574,98 @@ pub fn render_preview(
         let tail = stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
         let _ = std::fs::remove_file(&concat_output);
         return Err(Error::Preview(format!("concat failed: {tail}")));
+    }
+
+    // Lay the beds: one voice running across a beat while its pictures change under it. The
+    // pictures were encoded silent, so this is a mix onto silence rather than over anything.
+    let mut burn_input = concat_output.clone();
+    if bed_pass_needed {
+        on_progress(0.87, "Laying audio beds…");
+        let mut bed_files = Vec::new();
+        for (i, bed) in bed_spans.iter().enumerate() {
+            let dur = (bed.out_s - bed.in_s).max(0.01);
+            let wav = previews_dir.join(format!("bed_{}_{i}_{}.wav", stored.id, std::process::id()));
+            let fade = opts.audio_fade_s.max(0.0).min(dur / 3.0);
+            // As for a clip, the fade out starts where the speaking stops, not where the bed does.
+            let speech_end_rel: Option<f64> = db
+                .conn
+                .query_row(
+                    "SELECT MAX(end_s) FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND end_s <= ?3",
+                    params![bed.video_id, bed.in_s, bed.out_s + 0.01],
+                    |r| r.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|e| (e - bed.in_s).max(0.0));
+            let fade_out_at = match speech_end_rel {
+                Some(end) if end < dur => end.min((dur - fade).max(0.0)),
+                _ => (dur - fade).max(0.0),
+            };
+            let mut af = String::new();
+            if fade > 0.005 {
+                af.push_str(&format!("afade=t=in:st=0:d={fade:.3},afade=t=out:st={fade_out_at:.3}:d={fade:.3},"));
+            }
+            if opts.normalize_audio {
+                af.push_str("loudnorm=I=-16:TP=-1.5:LRA=11,");
+            }
+            af.push_str("aresample=48000,apad");
+
+            let out = crate::proc::std_command(ffmpeg)
+                .args(["-y", "-ss", &format!("{:.3}", bed.in_s), "-t", &format!("{dur:.3}"), "-i"])
+                .arg(&bed.path)
+                .args(["-map", &format!("0:a:{}", bed.audio_track), "-af", &af])
+                .args(["-ac", "2", "-ar", "48000", "-t", &format!("{dur:.3}"), "-c:a", "pcm_s16le"])
+                .arg(&wav)
+                .output()
+                .map_err(|e| Error::Preview(format!("failed to run ffmpeg for audio bed: {e}")))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let tail =
+                    stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                return Err(Error::Preview(format!("audio bed extract failed: {tail}")));
+            }
+            bed_files.push((wav, bed.timeline_start_s));
+        }
+
+        let mixed = if burn_pass_needed {
+            out_path.with_extension(format!("bedded.tmp.{}.mp4", std::process::id()))
+        } else {
+            out_path.clone()
+        };
+        let mut cmd = crate::proc::std_command(ffmpeg);
+        cmd.args(["-y", "-i"]).arg(&concat_output);
+        for (wav, _) in &bed_files {
+            cmd.arg("-i").arg(wav);
+        }
+        let mut graph = String::new();
+        for (i, (_, start)) in bed_files.iter().enumerate() {
+            let delay_ms = (start * 1000.0).round().max(0.0) as i64;
+            graph.push_str(&format!("[{}:a]adelay={delay_ms}:all=1[b{i}];", i + 1));
+        }
+        graph.push_str("[0:a]");
+        for i in 0..bed_files.len() {
+            graph.push_str(&format!("[b{i}]"));
+        }
+        // normalize=0: a bed mixed onto silence must keep its own level, not be halved because
+        // there are two inputs. duration=first: the cut is as long as its pictures.
+        graph.push_str(&format!("amix=inputs={}:normalize=0:duration=first:dropout_transition=0[a]", bed_files.len() + 1));
+        cmd.args(["-filter_complex", &graph]);
+        cmd.args(["-map", "0:v", "-map", "[a]", "-c:v", "copy"]);
+        cmd.args(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart"]);
+        cmd.arg(&mixed);
+
+        let mix_out = cmd.output().map_err(|e| Error::Preview(format!("failed to spawn audio bed mix: {e}")))?;
+        for (wav, _) in &bed_files {
+            let _ = std::fs::remove_file(wav);
+        }
+        if !mix_out.status.success() {
+            let stderr = String::from_utf8_lossy(&mix_out.stderr);
+            let tail = stderr.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let _ = std::fs::remove_file(&mixed);
+            return Err(Error::Preview(format!("audio bed mix failed: {tail}")));
+        }
+        let _ = std::fs::remove_file(&concat_output);
+        burn_input = mixed;
     }
 
     // Burn pass (if requested and content exists)
@@ -577,7 +714,7 @@ pub fn render_preview(
         };
         let burn = |graph: String| {
             let mut cmd = crate::proc::std_command(ffmpeg);
-            cmd.args(["-y", "-i"]).arg(&concat_output).args(["-vf", &graph]);
+            cmd.args(["-y", "-i"]).arg(&burn_input).args(["-vf", &graph]);
             cmd.args(&encoder.args);
             cmd.args(["-c:a", "copy", "-movflags", "+faststart"]).arg(&out_path);
             cmd.output()
@@ -591,7 +728,7 @@ pub fn render_preview(
         for tmp in &temp_files_to_remove {
             let _ = std::fs::remove_file(tmp);
         }
-        let _ = std::fs::remove_file(&concat_output);
+        let _ = std::fs::remove_file(&burn_input);
 
         let burn_out = burn_res.map_err(|e| Error::Preview(format!("failed to spawn burn pass: {e}")))?;
         if !burn_out.status.success() {
@@ -650,6 +787,7 @@ mod tests {
                         script::ScriptClip { video_id: 2, in_s: 2.0, out_s: 3.51, audio: Audio::Mute, why: None },
                     ],
                     notes: None,
+                    bed: None,
                 },
                 script::Beat {
                     id: "b2".into(),
@@ -664,6 +802,7 @@ mod tests {
                         why: None,
                     }],
                     notes: None,
+                    bed: None,
                 },
             ],
         };
@@ -938,6 +1077,7 @@ mod tests {
                         why: None,
                     }],
                     notes: None,
+                    bed: None,
                 },
                 script::Beat {
                     id: "b2".into(),
@@ -952,6 +1092,7 @@ mod tests {
                         why: None,
                     }],
                     notes: None,
+                    bed: None,
                 },
             ],
         };

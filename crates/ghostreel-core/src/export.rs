@@ -181,6 +181,7 @@ mod tests {
                     why: None,
                 }],
                 notes: None,
+                bed: None,
             }],
         };
 

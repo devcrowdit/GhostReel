@@ -17,6 +17,7 @@ import {
   type VideoRow,
 } from "./api";
 import PreviewPlayer from "./PreviewPlayer";
+import ScriptTimeline from "./ScriptTimeline";
 
 interface ScriptEditorProps {
   projectId: number;
@@ -45,6 +46,9 @@ export default function ScriptEditor({
   const [videosMap, setVideosMap] = useState<Record<number, VideoRow>>({});
   const [framesMap, setFramesMap] = useState<Record<number, FrameRow[]>>({});
   const requestedVideos = useRef<Set<number>>(new Set());
+
+  // Which block of the timeline is selected, so the lane and the beat below agree.
+  const [selectedBlock, setSelectedBlock] = useState<string | null>(null);
 
   // Inline replace search state
   const [replacingKey, setReplacingKey] = useState<string | null>(null); // e.g. "bIdx-cIdx"
@@ -366,6 +370,41 @@ export default function ScriptEditor({
             </div>
           )}
         </div>
+
+        {/* The cut on three lanes: titles, picture, sound */}
+        <ScriptTimeline
+          script={script}
+          videos={videosMap}
+          selected={selectedBlock}
+          onSelect={(key, bIdx) => {
+            setSelectedBlock(key);
+            const id = script.beats[bIdx]?.id;
+            if (id) document.getElementById(`beat-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }}
+          onTrim={(bIdx, cIdx, edge, delta) => {
+            const beats = [...script.beats];
+            const beat = { ...beats[bIdx] };
+            if (cIdx == null) {
+              // The sound bed: its own range moves, the pictures stay where they are.
+              if (!beat.bed) return;
+              const bed = { ...beat.bed };
+              if (edge === "in") bed.in_s = Math.max(0, bed.in_s + delta);
+              else bed.out_s = Math.max(bed.in_s + 0.2, bed.out_s + delta);
+              if (bed.out_s - bed.in_s < 0.2) return;
+              beat.bed = bed;
+            } else {
+              const clips = [...beat.clips];
+              const c = { ...clips[cIdx] };
+              const max = videosMap[c.video_id]?.duration_s ?? Number.MAX_SAFE_INTEGER;
+              if (edge === "in") c.in_s = Math.min(Math.max(0, c.in_s + delta), c.out_s - 0.2);
+              else c.out_s = Math.max(c.in_s + 0.2, Math.min(c.out_s + delta, max));
+              clips[cIdx] = c;
+              beat.clips = clips;
+            }
+            beats[bIdx] = beat;
+            setScript({ ...script, beats });
+          }}
+        />
 
         {/* Issues List Grouped by Severity */}
         {issues.length > 0 && (

@@ -124,6 +124,30 @@ pub struct ScriptClip {
     pub why: Option<String>,
 }
 
+/// The sound that runs under a beat while its pictures play.
+///
+/// An interview answer does not have to stop when we cut away to what the speaker is describing;
+/// in a cut edit that is the normal way round. A bed names the range whose audio carries the beat,
+/// and the beat's own clips play silent under it — a J-cut, written down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioBed {
+    pub video_id: i64,
+    pub in_s: f64,
+    pub out_s: f64,
+    /// Why this voice belongs under these pictures. The editor's own note, kept for the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// True when the pipeline laid this bed rather than the editor asking for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
+}
+
+impl AudioBed {
+    pub fn duration_s(&self) -> f64 {
+        (self.out_s - self.in_s).max(0.0)
+    }
+}
+
 /// A story beat in a script.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Beat {
@@ -135,6 +159,9 @@ pub struct Beat {
     pub on_screen_text: Option<String>,
     #[serde(default)]
     pub clips: Vec<ScriptClip>,
+    /// Sound that runs across the whole beat, from a clip we may never show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bed: Option<AudioBed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -705,6 +732,7 @@ mod tests {
                         },
                     ],
                     notes: None,
+                    bed: None,
                 },
                 Beat {
                     id: "b1".into(), // duplicate beat id: Warning
@@ -719,6 +747,7 @@ mod tests {
                         why: None,
                     }],
                     notes: None,
+                    bed: None,
                 },
             ],
         };

@@ -340,6 +340,8 @@ fn enforce_grounding_and_pacing(
             message: format!("muted {unmuted} clip(s) with no speech in range"),
         });
     }
+    // Now that it is settled who speaks, let their voice carry the pictures that follow.
+    issues.extend(lay_audio_beds(db, s, cfg));
     for beat in &mut s.beats {
         let mut kept = Vec::with_capacity(beat.clips.len());
         for c in beat.clips.drain(..) {
@@ -541,6 +543,17 @@ pub fn script_json_schema() -> Value {
                                 "required": ["video_id", "in_s", "out_s", "audio"],
                                 "additionalProperties": false
                             }
+                        },
+                        "bed": {
+                            "type": "object",
+                            "properties": {
+                                "video_id": { "type": "integer" },
+                                "in_s": { "type": "number" },
+                                "out_s": { "type": "number" },
+                                "why": { "type": "string" }
+                            },
+                            "required": ["video_id", "in_s", "out_s"],
+                            "additionalProperties": false
                         },
                         "notes": { "type": "string" }
                     },
@@ -1591,7 +1604,7 @@ HOW TO EDIT
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
 6. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 7. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
-8. Do not sit on a talking head for a whole beat, and do not bury them either. Show the person first - long enough for a viewer to take in their face, a few seconds - then cut to a picture of what they are describing while they keep talking, and come back to them if the point lands on them. The viewer should recognise that face when it returns later in the piece.
+8. Do not sit on a talking head for a whole beat, and do not bury them either. Show the person first - long enough for a viewer to take in their face, a few seconds - then cut to a picture of what they are describing while they keep talking, and come back to them if the point lands on them. The viewer should recognise that face when it returns later in the piece. To keep a voice running while the picture changes, give the beat a \"bed\": {video_id, in_s, out_s} naming the stretch of speech that carries the whole beat. The beat's clips are then pictures only - their own audio is not played - and you can cut between as many as you like without interrupting the speaker. Use a bed whenever an answer continues under a cutaway; the range must be one speaker talking, on the microphone, ending on a whole sentence. Without a bed the sound stops dead the moment you cut away.
 9. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
 10. Use what people say deliberately: a statement, an explanation, a line with a point to it. Chatter, half-sentences, thinking aloud, banter between takes and answers that go nowhere do not belong in a teaser, however clearly they are recorded - unless the user asks for that kind of material.
 11. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
@@ -2823,6 +2836,135 @@ pub async fn run_turn(
     Ok(TurnResult { session_id, reply, script_id, script: parsed_script, issues, tool_calls: tool_records })
 }
 
+/// Let a speaker's voice run under the pictures that follow, instead of stopping at the cutaway.
+///
+/// A beat usually opens on the person talking and then cuts to what they are describing. Until
+/// beds existed the second half went silent, because sound belonged to whichever clip was on
+/// screen — so every teaser alternated a talking head with a mute postcard. Here the beat's
+/// speech is extended across the whole beat and the pictures play under it.
+///
+/// The bed is aligned so the face stays in sync: it starts as far *before* the speaking clip's
+/// own in-point as that clip sits into the beat, so when we reach the face, the audio is exactly
+/// where it would have been. It stops at a sentence end, before the interviewer's next question,
+/// and never runs further than `max_bed_extend_s` past the clip it came from.
+fn lay_audio_beds(db: &Db, s: &mut Script, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    if !cfg.infer_audio_beds {
+        return issues;
+    }
+    let mut laid = 0usize;
+
+    for beat in &mut s.beats {
+        let beat_len: f64 = beat.clips.iter().map(|c| (c.out_s - c.in_s).max(0.0)).sum();
+
+        // A bed the editor asked for is checked, not trusted: it has to be speech, and it cannot
+        // outlast the pictures it plays under or it would run into the next beat.
+        if let Some(bed) = beat.bed.take() {
+            let mut bed = bed;
+            if bed.duration_s() > beat_len && beat_len > 0.0 {
+                bed.out_s = bed.in_s + beat_len;
+            }
+            if !clip_has_speech(db, bed.video_id, bed.in_s, bed.out_s) {
+                issues.push(Issue {
+                    severity: IssueSeverity::Warning,
+                    beat_id: Some(beat.id.clone()),
+                    clip_index: None,
+                    message: format!(
+                        "dropped the audio bed: nobody speaks at video #{} {:.1}–{:.1} s",
+                        bed.video_id, bed.in_s, bed.out_s
+                    ),
+                });
+            } else {
+                for c in &mut beat.clips {
+                    c.audio = crate::script::Audio::Mute;
+                }
+                beat.bed = Some(bed);
+                continue;
+            }
+        }
+
+        if beat.clips.len() < 2 {
+            continue;
+        }
+        // Where does the voice come from, and how far into the beat does its picture sit?
+        let mut offset = 0.0f64;
+        let mut source: Option<(usize, f64)> = None;
+        for (i, c) in beat.clips.iter().enumerate() {
+            if c.audio == crate::script::Audio::Source && clip_has_speech(db, c.video_id, c.in_s, c.out_s) {
+                source = Some((i, offset));
+                break;
+            }
+            offset += (c.out_s - c.in_s).max(0.0);
+        }
+        let Some((idx, lead)) = source else { continue };
+
+        let beat_dur = beat_len;
+        let clip = &beat.clips[idx];
+        let clip_dur = (clip.out_s - clip.in_s).max(0.0);
+        // Only worth a bed when something other than this clip is on screen.
+        if beat_dur <= clip_dur + 0.05 {
+            continue;
+        }
+
+        let start = (clip.in_s - lead).max(0.0);
+        let wanted_end = start + beat_dur;
+        let cap = clip.out_s + cfg.max_bed_extend_s;
+        let mut end = wanted_end.min(cap);
+
+        // Never run into the interviewer's next question: stop at the last segment that is on
+        // the microphone before one that is not.
+        let segs: Vec<(f64, f64, bool)> = db
+            .conn
+            .prepare(
+                "SELECT start_s, end_s, COALESCE(off_mic, 0) FROM transcript_segments
+                 WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 ORDER BY start_s",
+            )
+            .and_then(|mut st| {
+                st.query_map(params![clip.video_id, clip.out_s, end], |r| {
+                    Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)? != 0))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        if let Some((off_start, _, _)) = segs.iter().find(|(_, _, off)| *off) {
+            end = end.min(*off_start);
+        }
+        // Stop where a sentence stops, so the bed ends the way a clip does.
+        if let Some((_, seg_end, _)) = segs.iter().rev().find(|(_, e, off)| !*off && *e <= end + cfg.speech_overrun_s) {
+            end = (*seg_end + cfg.speech_overrun_s).min(wanted_end);
+        }
+        // Worth a bed when the voice carries past its own picture, or begins under one before
+        // it — the two halves of a J-cut. When it does neither, the old behaviour is already right.
+        let trails = end > clip.out_s + 0.05;
+        let leads = start < clip.in_s - 0.05;
+        if !trails && !leads {
+            continue;
+        }
+
+        beat.bed = Some(crate::script::AudioBed {
+            video_id: clip.video_id,
+            in_s: start,
+            out_s: end,
+            why: None,
+            inferred: true,
+        });
+        for c in &mut beat.clips {
+            c.audio = crate::script::Audio::Mute;
+        }
+        laid += 1;
+    }
+
+    if laid > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("let the speaker's voice run under the pictures in {laid} beat(s)"),
+        });
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2876,6 +3018,7 @@ mod tests {
                 on_screen_text: None,
                 notes: None,
                 clips: vec![clip(0.0, 25.0), clip(25.0, 50.0), clip(50.0, 75.0)],
+                bed: None,
             }],
         };
         let before = script.total_duration_s();
@@ -2887,6 +3030,126 @@ mod tests {
             script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
             "every clip is the length its sentences are"
         );
+    }
+
+    /// A beat that opens on a speaker and cuts away used to go silent at the cut. The voice now
+    /// runs on underneath, and the pictures are muted so nobody is heard twice.
+    #[test]
+    fn a_speakers_voice_runs_under_the_pictures_that_follow() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let db = Db::open_in_memory().unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 60.0)", []).unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (2, 'i', 1, 60.0)", []).unwrap();
+        // One person talking in whole sentences from 10 s to 30 s of video 1.
+        for i in 0..10 {
+            db.conn
+                .execute(
+                    "INSERT INTO transcript_segments(video_id, start_s, end_s, text, off_mic)
+                     VALUES (1, ?1, ?2, 'a whole sentence', 0)",
+                    params![10.0 + i as f64 * 2.0, 12.0 + i as f64 * 2.0],
+                )
+                .unwrap();
+        }
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: None,
+                on_screen_text: None,
+                notes: None,
+                // Her face for 4 s, then two pictures of what she is describing.
+                clips: vec![
+                    ScriptClip { video_id: 1, in_s: 10.0, out_s: 14.0, audio: Audio::Source, why: None },
+                    ScriptClip { video_id: 2, in_s: 0.0, out_s: 5.0, audio: Audio::Mute, why: None },
+                    ScriptClip { video_id: 2, in_s: 20.0, out_s: 25.0, audio: Audio::Mute, why: None },
+                ],
+                bed: None,
+            }],
+        };
+        let issues = lay_audio_beds(&db, &mut script, &sc());
+        let bed = script.beats[0].bed.clone().expect("a bed was laid");
+        assert_eq!(bed.video_id, 1);
+        assert!(bed.inferred);
+        // It starts where she starts and runs across the whole beat, not just her own clip.
+        assert!((bed.in_s - 10.0).abs() < 1e-9, "bed starts with her: {}", bed.in_s);
+        assert!(bed.duration_s() > 13.0, "bed covers the cutaways too: {}", bed.duration_s());
+        assert!(script.beats[0].clips.iter().all(|c| c.audio == Audio::Mute), "pictures play silent");
+        assert!(issues.iter().any(|i| i.message.contains("run under the pictures")));
+    }
+
+    /// The bed has to stay in step with the face: when the picture of the speaker comes second,
+    /// the sound starts early so their lips still match when we cut to them.
+    #[test]
+    fn a_bed_starts_early_when_the_face_comes_after_the_picture() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let db = Db::open_in_memory().unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 60.0)", []).unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (2, 'i', 1, 60.0)", []).unwrap();
+        for i in 0..10 {
+            db.conn
+                .execute(
+                    "INSERT INTO transcript_segments(video_id, start_s, end_s, text, off_mic)
+                     VALUES (1, ?1, ?2, 'a whole sentence', 0)",
+                    params![10.0 + i as f64 * 2.0, 12.0 + i as f64 * 2.0],
+                )
+                .unwrap();
+        }
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: None,
+                on_screen_text: None,
+                notes: None,
+                clips: vec![
+                    ScriptClip { video_id: 2, in_s: 0.0, out_s: 3.0, audio: Audio::Mute, why: None },
+                    ScriptClip { video_id: 1, in_s: 14.0, out_s: 20.0, audio: Audio::Source, why: None },
+                ],
+                bed: None,
+            }],
+        };
+        lay_audio_beds(&db, &mut script, &sc());
+        let bed = script.beats[0].bed.clone().expect("a bed was laid");
+        // Her clip sits 3 s into the beat, so her audio starts 3 s before her own in-point.
+        assert!((bed.in_s - 11.0).abs() < 1e-9, "sound leads the picture by the cutaway: {}", bed.in_s);
+    }
+
+    /// A bed the editor asked for is checked. One with nobody speaking in it is thrown away
+    /// rather than rendered as silence under the pictures.
+    #[test]
+    fn a_bed_over_silence_is_dropped() {
+        use crate::script::{Audio, AudioBed, Beat, ScriptClip};
+        let db = Db::open_in_memory().unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 60.0)", []).unwrap();
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: None,
+                on_screen_text: None,
+                notes: None,
+                clips: vec![ScriptClip { video_id: 1, in_s: 0.0, out_s: 5.0, audio: Audio::Mute, why: None }],
+                bed: Some(AudioBed { video_id: 1, in_s: 40.0, out_s: 50.0, why: None, inferred: false }),
+            }],
+        };
+        let issues = lay_audio_beds(&db, &mut script, &sc());
+        assert!(script.beats[0].bed.is_none(), "a bed with no speech in it is dropped");
+        assert!(issues.iter().any(|i| i.message.contains("nobody speaks")));
     }
 
     #[test]
@@ -2938,6 +3201,7 @@ mod tests {
                 on_screen_text: None,
                 notes: None,
                 clips: vec![ScriptClip { video_id: 1, in_s: 0.5, out_s: 4.7, audio: Audio::Mute, why: None }],
+                bed: None,
             }],
         };
         let issues = enforce_grounding_and_pacing(&db, p.id, &mut script, &grounding, false, &sc());
@@ -3009,6 +3273,7 @@ mod tests {
                 notes: None,
                 // Real footage it never opened, then a range past the end of the video.
                 clips: vec![clip(0.0, 5.0), clip(9000.0, 9005.0)],
+                bed: None,
             }],
         };
         let issues = enforce_grounding_and_pacing(&db, p.id, &mut script, &grounding, false, &sc());
@@ -3093,6 +3358,7 @@ mod tests {
                 on_screen_text: None,
                 clips: vec![clip(0.0, 45.0), clip(90.0, 144.0), clip(200.0, 206.0)],
                 notes: None,
+                bed: None,
             }],
         };
         let issues = pacing_issues(&s, true, &sc());
@@ -3220,6 +3486,7 @@ mod tests {
             on_screen_text: None,
             clips,
             notes: None,
+            bed: None,
         };
         let mut s = Script {
             title: "t".into(),

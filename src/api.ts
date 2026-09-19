@@ -390,12 +390,23 @@ export interface ScriptClip {
   why?: string;
 }
 
+/** Sound that runs across a beat while its pictures change under it — a J-cut. */
+export interface AudioBed {
+  video_id: number;
+  in_s: number;
+  out_s: number;
+  why?: string;
+  /** True when the pipeline laid it rather than the editor asking for it. */
+  inferred?: boolean;
+}
+
 export interface Beat {
   id: string;
   purpose: string;
   narration?: string;
   on_screen_text?: string;
   clips: ScriptClip[];
+  bed?: AudioBed | null;
   notes?: string;
 }
 

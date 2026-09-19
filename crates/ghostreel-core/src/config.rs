@@ -219,6 +219,13 @@ pub struct ScriptConfig {
     pub audio_fade_s: f64,
     /// Held before someone's first word (s).
     pub speech_lead_s: f64,
+    /// Let a speaker's voice run on under the pictures that follow it in the same beat, instead of
+    /// stopping when we cut away. The editor can name a bed itself; this decides whether the
+    /// pipeline lays one where it sees a beat that would otherwise fall silent.
+    pub infer_audio_beds: bool,
+    /// How far a laid bed may run past the clip it came from (s). Long enough for a cutaway or
+    /// two, short enough that a beat does not swallow a whole answer nobody asked for.
+    pub max_bed_extend_s: f64,
     /// A clip is never stretched further than this to reach whole sentences (s).
     pub max_speech_extend_s: f64,
     /// Tool rounds for a local model, whose context every result is spent from.
@@ -273,6 +280,8 @@ impl Default for ScriptConfig {
             speech_overrun_s: 0.35,
             audio_fade_s: 0.12,
             speech_lead_s: 0.5,
+            infer_audio_beds: true,
+            max_bed_extend_s: 20.0,
             max_speech_extend_s: 12.0,
             local_tool_rounds: 10,
             roomy_tool_rounds: 60,
@@ -533,6 +542,8 @@ impl Config {
                 "speech_overrun_s" => f.speech_overrun_s = num(key, value)?,
                 "audio_fade_s" => f.audio_fade_s = num(key, value)?,
                 "speech_lead_s" => f.speech_lead_s = num(key, value)?,
+                "infer_audio_beds" => f.infer_audio_beds = flag(value),
+                "max_bed_extend_s" => f.max_bed_extend_s = num(key, value)?,
                 "max_speech_extend_s" => f.max_speech_extend_s = num(key, value)?,
                 "local_tool_rounds" => f.local_tool_rounds = num(key, value)?,
                 "roomy_tool_rounds" => f.roomy_tool_rounds = num(key, value)?,

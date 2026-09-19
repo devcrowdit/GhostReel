@@ -782,6 +782,17 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                     if let Some(notes) = &beat.notes {
                         println!("  notes: {notes}");
                     }
+                    if let Some(bed) = &beat.bed {
+                        println!(
+                            "  sound: #{} {:.2}-{:.2} ({:.2}s){}{}",
+                            bed.video_id,
+                            bed.in_s,
+                            bed.out_s,
+                            bed.duration_s(),
+                            if bed.inferred { " carried under the pictures" } else { "" },
+                            bed.why.as_deref().map(|w| format!(" — {w}")).unwrap_or_default()
+                        );
+                    }
                     for clip in &beat.clips {
                         let dur = (clip.out_s - clip.in_s).max(0.0);
                         let audio = match clip.audio {

@@ -82,6 +82,65 @@ pub fn build_timeline_pure(
     for beat in &script.beats {
         let beat_dur_s: f64 = beat.clips.iter().map(|c| (c.out_s - c.in_s).max(0.0)).sum();
 
+        // A bed is one voice across the whole beat: A1 carries it once, and the pictures above
+        // contribute no sound of their own. In an NLE that is a J-cut, audio and video cut apart.
+        let mut bed_written = false;
+        if let Some(bed) = &beat.bed {
+            if let Some(res) = media.get(&bed.video_id) {
+                bed_written = true;
+                let rate = res.fps.as_f64();
+                let in_frames = (bed.in_s * rate).round();
+                let dur_frames = ((bed.out_s - bed.in_s).max(0.0) * rate).round().max(1.0);
+                let available = (res.duration_s * rate).round().max(dur_frames);
+                let name = res.path.file_name().and_then(|n| n.to_str()).unwrap_or("clip.mp4").to_string();
+                let range = |start: f64, dur: f64| {
+                    json!({
+                        "OTIO_SCHEMA": "TimeRange.1",
+                        "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": start},
+                        "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": dur}
+                    })
+                };
+                a1_children.push(json!({
+                    "OTIO_SCHEMA": "Clip.2",
+                    "metadata": {"ghostreel": {"bed": true, "beat_id": beat.id, "why": bed.why}},
+                    "name": name,
+                    "source_range": range(in_frames, dur_frames),
+                    "effects": [],
+                    "markers": [],
+                    "enabled": true,
+                    "color": null,
+                    "media_references": {"DEFAULT_MEDIA": json!({
+                        "OTIO_SCHEMA": "ExternalReference.1",
+                        "metadata": {},
+                        "name": "",
+                        "available_range": range(0.0, available),
+                        "available_image_bounds": null,
+                        "target_url": file_url(&res.path.to_string_lossy())
+                    })},
+                    "active_media_reference_key": "DEFAULT_MEDIA"
+                }));
+                // Any shortfall between the bed and the pictures above it stays silent.
+                let bed_s = (bed.out_s - bed.in_s).max(0.0);
+                if beat_dur_s > bed_s + 0.001 {
+                    let gap_frames = ((beat_dur_s - bed_s) * seq_rate).round().max(1.0);
+                    a1_children.push(json!({
+                        "OTIO_SCHEMA": "Gap.1",
+                        "metadata": {},
+                        "name": "",
+                        "source_range": {
+                            "OTIO_SCHEMA": "TimeRange.1",
+                            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": seq_rate, "value": 0.0},
+                            "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": seq_rate, "value": gap_frames}
+                        },
+                        "effects": [],
+                        "markers": [],
+                        "enabled": true,
+                        "color": null
+                    }));
+                }
+            }
+        }
+
         for (clip_idx, clip) in beat.clips.iter().enumerate() {
             let res = media
                 .get(&clip.video_id)
@@ -181,7 +240,9 @@ pub fn build_timeline_pure(
             v1_children.push(v1_clip);
 
             // A1 Audio Track mirroring
-            if clip.audio == Audio::Source && res.has_audio {
+            if bed_written {
+                // The bed already spans this beat on A1; a second copy would double the voice.
+            } else if clip.audio == Audio::Source && res.has_audio {
                 let a1_clip = json!({
                     "OTIO_SCHEMA": "Clip.2",
                     "metadata": {},

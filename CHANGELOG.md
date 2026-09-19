@@ -10,6 +10,25 @@ last sample of a word, and every join is faded. The editor can also answer in wo
 always redrafting.
 
 ### Added
+- **A voice can run under the pictures.** Sound was bound to whatever clip was on screen — one
+  `audio` field per clip, `source` or `mute` — so the moment a beat cut away from a speaker it
+  fell silent, and every teaser came out as a talking head followed by a mute postcard. A beat can
+  now carry a *bed*: the stretch of speech that plays across it while the pictures change
+  underneath. The editing rules asked for exactly this ("cut to a picture of what they are
+  describing while they keep talking"); the schema had no way to say it.
+
+  The pipeline lays beds itself where a beat would otherwise go quiet, so it works with a local
+  model that knows nothing about the field, and the editor can name one explicitly. A laid bed
+  starts as far before the speaker's own clip as that clip sits into the beat, so their lips still
+  match when we cut to them, and it stops at a sentence end before the interviewer's next question
+  (`script.infer_audio_beds`, `script.max_bed_extend_s`). On the reference footage the b-roll went
+  from digital silence to her voice at a normal level.
+
+  Exports carry it as a real J-cut: A1 holds one audio clip spanning several video clips, which is
+  what an editor would cut by hand in Premiere.
+- **The script editor shows the cut on three lanes** — titles, picture and sound — the way an NLE
+  does, because a bed is invisible in a list of beats. Drag a block's edge to trim it; a striped
+  bar is a voice the pipeline carried under the pictures.
 - **The editor can reply.** A third action carries text and drafts nothing, so a question, an
   ambiguous brief or a message that is not about the video gets an answer instead of a script. A
   note pasted into the chat by mistake used to come back as a 120 s single-beat draft. A reply
