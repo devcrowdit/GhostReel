@@ -148,18 +148,6 @@ pub struct ChatContext {
 /// Returned when a turn is stopped; the caller reports it as cancelled, not as a failure.
 pub const CANCELLED: &str = "stopped";
 
-/// How much footage each brain gets to look at before drafting.
-///
-/// This is a stop against a model that loops, not a research budget: a good editor watches until
-/// it knows the material, and the difference between a teaser built from one clip and one built
-/// from four voices is how much it looked. Models stop on their own when they have enough — the
-/// runs that mattered here used 8 to 15 rounds of it.
-///
-/// A local model is the exception: every round's result is appended to a transcript it re-reads
-/// in full, so rounds eat the context the draft itself needs.
-
-/// Clips longer than this are pacing mistakes (the model pasted a whole tool range). Generous, so
-/// people talking can stay on screen for whole sentences.
 /// Pacing problems the model can fix in a redraft: clips too long or too short, and (when
 /// `enforce_target`) a total far from the target.
 pub fn pacing_issues(script: &Script, enforce_target: bool, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
