@@ -717,6 +717,12 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
             if snapped > 0 {
                 println!("snapped {snapped} clip boundary(ies) to speech segments");
             }
+            // Same treatment a drafted script gets: a beat that would fall silent when it cuts
+            // away keeps the voice running under the pictures.
+            let script_cfg = Config::load(&paths.config_file).unwrap_or_default().script;
+            for issue in ghostreel_core::chat::lay_audio_beds(&db, &mut script, &script_cfg) {
+                println!("  [info] {}", issue.message);
+            }
             let issues = ghostreel_core::script::validate(&db, p.id, &script)?;
             for issue in &issues {
                 let tag = match issue.severity {

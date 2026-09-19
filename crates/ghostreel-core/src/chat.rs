@@ -1515,52 +1515,6 @@ fn drop_repeated_footage(script: &mut Script) -> usize {
     dropped
 }
 
-/// When the speaking clips alone overrun the target, shorten each proportionally, cutting after a
-/// whole sentence (plus the tail) rather than mid-word. Returns whether anything changed.
-fn fit_speech_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> bool {
-    let Some(target) = script.target_duration_s.filter(|t| *t > 0.0) else { return false };
-    let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
-    let spoken: f64 =
-        script.beats.iter().flat_map(|b| &b.clips).filter(|c| speaking(c)).map(|c| c.out_s - c.in_s).sum();
-    let pictures: f64 =
-        script.beats.iter().flat_map(|b| &b.clips).filter(|c| !speaking(c)).map(|c| c.out_s - c.in_s).sum();
-    // Leave room for the other shots — but only for the ones that exist. Holding speech to a
-    // fixed share of the target assumes pictures will fill the rest, and an interview-led cut has
-    // none to fill it with: a 60 s teaser came out at 41.6 s, which is exactly the share.
-    let budget = (cfg.speech_budget * target).max(target - pictures);
-    if spoken <= budget * cfg.target_overshoot {
-        return false;
-    }
-    let factor = budget / spoken;
-    let mut changed = false;
-    for c in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
-        if !speaking(c) {
-            continue;
-        }
-        let max_out = c.in_s + (c.out_s - c.in_s) * factor;
-        let ends: Vec<f64> = db
-            .conn
-            .prepare_cached(
-                "SELECT end_s FROM transcript_segments WHERE video_id = ?1 AND start_s < ?3 AND end_s > ?2 ORDER BY start_s",
-            )
-            .and_then(|mut st| {
-                st.query_map(params![c.video_id, c.in_s, c.out_s], |r| r.get::<_, f64>(0))
-                    .map(|rows| rows.flatten().collect())
-            })
-            .unwrap_or_default();
-        // Last sentence end that fits with its tail; at least the first sentence.
-        let cut = ends.iter().copied().rfind(|e| e + cfg.speech_tail_s <= max_out).or(ends.first().copied());
-        if let Some(e) = cut {
-            let out = (e + cfg.speech_tail_s).min(c.out_s);
-            if out < c.out_s - 0.05 {
-                c.out_s = out;
-                changed = true;
-            }
-        }
-    }
-    changed
-}
-
 /// Back-to-back clips of the same video in one beat (`0-6`, `6-16`, `16-23`) are jump cuts inside a
 /// single continuous take: join them. Returns how many cuts were removed.
 fn merge_contiguous_clips(script: &mut Script, cfg: &crate::config::ScriptConfig) -> usize {
@@ -2836,6 +2790,36 @@ pub async fn run_turn(
     Ok(TurnResult { session_id, reply, script_id, script: parsed_script, issues, tool_calls: tool_records })
 }
 
+/// How far a voice can keep going from `from_s` towards `wanted_end`: never into the interviewer's
+/// next question, and stopping on a whole sentence. Shared by the beds the editor asks for and the
+/// ones laid here, so both end the same way.
+fn speech_runs_until(db: &Db, video_id: i64, from_s: f64, wanted_end: f64, cfg: &crate::config::ScriptConfig) -> f64 {
+    let mut end = wanted_end;
+    let segs: Vec<(f64, f64, bool)> = db
+        .conn
+        .prepare(
+            "SELECT start_s, end_s, COALESCE(off_mic, 0) FROM transcript_segments
+             WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 ORDER BY start_s",
+        )
+        .and_then(|mut st| {
+            st.query_map(params![video_id, from_s, end], |r| {
+                Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)? != 0))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    if let Some((off_start, _, _)) = segs.iter().find(|(_, _, off)| *off) {
+        end = end.min(*off_start);
+    }
+    match segs.iter().rev().find(|(_, e, off)| !*off && *e <= end + cfg.speech_overrun_s) {
+        // Stop where the sentence stops, the way a clip does.
+        Some((_, seg_end, _)) => (*seg_end + cfg.speech_overrun_s).min(wanted_end),
+        // Nobody speaks out here. Running the bed on would only add silence that has been faded
+        // out anyway, and would claim in the export that there is audio to hear.
+        None => from_s,
+    }
+}
+
 /// Let a speaker's voice run under the pictures that follow, instead of stopping at the cutaway.
 ///
 /// A beat usually opens on the person talking and then cuts to what they are describing. Until
@@ -2847,7 +2831,7 @@ pub async fn run_turn(
 /// own in-point as that clip sits into the beat, so when we reach the face, the audio is exactly
 /// where it would have been. It stops at a sentence end, before the interviewer's next question,
 /// and never runs further than `max_bed_extend_s` past the clip it came from.
-fn lay_audio_beds(db: &Db, s: &mut Script, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
+pub fn lay_audio_beds(db: &Db, s: &mut Script, cfg: &crate::config::ScriptConfig) -> Vec<Issue> {
     let mut issues = Vec::new();
     if !cfg.infer_audio_beds {
         return issues;
@@ -2863,6 +2847,14 @@ fn lay_audio_beds(db: &Db, s: &mut Script, cfg: &crate::config::ScriptConfig) ->
             let mut bed = bed;
             if bed.duration_s() > beat_len && beat_len > 0.0 {
                 bed.out_s = bed.in_s + beat_len;
+            } else if beat_len > bed.duration_s() + 0.05 {
+                // Written to the length of the speaker's own clip, not the beat's: the pictures
+                // after it would play silent, which is the thing a bed exists to prevent.
+                let wanted = (bed.in_s + beat_len).min(bed.out_s + cfg.max_bed_extend_s);
+                let grown = speech_runs_until(db, bed.video_id, bed.out_s, wanted, cfg);
+                if grown > bed.out_s + 0.05 {
+                    bed.out_s = grown;
+                }
             }
             if !clip_has_speech(db, bed.video_id, bed.in_s, bed.out_s) {
                 issues.push(Issue {
@@ -2909,30 +2901,10 @@ fn lay_audio_beds(db: &Db, s: &mut Script, cfg: &crate::config::ScriptConfig) ->
         let start = (clip.in_s - lead).max(0.0);
         let wanted_end = start + beat_dur;
         let cap = clip.out_s + cfg.max_bed_extend_s;
-        let mut end = wanted_end.min(cap);
+        let capped = wanted_end.min(cap);
 
-        // Never run into the interviewer's next question: stop at the last segment that is on
-        // the microphone before one that is not.
-        let segs: Vec<(f64, f64, bool)> = db
-            .conn
-            .prepare(
-                "SELECT start_s, end_s, COALESCE(off_mic, 0) FROM transcript_segments
-                 WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 ORDER BY start_s",
-            )
-            .and_then(|mut st| {
-                st.query_map(params![clip.video_id, clip.out_s, end], |r| {
-                    Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)? != 0))
-                })
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            })
-            .unwrap_or_default();
-        if let Some((off_start, _, _)) = segs.iter().find(|(_, _, off)| *off) {
-            end = end.min(*off_start);
-        }
-        // Stop where a sentence stops, so the bed ends the way a clip does.
-        if let Some((_, seg_end, _)) = segs.iter().rev().find(|(_, e, off)| !*off && *e <= end + cfg.speech_overrun_s) {
-            end = (*seg_end + cfg.speech_overrun_s).min(wanted_end);
-        }
+        // Never run into the interviewer's next question, and stop on a whole sentence.
+        let end = speech_runs_until(db, clip.video_id, clip.out_s, capped, cfg);
         // Worth a bed when the voice carries past its own picture, or begins under one before
         // it — the two halves of a J-cut. When it does neither, the old behaviour is already right.
         let trails = end > clip.out_s + 0.05;
