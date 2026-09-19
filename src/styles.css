@@ -1580,3 +1580,49 @@ pre.cli-test-result { background: var(--panel, #171a21); border: 1px solid var(-
 .session-item .session-remove:hover {
   opacity: 1;
 }
+
+/* A task card opens to show what it is actually doing. */
+.progress-head.clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.task-caret {
+  display: inline-block;
+  width: 0.9em;
+  opacity: 0.6;
+}
+.task-details {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #2a2a33);
+}
+.task-full-label {
+  margin-bottom: 6px;
+}
+.task-details dl {
+  margin: 0 0 8px;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+}
+.task-details dl > div {
+  display: contents;
+}
+.task-details dt {
+  white-space: nowrap;
+}
+.task-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.task-log {
+  max-height: 160px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.task-log > div {
+  padding: 1px 0;
+}

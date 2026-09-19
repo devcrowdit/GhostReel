@@ -462,8 +462,19 @@ impl Grounding {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LocalAction {
-    Tool { tool: String, args: Value },
-    Final { script: Script },
+    Tool {
+        tool: String,
+        args: Value,
+    },
+    Final {
+        script: Script,
+    },
+    /// Answer in words and draft nothing. Without this the only legal moves are "search again"
+    /// or "emit a whole script", so a message that is not editing feedback — a question, a pasted
+    /// note, a brief the footage cannot support — still produced a script nobody asked for.
+    Reply {
+        text: String,
+    },
 }
 
 /// JSON Schema for Script v1, friendly to llama.cpp grammar.
@@ -600,6 +611,15 @@ pub fn local_action_schema() -> Value {
                 },
                 "required": ["action", "script"],
                 "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["reply"] },
+                    "text": { "type": "string" }
+                },
+                "required": ["action", "text"],
+                "additionalProperties": false
             }
         ]
     })
@@ -609,12 +629,26 @@ pub fn local_action_schema() -> Value {
 pub fn local_final_action_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {
-            "action": { "type": "string", "enum": ["final"] },
-            "script": script_json_schema()
-        },
-        "required": ["action", "script"],
-        "additionalProperties": false
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["final"] },
+                    "script": script_json_schema()
+                },
+                "required": ["action", "script"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["reply"] },
+                    "text": { "type": "string" }
+                },
+                "required": ["action", "text"],
+                "additionalProperties": false
+            }
+        ]
     })
 }
 
@@ -1529,6 +1563,7 @@ HOW TO EDIT
 6b. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
+7a. You can answer in words instead of drafting: reply with {\"action\":\"reply\",\"text\":...} when the request is ambiguous and one question would settle it, when a message is not about the video (notes, something pasted by mistake), or when the footage cannot support what was asked - say what is missing. A reply leaves the previous version alone, which is better than rebuilding it around a guess. Do not reply to avoid work: when the request is clear, draft.
 8. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
 9. Always reply in the user's language.
 ";
@@ -2344,6 +2379,12 @@ pub async fn run_turn(
                     helper.complete_full(&transcript, Some(local_action_schema()), script_token_budget, *think).await?;
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
                 match action {
+                    // Answering in words is a complete turn: nothing is drafted and the previous
+                    // version stays as it is.
+                    Ok(LocalAction::Reply { text }) => {
+                        raw_reply = text;
+                        break;
+                    }
                     Ok(LocalAction::Tool { tool, args }) => {
                         on_event(ChatEvent::ToolStarted { tool: tool.clone(), args: args.clone() });
                         let vector = if tool == "search_moments" {
@@ -2420,6 +2461,9 @@ pub async fn run_turn(
                     Ok(LocalAction::Final { mut script }) => {
                         script.fill_from_project(&project);
                         parsed_script = Some(script);
+                    }
+                    Ok(LocalAction::Reply { text }) => {
+                        raw_reply = text;
                     }
                     Ok(LocalAction::Tool { .. }) => {
                         return Err(Error::Invalid(
@@ -2516,6 +2560,12 @@ pub async fn run_turn(
                 let out_str = agent.complete(&cli_prompt).await?;
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
                 match action {
+                    // Answering in words is a complete turn: nothing is drafted and the previous
+                    // version stays as it is.
+                    Ok(LocalAction::Reply { text }) => {
+                        raw_reply = text;
+                        break;
+                    }
                     Ok(LocalAction::Tool { tool, args }) => {
                         on_event(ChatEvent::ToolStarted { tool: tool.clone(), args: args.clone() });
                         let vector = if tool == "search_moments" {
@@ -2594,7 +2644,9 @@ pub async fn run_turn(
                      Produce the final script. Reply ONLY with a JSON object matching this schema:\n{final_schema_json}\n<|im_end|>\n"
                 );
                 let final_str = agent.complete(&cli_final_prompt).await?;
-                if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
+                if let Ok(LocalAction::Reply { text }) = serde_json::from_str::<LocalAction>(&final_str) {
+                    raw_reply = text;
+                } else if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
                     script.fill_from_project(&project);
                     parsed_script = Some(script);
                 }
@@ -2831,6 +2883,28 @@ mod tests {
             "moved to the steady run: {c:?} {issues:?}"
         );
         assert!(issues.iter().any(|i| i.message.contains("moved clip off a shaky stretch")), "{issues:?}");
+    }
+
+    /// The three actions a turn can take. A reply carries words and no script, which is what lets
+    /// the editor ask a question instead of drafting around a guess.
+    #[test]
+    fn a_turn_may_answer_in_words_instead_of_drafting() {
+        let reply: LocalAction =
+            serde_json::from_str(r#"{"action":"reply","text":"Which three voices do you want?"}"#).unwrap();
+        assert!(matches!(reply, LocalAction::Reply { text } if text.contains("voices")));
+
+        // The schema the model is constrained to must actually permit it, or it can never be
+        // produced no matter what the rules say.
+        let schema = serde_json::to_string(&local_action_schema()).unwrap();
+        assert!(schema.contains("reply"), "the action schema must allow a reply");
+        let forced = serde_json::to_string(&local_final_action_schema()).unwrap();
+        assert!(forced.contains("reply"), "even when pushed to finish, it may answer instead");
+
+        // A tool call and a script still parse as before.
+        assert!(matches!(
+            serde_json::from_str::<LocalAction>(r#"{"action":"tool","tool":"list_videos","args":{}}"#).unwrap(),
+            LocalAction::Tool { .. }
+        ));
     }
 
     #[test]

@@ -58,7 +58,7 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
   const [turnError, setTurnError] = useState<string | null>(null);
   const [latestIssues, setLatestIssues] = useState<Issue[] | undefined>(undefined);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const tasks = useQueue();
 
   const removeSession = async (id: number) => {
@@ -138,9 +138,13 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
     };
   }, [selectedSessionId]);
 
-  // Auto-scroll chat to bottom
+  // Keep the chat pinned to its latest message. Scrolling the element itself rather than calling
+  // scrollIntoView on a marker: that walks up every scrollable ancestor, so a new message dragged
+  // the whole page down with it.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const list = messagesRef.current;
+    if (!list) return;
+    list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
   }, [messages, liveEvents, optimisticUser]);
 
   // Find running chat task in queue
@@ -334,7 +338,7 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
           {turnRunning && <span className="pill local small">Running</span>}
         </div>
 
-        <div className="chat-messages">
+        <div className="chat-messages" ref={messagesRef}>
           {messages.length === 0 && !optimisticUser && (
             <div className="chat-empty muted small">
               Describe your video concept to generate a script with clips from this project’s footage.
@@ -432,7 +436,6 @@ export default function ScriptsPanel({ projectId }: { projectId: number }) {
           )}
 
           {turnError && <div className="banner bad small">{turnError}</div>}
-          <div ref={messagesEndRef} />
         </div>
 
         {/* Chat Input */}
