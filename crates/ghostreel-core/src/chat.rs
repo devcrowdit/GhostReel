@@ -203,7 +203,7 @@ fn enforce_grounding_and_pacing(
     enforce_target: bool,
     cfg: &crate::config::ScriptConfig,
 ) -> Vec<Issue> {
-    let mut issues = Vec::new();
+    let mut issues = tidy_beat_ids(s);
     // A clip on a stretch the camera shakes through is moved to the nearest steady stretch of
     // the same shot, or dropped when there is none. Telling the model was not enough: the same
     // stretch of a clip measured at eleven times the sway limit was cut into four scripts.
@@ -1266,6 +1266,26 @@ pub fn trim_to_target(script: &mut Script, cfg: &crate::config::ScriptConfig) ->
     trim_to_target_with(script, |_| false, cfg)
 }
 
+/// Keep every bed inside the beat it plays under.
+///
+/// Beds are laid before the cut is fitted to its target, and fitting trims the pictures. A bed
+/// left at its old length then outlives them: it plays on over the next beat's pictures, and the
+/// export puts overlapping clips on A1. Whatever moved the clips, this puts the sound back inside
+/// its beat.
+fn clamp_beds_to_beats(script: &mut Script) {
+    for beat in &mut script.beats {
+        let beat_len: f64 = beat.clips.iter().map(|c| (c.out_s - c.in_s).max(0.0)).sum();
+        match &mut beat.bed {
+            Some(bed) if beat_len <= 0.0 => {
+                let _ = bed;
+                beat.bed = None;
+            }
+            Some(bed) if bed.duration_s() > beat_len => bed.out_s = bed.in_s + beat_len,
+            _ => {}
+        }
+    }
+}
+
 /// [`trim_to_target`] that leaves `keep` clips (people speaking) whole and shortens the others.
 /// Fit a cut to its target in one pass.
 ///
@@ -1285,7 +1305,9 @@ fn fit_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig
         return false;
     }
     if total < target {
-        return grow_to_target(db, script, cfg);
+        let grew = grow_to_target(db, script, cfg);
+        clamp_beds_to_beats(script);
+        return grew;
     }
 
     let speaking: Vec<bool> =
@@ -1327,6 +1349,7 @@ fn fit_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig
             }
         }
     }
+    clamp_beds_to_beats(script);
     changed
 }
 
@@ -2778,6 +2801,54 @@ pub async fn run_turn(
     Ok(TurnResult { session_id, reply, script_id, script: parsed_script, issues, tool_calls: tool_records })
 }
 
+/// A beat's id is a handle, not a sentence: the preview groups clips by it, titles and captions
+/// are keyed on it, and the editor scrolls to it. Models treat it loosely — one pasted the whole
+/// quote it had just found, another left it empty on every beat — so an unusable id is replaced
+/// with a slug of the beat's purpose, and duplicates are numbered.
+fn tidy_beat_ids(script: &mut Script) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut fixed = 0usize;
+
+    for (i, beat) in script.beats.iter_mut().enumerate() {
+        let original = beat.id.clone();
+        let usable = !original.trim().is_empty() && original.chars().count() <= 40;
+        let mut id = if usable {
+            original.trim().to_string()
+        } else {
+            let slug: String = beat
+                .purpose
+                .split_whitespace()
+                .take(4)
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            if slug.is_empty() { format!("beat-{}", i + 1) } else { slug }
+        };
+        if id != original {
+            fixed += 1;
+        }
+        let base = id.clone();
+        let mut n = 2;
+        while !seen.insert(id.clone()) {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        beat.id = id;
+    }
+
+    if fixed > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("named {fixed} beat(s) after their purpose"),
+        });
+    }
+    issues
+}
+
 /// How far a voice can keep going from `from_s` towards `wanted_end`: never into the interviewer's
 /// next question, and stopping on a whole sentence. Shared by the beds the editor asks for and the
 /// ones laid here, so both end the same way.
@@ -2990,6 +3061,64 @@ mod tests {
             script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
             "every clip is the length its sentences are"
         );
+    }
+
+    /// Fitting trims the pictures after the beds are laid. A bed left at its old length plays
+    /// on over the next beat, and the export puts two clips on top of each other on A1.
+    #[test]
+    fn a_bed_is_cut_back_when_its_pictures_are() {
+        use crate::script::{Audio, AudioBed, Beat, ScriptClip};
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![Beat {
+                id: "b1".into(),
+                purpose: "p".into(),
+                narration: None,
+                on_screen_text: None,
+                notes: None,
+                clips: vec![ScriptClip { video_id: 1, in_s: 0.0, out_s: 6.0, audio: Audio::Mute, why: None }],
+                bed: Some(AudioBed { video_id: 1, in_s: 10.0, out_s: 30.0, why: None, inferred: true }),
+            }],
+        };
+        clamp_beds_to_beats(&mut script);
+        let bed = script.beats[0].bed.clone().unwrap();
+        assert!((bed.duration_s() - 6.0).abs() < 1e-9, "bed matches its pictures: {}", bed.duration_s());
+    }
+
+    /// One model pasted the quote it had just found into the id; another left every id empty.
+    #[test]
+    fn unusable_beat_ids_are_named_after_their_purpose() {
+        use crate::script::Beat;
+        let beat = |id: &str, purpose: &str| Beat {
+            id: id.into(),
+            purpose: purpose.into(),
+            narration: None,
+            on_screen_text: None,
+            notes: None,
+            clips: vec![],
+            bed: None,
+        };
+        let mut script = Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![
+                beat("So was that Northwest Hills where you grew up? I grew up in Northwest Hills.", "Establish the deep roots"),
+                beat("", "Establish the deep roots"),
+                beat("keep-me", "Something else"),
+            ],
+        };
+        let issues = tidy_beat_ids(&mut script);
+        assert_eq!(script.beats[0].id, "establish-the-deep-roots");
+        assert_eq!(script.beats[1].id, "establish-the-deep-roots-2", "duplicates are numbered");
+        assert_eq!(script.beats[2].id, "keep-me", "a usable id is left alone");
+        assert!(issues.iter().any(|i| i.message.contains("named 2 beat(s)")));
     }
 
     /// A beat that opens on a speaker and cuts away used to go silent at the cut. The voice now
