@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GhostReel",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "identifier": "com.ghostreel.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -49,11 +49,17 @@
       },
       "deb": {
         "section": "video",
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
       },
       "rpm": {
         "release": "1",
-        "depends": ["webkit2gtk4.1", "gtk3"]
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ]
       }
     },
     "windows": {
@@ -69,7 +75,9 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzRTY2QUUxNEJCMENFMDkKUldRSnpyQkw0V3JtSTFUNmJObFFOV01wR1JPNEJlUVl5THRXUTFGK1FpVzZVQzBMS2l4MzZNY0UK",
-      "endpoints": ["https://github.com/highercomve/GhostReel/releases/latest/download/latest.json"]
+      "endpoints": [
+        "https://github.com/highercomve/GhostReel/releases/latest/download/latest.json"
+      ]
     }
   }
 }

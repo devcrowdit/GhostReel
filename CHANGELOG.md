@@ -5,9 +5,16 @@ versions follow [SemVer](https://semver.org/) while the project is 0.x (minor = 
 
 ## [Unreleased]
 
-Interviews survive the cut: sentences are never scaled to hit a length, clips no longer stop on the
-last sample of a word, and every join is faded. The editor can also answer in words instead of
-always redrafting.
+## [0.2.0] — 2026-09-19
+
+The script chat stopped being a lottery. Every word spoken in the project goes to the editor before
+it cuts, a voice can run on under the pictures instead of stopping at the cutaway, no clip ever ends
+in the middle of a sentence, and the timeline is edited by ear rather than by dragging. Timeline
+export is written here now, so nothing Python ships in the bundle.
+
+Interviews survive the cut in particular: sentences are never scaled to hit a length, clips no
+longer stop on the last sample of a word, every join is faded, and the editor can answer in words
+instead of always redrafting.
 
 ### Added
 - **A voice can run under the pictures.** Sound was bound to whatever clip was on screen — one
@@ -61,6 +68,25 @@ always redrafting.
   the two files back identically. A fixture from that adapter is checked in and compared byte for
   byte on every test run.
 
+
+- **Every word spoken is in front of the editor before it cuts.** A model that had to *ask* for
+  each transcript only read the tapes it already suspected: one run opened two videos, built the
+  whole teaser out of the speaker it found there, and never looked at the three other people who
+  said better things. The project's speech now goes in the prompt up front — with the timestamps to
+  cut on and the interviewer's questions marked — which is the order an editor works in: read the
+  interviews, decide the story, then go looking for pictures. It costs about 11 500 tokens for a
+  96-video project. Qwen3.5-9B went from 113–135 % over its target across four runs to 20 %, and
+  Bonsai-27B, which had never produced a usable script, found five different residents.
+  (`script.speech_in_prompt`; a local model gets half its window, and tapes that do not fit are
+  named rather than hidden.)
+- **The editor is told how to work here**, not only what a good cut is: a short method at the top
+  of the prompt — read the transcripts, find a picture for each chosen sentence, show the face then
+  cut away with a bed, fix the total yourself — and a checklist to run before answering.
+- **The repairs are fed back to the model.** The repair pass runs after the last redraft, so
+  nothing ever told the editor what had been changed for it; it made the same edit next turn and
+  the pipeline undid it again. What was applied now rides on the assistant message every backend
+  replays, and a rule says what it means: already done, build on it.
+
 ### Changed
 - **Length is a target, not a quota.** Speech clips are never scaled; pictures are the only thing
   trimmed or held. A 40 s ask now lands at 43.9 s with every sentence whole.
@@ -76,6 +102,31 @@ always redrafting.
   cutting to what they describe, and for no small talk unless it is asked for.
 
 ### Fixed
+- **A cut never stops in the middle of a sentence.** The fit that runs last can trim a speech clip
+  by seconds, and the only repair after it reached 0.75 s — so clips ended 0.27 s to 2.65 s before
+  the speaker finished, one of them mid-word, four of four in a single run. Every clip carrying a
+  voice is now put back on a whole sentence after fitting: out to the end of the sentence when that
+  is within `script.max_speech_extend_s`, back to where the previous one ended when it is further.
+  The length gives way to the speaker.
+- **A long search no longer kills the turn.** Every round re-sends the whole conversation, so a
+  model that kept looking eventually could not fit another one: 199 tool calls, then a raw
+  "exceeds the available context size" from the server with nothing drafted and twenty minutes of
+  research thrown away. Three quarters of the window is kept for the conversation, the oldest tool
+  results are forgotten to make room, and when there is nothing left to forget the loop stops
+  looking and writes the script.
+- **A model that would not stop generating hung the turn.** Server requests had no `max_tokens` and
+  a 300 s ceiling, so 11 347 tokens of one draft ran until the socket timed out and the turn died
+  as "error sending request". Both are now generous and configurable
+  (`script.max_answer_tokens` 16384, `script.server_timeout_s` 1800): the cap exists so a runaway
+  fails as itself, not to ration a long script from a slow model.
+- **A bed could outlive the beat it played under.** Beds are laid before the cut is fitted, and
+  fitting trims the pictures — one came back 19.9 s long under an 11.9 s beat, playing over the
+  next beat and stacking two clips on A1 in the export.
+- **A beat id is a handle, not a sentence.** The preview groups clips by it and titles are keyed on
+  it, but one model pasted a whole transcript quote into it and another left every one empty. An
+  unusable id is replaced with a slug of the beat's purpose, and duplicates are numbered.
+- `config set` accepts `max_tool_rounds`, which had a field and documentation but no key — the
+  research budget could only be changed by editing the file by hand.
 - **Sentences cut mid-word.** Three interview clips in a row ended inside a word: the fitting pass
   scaled speech after it had been snapped to sentences, so the number won (203.92 instead of
   204.68, 75.55 instead of 77.00, 155.86 instead of 156.78).
@@ -207,6 +258,7 @@ is and the editor cuts around the shaky stretches; camera originals play in the 
 
 See the git history: `git log v0.1.5`.
 
-[Unreleased]: https://github.com/highercomve/GhostReel/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/highercomve/GhostReel/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/highercomve/GhostReel/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/highercomve/GhostReel/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/highercomve/GhostReel/compare/v0.1.5...v0.1.6
