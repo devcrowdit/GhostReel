@@ -1576,6 +1576,7 @@ HOW TO EDIT
 12. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 13. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).
 14. You can answer in words instead of drafting: reply with {\"action\":\"reply\",\"text\":...} when the request is ambiguous and one question would settle it, when a message is not about the video (notes, something pasted by mistake), or when the footage cannot support what was asked - say what is missing. A reply leaves the previous version alone, which is better than rebuilding it around a guess. Do not reply to avoid work: when the request is clear, draft.
+15a. A line marked [applied after drafting] in an earlier reply is a change already made to the saved script - a bed laid, a clip moved off a shaky stretch, a range dropped. It is done: build on it rather than undoing it, and do not make the same mistake again in this session.
 15. The user's feedback overrides these defaults. When revising, change what they asked for (slower, longer, different shots, more narration) and keep what they didn't mention; never return the previous draft unchanged.
 16. Always reply in the user's language.
 ";
@@ -2748,6 +2749,12 @@ pub async fn run_turn(
         }
     }
 
+    // What the pipeline changed after the draft was written — beds laid, clips moved off shaky
+    // stretches, ranges dropped. The model is never told this in the turn that caused it, because
+    // the repair runs after the last redraft, so it repeats the same edit next time and the
+    // pipeline undoes it again. Recording it in the reply puts it in what the next turn replays.
+    let repair_note = repair_note(&issues);
+
     let reply = if !raw_reply.trim().is_empty() {
         raw_reply
     } else if let Some(s) = &parsed_script {
@@ -2787,18 +2794,43 @@ pub async fn run_turn(
         )?;
     }
 
-    // 3. Assistant message
+    // 3. Assistant message. The repairs ride along with it: this is the text every backend
+    // replays next turn, so it is the one place a note reaches the server, local and CLI brains
+    // alike.
     let assistant_tc_json = script_id.map(|sid| json!({ "script_id": sid }).to_string());
+    let stored_reply = match &repair_note {
+        Some(note) => format!("{reply}\n\n{note}"),
+        None => reply.clone(),
+    };
     ctx.db.conn.execute(
         "INSERT INTO chat_messages(session_id, role, content, tool_calls_json, created_at)
          VALUES (?1, 'assistant', ?2, ?3, ?4)",
-        params![session_id, reply, assistant_tc_json, now_ts],
+        params![session_id, stored_reply, assistant_tc_json, now_ts],
     )?;
 
     // Update chat_sessions updated_at
     ctx.db.conn.execute("UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2", params![now_ts, session_id])?;
 
     Ok(TurnResult { session_id, reply, script_id, script: parsed_script, issues, tool_calls: tool_records })
+}
+
+/// What the pipeline changed after the draft was written — beds laid, clips moved off shaky
+/// stretches, ranges dropped — written for the model rather than the user.
+///
+/// The repair runs after the last redraft, so nothing tells the model in the turn that caused it;
+/// it makes the same edit next time and the pipeline undoes it again. Carried on the assistant
+/// message, this reaches the server, local and CLI brains alike, since all three replay it.
+fn repair_note(issues: &[Issue]) -> Option<String> {
+    let repairs: Vec<&str> = issues
+        .iter()
+        .filter(|i| i.severity != IssueSeverity::Error)
+        .map(|i| i.message.as_str())
+        .take(6)
+        .collect();
+    if repairs.is_empty() {
+        return None;
+    }
+    Some(format!("[applied after drafting, already in the saved script: {}]", repairs.join("; ")))
 }
 
 /// A beat's id is a handle, not a sentence: the preview groups clips by it, titles and captions
@@ -3061,6 +3093,32 @@ mod tests {
             script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
             "every clip is the length its sentences are"
         );
+    }
+
+    /// The model never hears about a repair in the turn that caused it, so the note rides on the
+    /// assistant message the next turn replays. Errors are the model's problem to fix and are
+    /// reported separately; this is only what was already done for it.
+    #[test]
+    fn repairs_are_written_down_for_the_next_turn() {
+        let issue = |sev: IssueSeverity, msg: &str| Issue {
+            severity: sev,
+            beat_id: None,
+            clip_index: None,
+            message: msg.into(),
+        };
+        assert!(repair_note(&[]).is_none());
+        assert!(repair_note(&[issue(IssueSeverity::Error, "unable to assemble a script")]).is_none());
+
+        let note = repair_note(&[
+            issue(IssueSeverity::Info, "let the speaker's voice run under the pictures in 2 beat(s)"),
+            issue(IssueSeverity::Error, "ignored"),
+            issue(IssueSeverity::Warning, "moved clip off a shaky stretch"),
+        ])
+        .expect("a note");
+        assert!(note.starts_with("[applied after drafting"));
+        assert!(note.contains("voice run under the pictures"));
+        assert!(note.contains("shaky stretch"));
+        assert!(!note.contains("ignored"), "an error is not a repair: {note}");
     }
 
     /// Fitting trims the pictures after the beds are laid. A bed left at its old length plays
@@ -3733,9 +3791,14 @@ mod tests {
         tokio::spawn(async move {
             for step in 1..=3 {
                 let (mut socket, _) = listener.accept().await.unwrap();
+                // Grows with the request: a fixed buffer silently truncates the body, and the
+                // assertions below then fail on a prompt that merely got longer.
                 let mut buf = vec![0u8; 8192];
                 let mut total_read = 0;
-                while total_read < buf.len() {
+                loop {
+                    if total_read == buf.len() {
+                        buf.resize(buf.len() * 2, 0);
+                    }
                     let n = socket.read(&mut buf[total_read..]).await.unwrap();
                     if n == 0 {
                         break;
