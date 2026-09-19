@@ -210,6 +210,13 @@ pub struct ScriptConfig {
     pub min_narration_coverage: f64,
     /// Held after someone's last word before cutting away (s).
     pub speech_tail_s: f64,
+    /// When the speaker runs straight on with no pause, how far into the next sentence the cut
+    /// may reach so the last word's decay is not chopped off (s). Whisper's segments are
+    /// contiguous in continuous speech, so without this the clip ends on the final sample.
+    pub speech_overrun_s: f64,
+    /// Audio faded in and out at each join (s). A cut in the middle of someone's breath is a
+    /// click and an abrupt stop however well the sentence ended.
+    pub audio_fade_s: f64,
     /// Held before someone's first word (s).
     pub speech_lead_s: f64,
     /// A clip is never stretched further than this to reach whole sentences (s).
@@ -263,6 +270,8 @@ impl Default for ScriptConfig {
             narration_words_per_s: 2.5,
             min_narration_coverage: 0.6,
             speech_tail_s: 1.5,
+            speech_overrun_s: 0.35,
+            audio_fade_s: 0.12,
             speech_lead_s: 0.5,
             max_speech_extend_s: 12.0,
             local_tool_rounds: 10,
@@ -521,6 +530,8 @@ impl Config {
                 "narration_words_per_s" => f.narration_words_per_s = num(key, value)?,
                 "min_narration_coverage" => f.min_narration_coverage = num(key, value)?,
                 "speech_tail_s" => f.speech_tail_s = num(key, value)?,
+                "speech_overrun_s" => f.speech_overrun_s = num(key, value)?,
+                "audio_fade_s" => f.audio_fade_s = num(key, value)?,
                 "speech_lead_s" => f.speech_lead_s = num(key, value)?,
                 "max_speech_extend_s" => f.max_speech_extend_s = num(key, value)?,
                 "local_tool_rounds" => f.local_tool_rounds = num(key, value)?,

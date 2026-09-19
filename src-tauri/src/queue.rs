@@ -408,10 +408,12 @@ async fn run_preview(
     let p = Paths::resolve().map_err(|e| e.to_string())?;
     let db = Db::open(&p.db_file()).map_err(|e| e.to_string())?;
     let ffmpeg = ghostreel_core::doctor::locate("ffmpeg").ok_or_else(|| "ffmpeg not found".to_string())?;
+    let config = Config::load(&p.config_file).unwrap_or_default();
     let opts = ghostreel_core::preview::PreviewOptions {
         burn_titles,
         burn_narration,
         normalize_audio,
+        audio_fade_s: config.script.audio_fade_s,
         out: out.map(std::path::PathBuf::from),
         cancel: Some(cancel),
     };

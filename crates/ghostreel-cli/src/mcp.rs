@@ -529,6 +529,10 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
                 burn_titles: args.get("burn_titles").and_then(|v| v.as_bool()).unwrap_or(false),
                 burn_narration: args.get("burn_narration").and_then(|v| v.as_bool()).unwrap_or(false),
                 normalize_audio: args.get("normalize_audio").and_then(|v| v.as_bool()).unwrap_or(false),
+                audio_fade_s: ghostreel_core::config::Config::load(&paths.config_file)
+                    .unwrap_or_default()
+                    .script
+                    .audio_fade_s,
                 out: args.get("out").and_then(|v| v.as_str()).map(PathBuf::from),
                 cancel: None,
             };

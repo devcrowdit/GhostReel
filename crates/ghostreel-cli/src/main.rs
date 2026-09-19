@@ -814,6 +814,7 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 burn_titles,
                 burn_narration,
                 normalize_audio,
+                audio_fade_s: Config::load(&paths.config_file).unwrap_or_default().script.audio_fade_s,
                 out,
                 cancel: None,
             };

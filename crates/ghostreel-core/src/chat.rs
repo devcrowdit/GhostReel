@@ -1922,7 +1922,11 @@ fn pad_speech(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -
         let speech_end = segs[last].1;
         let mut out = speech_end + cfg.speech_tail_s;
         if let Some(next) = segs.get(last + 1) {
-            out = out.min((next.0 - 0.3).max(speech_end));
+            // Stop short of the next sentence — but when the speaker runs straight on there is
+            // no pause to stop in, and clipping at the final sample cuts the last word's decay.
+            // A little overrun is the difference between a clean end and a chopped one.
+            let room = (next.0 - 0.3).max(speech_end + cfg.speech_overrun_s);
+            out = out.min(room);
         }
         let out = out.min(old_out + cfg.max_speech_extend_s).min(duration);
         if out > c.out_s {

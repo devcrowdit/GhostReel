@@ -84,6 +84,8 @@ pub struct PreviewOptions {
     /// Bring every clip to the same loudness. Cutting between a lav at -20 dB and a room mic at
     /// -33 dB is jarring however good each one is on its own.
     pub normalize_audio: bool,
+    /// Seconds of fade at each join; `script.audio_fade_s`.
+    pub audio_fade_s: f64,
     pub out: Option<PathBuf>,
     pub cancel: Option<Arc<AtomicBool>>,
 }
@@ -122,11 +124,31 @@ pub fn proxy_dimensions(w: u32, h: u32) -> (u32, u32) {
 /// Content hashes look like `b3e:<hex>`; characters that aren't valid in file names everywhere
 /// (`:` on Windows) are replaced with `-`.
 pub fn proxy_file_name(content_hash: &str, in_s: f64, out_s: f64, fps: Fps, w: u32, h: u32) -> String {
+    proxy_file_name_with_audio(content_hash, in_s, out_s, fps, w, h, false, 0.0)
+}
+
+/// [`proxy_file_name`], distinguished also by how the audio was treated.
+///
+/// A proxy holds encoded audio, so two clips that differ only in levelling or fade are different
+/// files. Without this a rendered clip kept whatever audio it was first built with, and changing
+/// the setting appeared to do nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn proxy_file_name_with_audio(
+    content_hash: &str,
+    in_s: f64,
+    out_s: f64,
+    fps: Fps,
+    w: u32,
+    h: u32,
+    normalized: bool,
+    fade_s: f64,
+) -> String {
     let hash: String =
         content_hash.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
     let in_ms = (in_s * 1000.0).round() as i64;
     let out_ms = (out_s * 1000.0).round() as i64;
-    format!("{hash}_{in_ms}_{out_ms}_{}_{}_{w}x{h}.mp4", fps.num, fps.den)
+    let audio = format!("{}{}", if normalized { "n" } else { "r" }, (fade_s * 1000.0).round() as i64);
+    format!("{hash}_{in_ms}_{out_ms}_{}_{}_{w}x{h}_{audio}.mp4", fps.num, fps.den)
 }
 
 /// Snap clip duration to whole frames at the project sequence fps:
@@ -357,7 +379,16 @@ pub fn render_preview(
             .get(&seg.video_id)
             .ok_or_else(|| Error::NotFound(format!("resolved media for video #{}", seg.video_id)))?;
 
-        let p_name = proxy_file_name(&res.content_hash, seg.in_s, seg.out_s, project_fps, proxy_w, proxy_h);
+        let p_name = proxy_file_name_with_audio(
+            &res.content_hash,
+            seg.in_s,
+            seg.out_s,
+            project_fps,
+            proxy_w,
+            proxy_h,
+            opts.normalize_audio,
+            opts.audio_fade_s,
+        );
         let p_path = proxies_dir.join(p_name);
 
         let exists_and_non_empty = p_path.is_file() && std::fs::metadata(&p_path).map(|m| m.len() > 0).unwrap_or(false);
@@ -376,9 +407,21 @@ pub fn render_preview(
 
             // Levelling happens per clip, before they are joined: loudnorm needs a whole clip
             // to measure, and the point is that clips match each other.
-            let af = if opts.normalize_audio { "loudnorm=I=-16:TP=-1.5:LRA=11,apad" } else { "apad" };
+            // Fade each clip in and out: segments are joined end to end, and a cut taken in the
+            // middle of a breath stops dead without one.
+            let fade = opts.audio_fade_s.max(0.0).min(seg_dur / 3.0);
+            let fades = if fade > 0.005 {
+                format!("afade=t=in:st=0:d={fade:.3},afade=t=out:st={:.3}:d={fade:.3},", (seg_dur - fade).max(0.0))
+            } else {
+                String::new()
+            };
+            let af = if opts.normalize_audio {
+                format!("{fades}loudnorm=I=-16:TP=-1.5:LRA=11,apad")
+            } else {
+                format!("{fades}apad")
+            };
             if !seg.mute && seg.has_audio {
-                cmd.args(["-map", "0:v:0", "-map", &format!("0:a:{}", seg.audio_track), "-af", af]);
+                cmd.args(["-map", "0:v:0", "-map", &format!("0:a:{}", seg.audio_track), "-af", &af]);
             } else {
                 let null_audio = "anullsrc=r=48000:cl=stereo";
                 cmd.args(["-f", "lavfi", "-t", &dur_str, "-i", null_audio]);
@@ -673,16 +716,27 @@ mod tests {
     fn proxy_file_name_and_dimensions() {
         // proxy_file_name exact string for 25/1 and 30000/1001:
         let name_25 = proxy_file_name("hash123", 1.234, 4.567, Fps::new(25, 1), 960, 540);
-        assert_eq!(name_25, "hash123_1234_4567_25_1_960x540.mp4");
+        assert_eq!(name_25, "hash123_1234_4567_25_1_960x540_r0.mp4");
 
         let name_ntsc = proxy_file_name("hash123", 1.234, 4.567, Fps::new(30000, 1001), 960, 540);
-        assert_eq!(name_ntsc, "hash123_1234_4567_30000_1001_960x540.mp4");
+        assert_eq!(name_ntsc, "hash123_1234_4567_30000_1001_960x540_r0.mp4");
 
         // Proxy dimensions for 16:9, 9:16, 4:3:
         assert_eq!(proxy_dimensions(1920, 1080), (960, 540));
         assert_eq!(proxy_dimensions(1080, 1920), (304, 540));
         assert_eq!(proxy_dimensions(1440, 1080), (720, 540));
         assert_eq!(proxy_dimensions(640, 480), (720, 540));
+    }
+
+    /// Two clips that differ only in how their audio was treated are different files: a proxy
+    /// carries encoded audio, and reusing one silently kept the old levelling and fade.
+    #[test]
+    fn audio_treatment_gives_a_proxy_its_own_name() {
+        let plain = proxy_file_name_with_audio("h", 0.0, 1.0, Fps::new(25, 1), 960, 540, false, 0.0);
+        let faded = proxy_file_name_with_audio("h", 0.0, 1.0, Fps::new(25, 1), 960, 540, false, 0.12);
+        let levelled = proxy_file_name_with_audio("h", 0.0, 1.0, Fps::new(25, 1), 960, 540, true, 0.12);
+        assert_ne!(plain, faded);
+        assert_ne!(faded, levelled);
     }
 
     #[test]
@@ -726,7 +780,7 @@ mod tests {
         // Proxy names never contain ':' (content hashes are `b3e:<hex>`).
         assert_eq!(
             proxy_file_name("b3e:ab12", 0.0, 1.0, Fps::new(25, 1), 960, 540),
-            "b3e-ab12_0_1000_25_1_960x540.mp4"
+            "b3e-ab12_0_1000_25_1_960x540_r0.mp4"
         );
     }
 
@@ -912,6 +966,7 @@ mod tests {
                 burn_titles: true,
                 burn_narration: true,
                 normalize_audio: false,
+                audio_fade_s: 0.12,
                 out: Some(burned_out.clone()),
                 cancel: None,
             },
