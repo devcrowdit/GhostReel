@@ -24,13 +24,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
 function printUsage() {
-  console.log(`Usage: node scripts/stage-helpers.mjs [--target <triple>] [--target-dir <dir>] [--profile <profile>] [--cuda]
+  console.log(`Usage: node scripts/stage-helpers.mjs [--target <triple>] [--target-dir <dir>] [--profile <profile>] [--cuda] [--require-otio]
 
 Options:
   --target <triple>       Target rust triple (default: host triple)
   --target-dir <dir>      Cargo target directory (default: CARGO_TARGET_DIR or target/)
   --profile <profile>     Cargo build profile (default: release)
   --cuda                  Require CUDA runtime libraries to be staged (errors if none found)
+  --require-otio          Require the ghostreel-otio sidecar (errors if it has not been built)
   --help, -h              Print usage information
 `);
 }
@@ -63,6 +64,7 @@ function main() {
   let targetDirArg = null;
   let profile = 'release';
   let cuda = false;
+  let requireOtio = false;
 
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -72,6 +74,8 @@ function main() {
       process.exit(0);
     } else if (arg === '--cuda') {
       cuda = true;
+    } else if (arg === '--require-otio') {
+      requireOtio = true;
     } else if (arg === '--profile') {
       i++;
       if (i >= args.length) {
@@ -145,8 +149,13 @@ function main() {
     otioPath = otioSidecarPath;
   } else if (existsSync(otioBinDirPath)) {
     otioPath = otioBinDirPath;
+  } else if (requireOtio) {
+    console.error(`Error: ghostreel-otio not found in ${join(targetDir, 'sidecars')} or ${binDir}.`);
+    console.error('Run `node scripts/build-otio.mjs` first — without it the bundle cannot export');
+    console.error('a script to Premiere or Resolve.');
+    process.exit(1);
   } else {
-    console.log('Note: ghostreel-otio not found, skipping optional helper.');
+    console.log('Note: ghostreel-otio not found, skipping optional helper (no timeline export).');
   }
 
   // Destination directories

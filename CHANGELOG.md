@@ -5,6 +5,67 @@ versions follow [SemVer](https://semver.org/) while the project is 0.x (minor = 
 
 ## [Unreleased]
 
+Interviews survive the cut: sentences are never scaled to hit a length, clips no longer stop on the
+last sample of a word, and every join is faded. The editor can also answer in words instead of
+always redrafting.
+
+### Added
+- **The editor can reply.** A third action carries text and drafts nothing, so a question, an
+  ambiguous brief or a message that is not about the video gets an answer instead of a script. A
+  note pasted into the chat by mistake used to come back as a 120 s single-beat draft. A reply
+  leaves the previous version alone.
+- **The audio track with the speech.** A field recording carries several tracks — on this project
+  four, two of them digital silence — and the preview took the first on faith. The index records
+  the loudest non-silent one and previews use it.
+- **Off-microphone speech, marked.** In an interview the subject is on a lav and the questions come
+  from across the room, 12 dB down. Each transcript segment is compared with the video's median
+  speech level and flagged; the rules say never to open a clip or build a beat on one.
+- **Even out audio** — a checkbox beside Burn titles that levels loudness across clips
+  (`loudnorm`), for cuts that mix a lav with a room mic.
+- **Task cards open**, showing what the turn is working on and a live log of each tool call.
+- **Timeline export ships in the bundle.** The OpenTimelineIO sidecar was wired through staging and
+  packaging but nothing ever built it, so every release quietly shipped without it and Export
+  failed with "ghostreel-otio sidecar not found". `scripts/build-otio.mjs` freezes it with
+  PyInstaller on Linux and Windows (cached in CI by the sidecar's own sources), `npm run sidecars`
+  builds it, and staging now refuses to package a release without it (`--require-otio`).
+
+### Changed
+- **Length is a target, not a quota.** Speech clips are never scaled; pictures are the only thing
+  trimmed or held. A 40 s ask now lands at 43.9 s with every sentence whole.
+- **The interview/b-roll balance is the editor's decision**, not a hidden 70 % cap
+  (`script.speech_budget` defaults to 1.0 and is a house rule when lowered).
+- **CLI agent brains continue their own conversation.** Every tool round re-sent the whole
+  transcript as a fresh invocation, so each round cost more than the last — on a 96-video library
+  agy spent over three minutes on round one and hit the timeout. Now only the new tool result is
+  sent (`claude`/`agy --continue`, `codex exec resume --last`; opencode has no equivalent).
+  `claude` and `codex` also skip permission prompts, as agy already did: a prompt nobody can answer
+  hangs the turn until it times out.
+- The rules ask for one story rather than a list of moments, for a speaker's face to be seen before
+  cutting to what they describe, and for no small talk unless it is asked for.
+
+### Fixed
+- **Sentences cut mid-word.** Three interview clips in a row ended inside a word: the fitting pass
+  scaled speech after it had been snapped to sentences, so the number won (203.92 instead of
+  204.68, 75.55 instead of 77.00, 155.86 instead of 156.78).
+- **The last word chopped.** Whisper's segments are contiguous in continuous speech, so the guard
+  against running into the next sentence collapsed to the current segment's end and the clip
+  stopped on the final sample. A clip may now run a little past the last word
+  (`script.speech_overrun_s`, 0.35 s), and every clip is faded in and out at its join
+  (`script.audio_fade_s`, 120 ms).
+- **A word from the next sentence, audible.** That overrun reached into what came next, so a clip
+  ending on "community" came out as "community and". The fade now starts at the last sentence end
+  inside the clip: the decay survives, the next word is already at zero.
+- **Stop did nothing to a script chat.** It set a flag only the index loop read between items, and
+  a chat turn is one long item. The turn now checks between tool rounds and before each model
+  call, and the local backend kills the helper process, where the generation actually runs. A
+  stopped turn reports as cancelled, not failed.
+- **Changing the audio settings appeared to do nothing** — proxies carry encoded audio, so a clip
+  kept whatever levelling and fade it was first built with. They are keyed on it now.
+- **The chat scrolled the whole application**; it scrolls itself.
+- Tool rounds get the draft's token budget; at the old 2048 default a model that reasons first ran
+  out mid-round and took the turn with it.
+- A chat session can be removed from the Scripts panel (its scripts are kept).
+
 ## [0.1.7] — 2026-09-18
 
 ### Fixed
