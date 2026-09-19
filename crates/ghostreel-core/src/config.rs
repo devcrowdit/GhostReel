@@ -530,6 +530,7 @@ impl Config {
                 "kv_cache" => llm.kv_cache = value.to_string(),
                 "flash_attn" => llm.flash_attn = value.to_string(),
                 "think" => llm.think = flag(value),
+                "max_tool_rounds" => llm.max_tool_rounds = num(key, value)?,
                 other => return Err(format!("unknown config key '{section}.{other}'")),
             }
             llm.validate(section)?;
