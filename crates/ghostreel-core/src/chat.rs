@@ -440,7 +440,7 @@ fn enforce_grounding_and_pacing(
     }
     let before = s.total_duration_s();
     let speaking = |c: &ScriptClip| clip_has_speech(db, c.video_id, c.in_s, c.out_s);
-    if enforce_target && fit_speech_to_target(db, s, cfg) | trim_to_target_with(s, speaking, cfg) {
+    if enforce_target && trim_to_target_with(s, speaking, cfg) {
         issues.push(Issue {
             severity: IssueSeverity::Info,
             beat_id: None,
@@ -1304,17 +1304,10 @@ fn fit_to_target(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig
     let want_pictures = (target - spoken).max(picture_floor).min(pictures);
     let picture_factor = if pictures > 0.0 { want_pictures / pictures } else { 1.0 };
 
-    // Only if trimming every picture still leaves it long does speech give way, and then no
-    // further than the share of the target it is allowed.
-    let after_pictures = spoken + want_pictures;
-    let speech_factor = if after_pictures > target && spoken > 0.0 {
-        // Speech gives way no further than its share of the target, or than what the pictures
-        // present can actually cover — whichever leaves it longer.
-        let floor = (cfg.speech_budget * target).max(target - want_pictures) / spoken;
-        ((target - want_pictures) / spoken).clamp(floor.min(1.0), 1.0)
-    } else {
-        1.0
-    };
+    // Speech is never scaled. Scaling it cut people off mid-sentence to hit a number: three
+    // interview clips in a row ended inside a word. A sentence is the unit here, and a cut that
+    // runs a few seconds long is worth more than one that lands exactly and sounds broken.
+    let speech_factor = 1.0;
 
     let mut changed = false;
     let mut i = 0;
@@ -2609,6 +2602,7 @@ pub async fn run_turn(
                     format!("{new_since_last}\nReply ONLY with a JSON object matching the same schema.")
                 };
                 let out_str = agent.complete_continuing(&cli_prompt, !first).await?;
+                debug_dump(&format!("cli-round-{tool_rounds}"), &cli_prompt, &out_str);
                 new_since_last.clear();
                 let action: Result<LocalAction, _> = serde_json::from_str(&out_str);
                 match action {
@@ -2705,6 +2699,7 @@ pub async fn run_turn(
                     )
                 };
                 let final_str = agent.complete_continuing(&cli_final_prompt, tool_rounds > 0).await?;
+                debug_dump("cli-final", &cli_final_prompt, &final_str);
                 if let Ok(LocalAction::Reply { text }) = serde_json::from_str::<LocalAction>(&final_str) {
                     raw_reply = text;
                 } else if let Ok(LocalAction::Final { mut script }) = serde_json::from_str::<LocalAction>(&final_str) {
@@ -2835,8 +2830,10 @@ mod tests {
 
     use crate::projects::NewProject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    /// What someone says is never shortened to reach a length. A cut made only of interview
+    /// keeps its sentences whole and runs as long as they do.
     #[test]
-    fn an_interview_only_cut_is_not_held_to_the_speech_share() {
+    fn what_people_say_is_never_trimmed_to_hit_the_target() {
         use crate::script::{Audio, Beat, ScriptClip};
         let mut db = Db::open_in_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -2877,13 +2874,15 @@ mod tests {
                 clips: vec![clip(0.0, 25.0), clip(25.0, 50.0), clip(50.0, 75.0)],
             }],
         };
-        // The draft stage tolerates an overrun (the model may still redraft); the final pass
-        // before saving is the one that has to land on the target.
-        assert!(fit_to_target(&db, &mut script, &sc()));
+        let before = script.total_duration_s();
+        // Nothing here is a picture, so there is nothing that may be trimmed: the fit leaves it.
+        fit_to_target(&db, &mut script, &sc());
         let total = script.total_duration_s();
-        // It fills the target, rather than stopping at the 70 % share of it.
-        assert!(total > 55.0, "an interview-only cut may fill the target: {total}");
-        assert!(total <= 62.0, "but not overrun it: {total}");
+        assert!((total - before).abs() < 1e-9, "speech kept whole: {before} -> {total}");
+        assert!(
+            script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
+            "every clip is the length its sentences are"
+        );
     }
 
     #[test]
