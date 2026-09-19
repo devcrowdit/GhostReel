@@ -1966,6 +1966,75 @@ fn clip_has_described_frame(db: &Db, video_id: i64, in_s: f64, out_s: f64) -> bo
 
 /// Never extend a clip further than this to finish a sentence.
 
+/// Make every clip that carries someone's voice begin and end on a whole sentence.
+///
+/// Snapping only reaches 0.75 s and the fit that runs last can trim far more than that, so a clip
+/// ended wherever the arithmetic landed: four in one run stopped between 0.27 s and 2.65 s before
+/// the speaker finished, one of them mid-word. The length is a target; a sentence is not.
+///
+/// An edge moves out to the sentence boundary when that is within `max_speech_extend_s`, and back
+/// to the previous one when it is further, so a clip is never left in the middle of a thought.
+fn end_on_sentences(db: &Db, script: &mut Script, cfg: &crate::config::ScriptConfig) -> usize {
+    let mut fixed = 0usize;
+    for c in script.beats.iter_mut().flat_map(|b| b.clips.iter_mut()) {
+        if c.audio != crate::script::Audio::Source {
+            continue;
+        }
+        let Ok(mut st) = db
+            .conn
+            .prepare_cached("SELECT start_s, end_s FROM transcript_segments WHERE video_id = ?1 ORDER BY start_s")
+        else {
+            continue;
+        };
+        let segs: Vec<(f64, f64)> = st
+            .query_map([c.video_id], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        let overlapping: Vec<usize> =
+            (0..segs.len()).filter(|&i| segs[i].1 > c.in_s + 0.05 && segs[i].0 < c.out_s - 0.05).collect();
+        let (Some(&first), Some(&last)) = (overlapping.first(), overlapping.last()) else { continue };
+        let duration = video_duration(db, c.video_id).unwrap_or(f64::MAX);
+        let (old_in, old_out) = (c.in_s, c.out_s);
+
+        // The end. Run on to the last word, or fall back to where the previous sentence stopped.
+        let sentence_end = segs[last].1;
+        if sentence_end > c.out_s + 0.05 {
+            let wanted = (sentence_end + cfg.speech_overrun_s).min(duration);
+            if wanted - c.out_s <= cfg.max_speech_extend_s {
+                c.out_s = wanted;
+            } else {
+                let back = overlapping
+                    .iter()
+                    .rev()
+                    .map(|&i| segs[i].1)
+                    .find(|&e| e <= c.out_s + 0.05 && e - c.in_s >= cfg.min_trimmed_clip_s);
+                match back {
+                    Some(end) => c.out_s = (end + cfg.speech_overrun_s).min(duration),
+                    // Nothing to fall back to: a whole sentence long is better than half of one.
+                    None => c.out_s = wanted,
+                }
+            }
+        }
+
+        // The start. Never open in the middle of a sentence.
+        let sentence_start = segs[first].0;
+        if sentence_start < c.in_s - 0.05 {
+            if c.in_s - sentence_start <= cfg.max_speech_extend_s {
+                c.in_s = (sentence_start - cfg.speech_lead_s).max(0.0);
+            } else if let Some(&next) = overlapping.iter().find(|&&i| segs[i].0 >= c.in_s) {
+                if c.out_s - segs[next].0 >= cfg.min_trimmed_clip_s {
+                    c.in_s = (segs[next].0 - cfg.speech_lead_s).max(0.0);
+                }
+            }
+        }
+
+        if (c.in_s - old_in).abs() > 0.05 || (c.out_s - old_out).abs() > 0.05 {
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
 /// Let speaking clips breathe: finish the sentence the clip is in, then hold ~1.5 s of the person
 /// before cutting (without running into their next sentence), and start slightly before the first
 /// words. Runs after [`snap_to_segments`], which lands cuts exactly on segment boundaries.
@@ -2236,7 +2305,9 @@ pub async fn run_turn(
         ChatBackend::Server { url, model, api_key } => {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(300))
+                // A local model at 40 tokens a second needs minutes for a long script, and reads the
+        // whole prompt before it starts. Waiting is cheaper than losing the turn.
+        .timeout(Duration::from_secs(ctx.script.server_timeout_s))
                 .build()
                 .map_err(|e| Error::Invalid(format!("reqwest client: {e}")))?;
 
@@ -2261,6 +2332,9 @@ pub async fn run_turn(
                 tool_rounds += 1;
                 let mut body = json!({
                     "messages": req_messages,
+                    // A tool call is short, but a model that reasons first spends the same budget
+                    // on the thought, so it gets the same ceiling.
+                    "max_tokens": ctx.script.max_answer_tokens,
                     "tools": tools_definition(),
                     "tool_choice": "auto",
                     "temperature": 0.3,
@@ -2380,6 +2454,10 @@ pub async fn run_turn(
             let mut final_body = json!({
                 "messages": req_messages,
                 "temperature": 0.3,
+                // Deliberately generous: a long script must never be cut off. The cap only stops
+                // a model that will not stop at all, so the turn fails as itself rather than as a
+                // dead socket — Bonsai-27B at 1 bit produced 11 347 tokens of one draft that way.
+                "max_tokens": ctx.script.max_answer_tokens,
                 "chat_template_kwargs": { "enable_thinking": false },
                 "response_format": {
                     "type": "json_schema",
@@ -2827,8 +2905,19 @@ pub async fn run_turn(
             if enforce_target {
                 let before = s.total_duration_s();
                 if fit_to_target(&ctx.db, &mut s, &ctx.script) {
-                    // Trimming can cut a sentence short again; re-snap, then accept the result.
+                    // Trimming can cut a sentence short again. Snapping only reaches 0.75 s, so
+                    // this puts every voice back on a whole sentence whatever the trim did — the
+                    // length gives way to the speaker, not the other way round.
                     let _ = snap_to_segments(&ctx.db, &mut s)?;
+                    let mended = end_on_sentences(&ctx.db, &mut s, &ctx.script);
+                    if mended > 0 {
+                        issues.push(Issue {
+                            severity: IssueSeverity::Info,
+                            beat_id: None,
+                            clip_index: None,
+                            message: format!("put {mended} clip(s) back on whole sentences after fitting"),
+                        });
+                    }
                     issues.push(Issue {
                         severity: IssueSeverity::Info,
                         beat_id: None,
@@ -3194,6 +3283,62 @@ mod tests {
             script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
             "every clip is the length its sentences are"
         );
+    }
+
+    /// The fit that runs last can trim a speech clip far past what snapping reaches, leaving a
+    /// speaker cut off mid-thought — four clips in one run, one of them mid-word.
+    #[test]
+    fn a_trimmed_speech_clip_is_put_back_on_a_whole_sentence() {
+        use crate::script::{Audio, Beat, ScriptClip};
+        let db = Db::open_in_memory().unwrap();
+        db.conn.execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (1, 'h', 1, 300.0)", []).unwrap();
+        // Two sentences: 10–20 s and 20–31 s.
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text) VALUES
+                 (1, 10.0, 20.0, 'the first whole sentence'), (1, 20.0, 31.0, 'the second whole sentence')",
+                [],
+            )
+            .unwrap();
+        let beat = |in_s: f64, out_s: f64| Beat {
+            id: "b1".into(),
+            purpose: "p".into(),
+            narration: None,
+            on_screen_text: None,
+            notes: None,
+            clips: vec![ScriptClip { video_id: 1, in_s, out_s, audio: Audio::Source, why: None }],
+            bed: None,
+        };
+        let script_of = |b: Beat| Script {
+            title: "t".into(),
+            target_duration_s: None,
+            fps: Default::default(),
+            width: None,
+            height: None,
+            beats: vec![b],
+        };
+
+        // Cut 2.6 s early: within reach, so it runs on to the end of the sentence.
+        let mut s = script_of(beat(10.0, 28.4));
+        assert_eq!(end_on_sentences(&db, &mut s, &sc()), 1);
+        assert!((s.beats[0].clips[0].out_s - 31.35).abs() < 0.01, "{}", s.beats[0].clips[0].out_s);
+
+        // Cut so early that finishing would add more than max_speech_extend_s: fall back to where
+        // the previous sentence ended rather than stop in the middle of this one.
+        let mut cfg = sc();
+        cfg.max_speech_extend_s = 2.0;
+        let mut s = script_of(beat(10.0, 22.0));
+        assert_eq!(end_on_sentences(&db, &mut s, &cfg), 1);
+        assert!((s.beats[0].clips[0].out_s - 20.35).abs() < 0.01, "{}", s.beats[0].clips[0].out_s);
+
+        // A clip already on a boundary is left alone.
+        let mut s = script_of(beat(10.0, 31.0));
+        assert_eq!(end_on_sentences(&db, &mut s, &sc()), 0);
+
+        // And b-roll is not speech: nothing to keep whole.
+        let mut s = script_of(beat(10.0, 28.4));
+        s.beats[0].clips[0].audio = Audio::Mute;
+        assert_eq!(end_on_sentences(&db, &mut s, &sc()), 0);
     }
 
     /// The editor reads the tapes before it cuts. Everything spoken goes in the prompt, marked

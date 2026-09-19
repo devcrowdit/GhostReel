@@ -228,6 +228,13 @@ pub struct ScriptConfig {
     /// whoever it found there; an editor reads the interviews first. Off for a brain with a small
     /// context that needs the room for tool results.
     pub speech_in_prompt: bool,
+    /// Ceiling on a single model answer, in tokens. Generous: a long script with forty clips is
+    /// thousands of tokens and must never be cut off. It exists only so a model that will not
+    /// stop fails as itself instead of as a dead socket.
+    pub max_answer_tokens: u32,
+    /// How long to wait for a server brain to answer one request (s). A local model producing a
+    /// long script at 40 tokens a second needs minutes, and the prompt has to be read first.
+    pub server_timeout_s: u64,
     /// How far a laid bed may run past the clip it came from (s). Long enough for a cutaway or
     /// two, short enough that a beat does not swallow a whole answer nobody asked for.
     pub max_bed_extend_s: f64,
@@ -287,6 +294,8 @@ impl Default for ScriptConfig {
             speech_lead_s: 0.5,
             infer_audio_beds: true,
             speech_in_prompt: true,
+            max_answer_tokens: 16384,
+            server_timeout_s: 1800,
             max_bed_extend_s: 20.0,
             max_speech_extend_s: 12.0,
             local_tool_rounds: 10,
@@ -550,6 +559,8 @@ impl Config {
                 "speech_lead_s" => f.speech_lead_s = num(key, value)?,
                 "infer_audio_beds" => f.infer_audio_beds = flag(value),
                 "speech_in_prompt" => f.speech_in_prompt = flag(value),
+                "max_answer_tokens" => f.max_answer_tokens = num(key, value)?,
+                "server_timeout_s" => f.server_timeout_s = num(key, value)?,
                 "max_bed_extend_s" => f.max_bed_extend_s = num(key, value)?,
                 "max_speech_extend_s" => f.max_speech_extend_s = num(key, value)?,
                 "local_tool_rounds" => f.local_tool_rounds = num(key, value)?,
