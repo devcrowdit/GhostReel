@@ -8,12 +8,14 @@ import {
   saveScript,
   search,
   videoFrames,
+  videoTranscript,
   type Beat,
   type FrameRow,
   type Hit,
   type Issue,
   type Script,
   type ScriptClip,
+  type TranscriptSegment,
   type VideoRow,
 } from "./api";
 import PreviewPlayer from "./PreviewPlayer";
@@ -49,6 +51,16 @@ export default function ScriptEditor({
 
   // Which block of the timeline is selected, so the lane and the beat below agree.
   const [selectedBlock, setSelectedBlock] = useState<string | null>(null);
+  // The preview player's position, and its controls, so a key over the timeline reaches it.
+  const [playhead, setPlayhead] = useState(0);
+  const playerRef = useRef<{ seek: (s: number) => void; toggle: () => void } | null>(null);
+  // Sentences per video, fetched once, for snapping an edge to where someone stops talking.
+  const transcriptCache = useRef<Record<number, TranscriptSegment[]>>({});
+  // Stable, and declared with the other hooks: the JSX below sits after two early returns, so a
+  // hook called down there would change the hook order while the script is still loading.
+  const handleControls = useCallback((c: { seek: (s: number) => void; toggle: () => void }) => {
+    playerRef.current = c;
+  }, []);
 
   // Inline replace search state
   const [replacingKey, setReplacingKey] = useState<string | null>(null); // e.g. "bIdx-cIdx"
@@ -293,6 +305,8 @@ export default function ScriptEditor({
         scriptTitle={script.title}
         isDirty={isDirty}
         onSaveBeforeAction={handleSave}
+        onTime={setPlayhead}
+        onControls={handleControls}
       />
 
       <div className="card script-editor">
@@ -380,6 +394,74 @@ export default function ScriptEditor({
             setSelectedBlock(key);
             const id = script.beats[bIdx]?.id;
             if (id) document.getElementById(`beat-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }}
+          playhead={playhead}
+          onSeek={(t) => {
+            setPlayhead(t);
+            playerRef.current?.seek(t);
+          }}
+          onTogglePlay={() => playerRef.current?.toggle()}
+          onSetEdge={(bIdx, cIdx, edge, sourceSeconds) => {
+            const beats = [...script.beats];
+            const beat = { ...beats[bIdx] };
+            if (cIdx == null) {
+              if (!beat.bed) return;
+              const bed = { ...beat.bed };
+              if (edge === "in") bed.in_s = Math.min(Math.max(0, sourceSeconds), bed.out_s - 0.2);
+              else bed.out_s = Math.max(bed.in_s + 0.2, sourceSeconds);
+              beat.bed = bed;
+            } else {
+              const clips = [...beat.clips];
+              const c = { ...clips[cIdx] };
+              if (edge === "in") c.in_s = Math.min(Math.max(0, sourceSeconds), c.out_s - 0.2);
+              else c.out_s = Math.max(c.in_s + 0.2, sourceSeconds);
+              clips[cIdx] = c;
+              beat.clips = clips;
+            }
+            beats[bIdx] = beat;
+            setScript({ ...script, beats });
+          }}
+          onSnap={async (bIdx, cIdx) => {
+            const beat = script.beats[bIdx];
+            const videoId = cIdx == null ? beat.bed?.video_id : beat.clips[cIdx]?.video_id;
+            if (videoId == null) return;
+            let segs = transcriptCache.current[videoId];
+            if (!segs) {
+              segs = await videoTranscript(videoId).catch(() => [] as TranscriptSegment[]);
+              transcriptCache.current[videoId] = segs;
+            }
+            if (segs.length === 0) return;
+            // Pull each edge onto the nearest sentence boundary, but only if one is close: a clip
+            // deliberately cut mid-thought should not jump half a sentence.
+            const near = (t: number, candidates: number[]) => {
+              let best = t;
+              let dist = 1.5;
+              for (const c of candidates) {
+                if (Math.abs(c - t) < dist) {
+                  dist = Math.abs(c - t);
+                  best = c;
+                }
+              }
+              return best;
+            };
+            const starts = segs.map((x) => x.start);
+            const ends = segs.map((x) => x.end);
+            const beats = [...script.beats];
+            const b = { ...beats[bIdx] };
+            if (cIdx == null) {
+              if (!b.bed) return;
+              b.bed = { ...b.bed, in_s: near(b.bed.in_s, starts), out_s: near(b.bed.out_s, ends) };
+            } else {
+              const clips = [...b.clips];
+              const c = { ...clips[cIdx] };
+              c.in_s = near(c.in_s, starts);
+              c.out_s = near(c.out_s, ends);
+              if (c.out_s - c.in_s < 0.2) return;
+              clips[cIdx] = c;
+              b.clips = clips;
+            }
+            beats[bIdx] = b;
+            setScript({ ...script, beats });
           }}
           onTrim={(bIdx, cIdx, edge, delta) => {
             const beats = [...script.beats];

@@ -16,6 +16,10 @@ interface PreviewPlayerProps {
   scriptTitle: string;
   isDirty?: boolean;
   onSaveBeforeAction?: () => Promise<number | null>;
+  /** Where playback is, so the timeline lanes can draw a playhead and edit against it. */
+  onTime?: (seconds: number) => void;
+  /** Hands the parent the controls, so a key pressed over the timeline reaches this player. */
+  onControls?: (controls: { seek: (s: number) => void; toggle: () => void }) => void;
 }
 
 export default function PreviewPlayer({
@@ -23,6 +27,8 @@ export default function PreviewPlayer({
   scriptTitle,
   isDirty = false,
   onSaveBeforeAction,
+  onTime,
+  onControls,
 }: PreviewPlayerProps) {
   const [burnTitles, setBurnTitles] = useState(false);
   const [burnNarration, setBurnNarration] = useState(false);
@@ -158,6 +164,25 @@ export default function PreviewPlayer({
     }
   };
 
+  // The timeline seeks without starting playback: you are placing an edge, not watching.
+  useEffect(() => {
+    onControls?.({
+      seek: (s: number) => {
+        const v = videoRef.current;
+        if (!v) return;
+        v.currentTime = Math.max(0, s);
+        setCurrentTime(v.currentTime);
+        onTime?.(v.currentTime);
+      },
+      toggle: () => {
+        const v = videoRef.current;
+        if (!v) return;
+        if (v.paused) v.play().catch(() => {});
+        else v.pause();
+      },
+    });
+  }, [onControls, onTime, previewVideoSrc]);
+
   return (
     <div className="card preview-player">
       <div className="card-head">
@@ -248,7 +273,10 @@ export default function PreviewPlayer({
             ref={videoRef}
             src={previewVideoSrc}
             controls
-            onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+            onTimeUpdate={(e) => {
+              setCurrentTime(e.currentTarget.currentTime);
+              onTime?.(e.currentTarget.currentTime);
+            }}
           />
         </div>
       )}

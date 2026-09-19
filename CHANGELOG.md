@@ -27,8 +27,14 @@ always redrafting.
   Exports carry it as a real J-cut: A1 holds one audio clip spanning several video clips, which is
   what an editor would cut by hand in Premiere.
 - **The script editor shows the cut on three lanes** — titles, picture and sound — the way an NLE
-  does, because a bed is invisible in a list of beats. Drag a block's edge to trim it; a striped
-  bar is a voice the pipeline carried under the pictures.
+  does, because a bed is invisible in a list of beats. A striped bar is a voice the pipeline
+  carried under the pictures.
+
+  It is edited by keyboard as much as by mouse, because the decisions here are fractions of a
+  second and a drag cannot hit them: the preview player's playhead is drawn across the lanes,
+  clicking seeks, `←`/`→` trim the out point (`shift` the in point) by a second, `alt` by 0.2 s and
+  `ctrl` by 5 s, `i`/`o` put an edge exactly where you are listening, `s` pulls both edges onto the
+  nearest sentence, and `z` zooms to the selected beat. The keys are listed under the lanes.
 - **The editor can reply.** A third action carries text and drafts nothing, so a question, an
   ambiguous brief or a message that is not about the video gets an answer instead of a script. A
   note pasted into the chat by mistake used to come back as a 120 s single-beat draft. A reply
