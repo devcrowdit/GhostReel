@@ -255,7 +255,7 @@ export type TaskState = "queued" | "running" | "done" | "failed" | "cancelled";
 export type TaskKind =
   | { type: "index"; project_id: number }
   | { type: "chat"; project_id: number; session_id: number }
-  | { type: "render_preview"; script_id: number; burn_titles: boolean; burn_narration: boolean }
+  | { type: "render_preview"; script_id: number; burn_titles: boolean; burn_narration: boolean; normalize_audio: boolean }
   | { type: "export"; script_id: number; format: string; path: string }
   | { type: "download_model"; model_id: string };
 
@@ -286,8 +286,13 @@ export interface PlannedSegment {
 
 export const enqueueIndex = (projectId: number) => invoke<number>("enqueue_index", { projectId });
 /** `out`: save the rendered MP4 there (demo export) instead of the previews folder. */
-export const enqueuePreview = (scriptId: number, burnTitles: boolean, burnNarration: boolean, out?: string) =>
-  invoke<number>("enqueue_preview", { scriptId, burnTitles, burnNarration, out: out ?? null });
+export const enqueuePreview = (
+  scriptId: number,
+  burnTitles: boolean,
+  burnNarration: boolean,
+  normalizeAudio: boolean,
+  out?: string,
+) => invoke<number>("enqueue_preview", { scriptId, burnTitles, burnNarration, normalizeAudio, out: out ?? null });
 export const enqueueExport = (scriptId: number, format: string, path: string) =>
   invoke<number>("enqueue_export", { scriptId, format, path });
 export const previewPlan = (scriptId: number) => invoke<PlannedSegment[]>("preview_plan", { scriptId });

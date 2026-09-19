@@ -268,6 +268,40 @@ fn enforce_grounding_and_pacing(
         }
         beat.clips = kept;
     }
+    // A clip playing its own audio must start on someone close to the microphone: left alone it
+    // opens on the interviewer's question or the slate, which is what "the sound is awful" meant.
+    let mut retimed = 0usize;
+    for beat in &mut s.beats {
+        for c in &mut beat.clips {
+            if c.audio != crate::script::Audio::Source || db.has_on_mic_speech(c.video_id, c.in_s, c.out_s) {
+                continue;
+            }
+            // Nothing on-mic in range: move to the first on-mic segment after it, keeping length.
+            let next: Option<f64> = db
+                .conn
+                .query_row(
+                    "SELECT start_s FROM transcript_segments WHERE video_id = ?1 AND start_s >= ?2 \
+                     AND COALESCE(off_mic, 0) = 0 ORDER BY start_s LIMIT 1",
+                    params![c.video_id, c.in_s],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(start) = next {
+                let len = c.out_s - c.in_s;
+                c.in_s = start;
+                c.out_s = start + len;
+                retimed += 1;
+            }
+        }
+    }
+    if retimed > 0 {
+        issues.push(Issue {
+            severity: IssueSeverity::Info,
+            beat_id: None,
+            clip_index: None,
+            message: format!("moved {retimed} clip(s) off the interviewer's questions to where someone answers"),
+        });
+    }
     // A clip with no transcript in its range cannot carry source audio, whatever the model said.
     // Left alone, a scenery shot marked "source" reads as "someone speaks here", which is exactly
     // the case the editing rules tell the model to leave narration empty for — so a whole script
@@ -877,7 +911,7 @@ pub fn dispatch_tool_limited(
             grounding.add(video_id, start_s, end_s);
 
             let mut st = match db.conn.prepare(
-                "SELECT start_s, end_s, text FROM transcript_segments
+                "SELECT start_s, end_s, text, COALESCE(off_mic, 0) FROM transcript_segments
                  WHERE video_id = ?1 AND end_s >= ?2 AND start_s <= ?3
                  ORDER BY start_s",
             ) {
@@ -889,6 +923,9 @@ pub fn dispatch_tool_limited(
             struct CompactSeg {
                 start_s: f64,
                 end_s: f64,
+                /// Spoken away from the microphone — in an interview, the person asking the
+                /// questions rather than the one answering.
+                off_mic: bool,
                 text: String,
             }
 
@@ -896,6 +933,7 @@ pub fn dispatch_tool_limited(
                 Ok(CompactSeg {
                     start_s: (r.get::<_, f64>(0)? * 100.0).round() / 100.0,
                     end_s: (r.get::<_, f64>(1)? * 100.0).round() / 100.0,
+                    off_mic: r.get::<_, bool>(3)?,
                     text: r.get(2)?,
                 })
             }) {
@@ -1560,6 +1598,7 @@ HOW TO EDIT
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
 5a. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
 6a. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
+6c. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
 6b. How much of the piece is people talking is your decision, and it follows what the user asked for: a teaser built on what people say can be almost all interview, a scenic one almost none. Cutting to a picture of what is being described is usually better than staying on a face for a long time - but do it because it helps the story, not to hit a quota.
 6. Narration (voice-over) must cover the beat: about 2.5 spoken words per second of the beat's clips (a 20 s beat needs ~50 words). Set narration to \"\" for beats where people speak on camera (never copy their words into the narration). Every beat has its own narration; never repeat text from another beat, and never reuse the same footage twice. Write natural, specific sentences about what is on screen and why it matters; no filler. on_screen_text is short (a title or a name).
 7. Length: the clips add up to the length the user asked for; set target_duration_s to it. Give it a little more than asked - about 10% - and pick one more moment than you think you need: a cut that comes in long is trimmed to fit, but a cut that comes in short can only be fixed by holding shots after the voice-over has stopped, which looks like a mistake. If the user gave no length, choose what the material supports (usually 60-180 s).

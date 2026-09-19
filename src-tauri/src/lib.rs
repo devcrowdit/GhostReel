@@ -292,6 +292,7 @@ async fn enqueue_preview(
     script_id: i64,
     burn_titles: bool,
     burn_narration: bool,
+    normalize_audio: bool,
     out: Option<String>,
 ) -> CmdResult<u64> {
     let db = open_db()?;
@@ -300,7 +301,13 @@ async fn enqueue_preview(
         Some(_) => format!("Export MP4 “{}” v{}", stored.title, stored.version),
         None => format!("Preview “{}” v{}", stored.title, stored.version),
     };
-    Ok(queue.enqueue(&app, queue::TaskKind::RenderPreview { script_id, burn_titles, burn_narration, out }, label).await)
+    Ok(queue
+        .enqueue(
+            &app,
+            queue::TaskKind::RenderPreview { script_id, burn_titles, burn_narration, normalize_audio, out },
+            label,
+        )
+        .await)
 }
 
 #[tauri::command]

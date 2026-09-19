@@ -19,6 +19,8 @@ pub struct ResolvedMedia {
     pub has_audio: bool,
     pub fps: Fps,
     pub content_hash: String,
+    /// The track carrying the speech, measured at index time; 0 when nothing was measured.
+    pub audio_track: u32,
 }
 
 /// Convert a local file path to a file:// URL with proper percent-encoding.
@@ -457,7 +459,15 @@ pub fn resolve_media_for_script(
 
             resolved_map.insert(
                 clip.video_id,
-                ResolvedMedia { video_id: clip.video_id, path, duration_s, has_audio, fps, content_hash },
+                ResolvedMedia {
+                    video_id: clip.video_id,
+                    path,
+                    duration_s,
+                    has_audio,
+                    fps,
+                    content_hash,
+                    audio_track: db.audio_track(clip.video_id).unwrap_or(0),
+                },
             );
         }
     }
@@ -511,6 +521,7 @@ mod tests {
                 has_audio: true,
                 fps: Fps::new(25, 1),
                 content_hash: "hash1".into(),
+                audio_track: 0,
             },
         );
         media.insert(
@@ -522,6 +533,7 @@ mod tests {
                 has_audio: false,
                 fps: Fps::new(30000, 1001),
                 content_hash: "hash2".into(),
+                audio_track: 0,
             },
         );
 

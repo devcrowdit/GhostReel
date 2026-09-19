@@ -24,6 +24,10 @@ pub struct PlannedSegment {
     pub beat_id: String,
     pub mute: bool,
     pub has_audio: bool,
+    /// Which of the file's audio tracks carries the speech. A field recording has several — a
+    /// camera mic, lavs, tracks left silent — and the first is a guess.
+    #[serde(default)]
+    pub audio_track: u32,
 }
 
 /// A beat's span on the preview timeline for on-screen titles and narration captions.
@@ -77,6 +81,9 @@ impl std::fmt::Display for Encoder {
 pub struct PreviewOptions {
     pub burn_titles: bool,
     pub burn_narration: bool,
+    /// Bring every clip to the same loudness. Cutting between a lav at -20 dB and a room mic at
+    /// -33 dB is jarring however good each one is on its own.
+    pub normalize_audio: bool,
     pub out: Option<PathBuf>,
     pub cancel: Option<Arc<AtomicBool>>,
 }
@@ -152,6 +159,7 @@ pub fn plan_segments(script: &Script, media: &HashMap<i64, ResolvedMedia>) -> Re
                 beat_id: beat.id.clone(),
                 mute: clip.audio == Audio::Mute,
                 has_audio: res.has_audio,
+                audio_track: res.audio_track,
             });
 
             timeline_start_s += dur;
@@ -366,8 +374,11 @@ pub fn render_preview(
             let mut cmd = crate::proc::std_command(ffmpeg);
             cmd.arg("-y").arg("-ss").arg(&in_str).arg("-t").arg(&dur_str).arg("-i").arg(&seg.path);
 
+            // Levelling happens per clip, before they are joined: loudnorm needs a whole clip
+            // to measure, and the point is that clips match each other.
+            let af = if opts.normalize_audio { "loudnorm=I=-16:TP=-1.5:LRA=11,apad" } else { "apad" };
             if !seg.mute && seg.has_audio {
-                cmd.args(["-map", "0:v:0", "-map", "0:a:0", "-af", "apad"]);
+                cmd.args(["-map", "0:v:0", "-map", &format!("0:a:{}", seg.audio_track), "-af", af]);
             } else {
                 let null_audio = "anullsrc=r=48000:cl=stereo";
                 cmd.args(["-f", "lavfi", "-t", &dur_str, "-i", null_audio]);
@@ -604,6 +615,7 @@ mod tests {
                 has_audio: true,
                 fps: Fps::new(25, 1),
                 content_hash: "hash1".into(),
+                audio_track: 0,
             },
         );
         media.insert(
@@ -615,6 +627,7 @@ mod tests {
                 has_audio: false,
                 fps: Fps::new(25, 1),
                 content_hash: "hash2".into(),
+                audio_track: 0,
             },
         );
 
@@ -895,7 +908,13 @@ mod tests {
             temp.path(),
             &ffmpeg,
             script_id,
-            &PreviewOptions { burn_titles: true, burn_narration: true, out: Some(burned_out.clone()), cancel: None },
+            &PreviewOptions {
+                burn_titles: true,
+                burn_narration: true,
+                normalize_audio: false,
+                out: Some(burned_out.clone()),
+                cancel: None,
+            },
             |_, _| {},
         )
         .unwrap();

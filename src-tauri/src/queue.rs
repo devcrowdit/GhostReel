@@ -34,6 +34,7 @@ pub enum TaskKind {
         script_id: i64,
         burn_titles: bool,
         burn_narration: bool,
+        normalize_audio: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         out: Option<String>,
     },
@@ -243,8 +244,9 @@ pub async fn worker(app: AppHandle) {
             TaskKind::Index { project_id } => {
                 run_index(&app, id, project_id, cancel.clone()).await.map(TaskOutcome::Index)
             }
-            TaskKind::RenderPreview { script_id, burn_titles, burn_narration, out } => {
-                run_preview(&app, id, script_id, burn_titles, burn_narration, out, cancel.clone()).await
+            TaskKind::RenderPreview { script_id, burn_titles, burn_narration, normalize_audio, out } => {
+                run_preview(&app, id, script_id, burn_titles, burn_narration, normalize_audio, out, cancel.clone())
+                    .await
             }
             TaskKind::Export { script_id, format, path } => {
                 run_export(&app, id, script_id, &format, &path).await.map(|p| TaskOutcome::Export { path: p })
@@ -399,6 +401,7 @@ async fn run_preview(
     script_id: i64,
     burn_titles: bool,
     burn_narration: bool,
+    normalize_audio: bool,
     out: Option<String>,
     cancel: Arc<AtomicBool>,
 ) -> Result<TaskOutcome, String> {
@@ -408,6 +411,7 @@ async fn run_preview(
     let opts = ghostreel_core::preview::PreviewOptions {
         burn_titles,
         burn_narration,
+        normalize_audio,
         out: out.map(std::path::PathBuf::from),
         cancel: Some(cancel),
     };

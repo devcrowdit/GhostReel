@@ -270,6 +270,7 @@ fn tools() -> Vec<Value> {
                 "script_id": { "type": "integer" },
                 "burn_titles": { "type": "boolean", "description": "default false" },
                 "burn_narration": { "type": "boolean", "description": "default false: narration as burnt-in subtitles" },
+                "normalize_audio": { "type": "boolean", "description": "default false: bring every clip to the same loudness" },
                 "out": { "type": "string", "description": "Output file path; default is the data dir's preview folder" },
             }), &["script_id"]),
         }),
@@ -527,6 +528,7 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
             let opts = ghostreel_core::preview::PreviewOptions {
                 burn_titles: args.get("burn_titles").and_then(|v| v.as_bool()).unwrap_or(false),
                 burn_narration: args.get("burn_narration").and_then(|v| v.as_bool()).unwrap_or(false),
+                normalize_audio: args.get("normalize_audio").and_then(|v| v.as_bool()).unwrap_or(false),
                 out: args.get("out").and_then(|v| v.as_str()).map(PathBuf::from),
                 cancel: None,
             };

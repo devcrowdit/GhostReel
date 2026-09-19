@@ -247,6 +247,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE motion_windows ADD COLUMN sway REAL NOT NULL DEFAULT 0;
     "#,
+    // v8 — which audio track carries the usable speech (a field recording has several, some of
+    // them silent), and which transcript segments are someone away from the microphone: in an
+    // interview the subject is on a lav and the interviewer is across the room, 12 dB down.
+    r#"
+    ALTER TABLE videos ADD COLUMN audio_track INTEGER;
+    ALTER TABLE transcript_segments ADD COLUMN off_mic INTEGER;
+    "#,
 ];
 
 static REGISTER_VEC: Once = Once::new();
@@ -325,6 +332,43 @@ impl Db {
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Record which audio track of a video carries the speech.
+    pub fn set_audio_track(&self, video_id: i64, track: Option<u32>) -> Result<(), Error> {
+        self.conn.execute("UPDATE videos SET audio_track = ?2 WHERE id = ?1", rusqlite::params![video_id, track])?;
+        Ok(())
+    }
+
+    /// The audio track to use for a video, when one was measured.
+    pub fn audio_track(&self, video_id: i64) -> Option<u32> {
+        self.conn
+            .query_row("SELECT audio_track FROM videos WHERE id = ?1", [video_id], |r| r.get::<_, Option<u32>>(0))
+            .ok()
+            .flatten()
+    }
+
+    /// Mark which transcript segments are someone off the microphone, by segment start.
+    pub fn set_off_mic(&self, video_id: i64, flags: &[(f64, Option<bool>)]) -> Result<(), Error> {
+        let mut st =
+            self.conn.prepare("UPDATE transcript_segments SET off_mic = ?3 WHERE video_id = ?1 AND start_s = ?2")?;
+        for (start_s, flag) in flags {
+            st.execute(rusqlite::params![video_id, start_s, flag])?;
+        }
+        Ok(())
+    }
+
+    /// Whether anyone speaks close to the microphone in a range — the test for footage that can
+    /// carry a beat on its own audio.
+    pub fn has_on_mic_speech(&self, video_id: i64, in_s: f64, out_s: f64) -> bool {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND start_s < ?3 \
+                 AND COALESCE(off_mic, 0) = 0)",
+                rusqlite::params![video_id, in_s, out_s],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
     }
 
     fn migrate(&mut self) -> Result<(), Error> {

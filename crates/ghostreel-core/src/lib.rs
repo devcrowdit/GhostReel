@@ -3,6 +3,7 @@
 //! See `.agents/plan.md` for the architecture. M0 provides configuration, paths, the index
 //! database, AI server probing and the doctor report.
 
+pub mod audio;
 pub mod chat;
 pub mod chunks;
 pub mod cliagent;

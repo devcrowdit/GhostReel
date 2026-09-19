@@ -783,6 +783,22 @@ async fn run_transcribe_jobs(
         match result {
             Ok(t) => {
                 store_transcript(db, video_id, &t)?;
+                // Which track carries the speech, and who is close to the microphone. Measured
+                // here because the transcript gives the stretches worth measuring; a failure is
+                // not worth failing the stage for, it only leaves the editor less informed.
+                if let Ok(tracks) = crate::audio::track_count(&rt.ffprobe, &path).await
+                    && tracks > 0
+                {
+                    let track = crate::audio::pick_track(&rt.ffmpeg, &path, tracks, duration).await;
+                    let _ = db.set_audio_track(video_id, track);
+                    if let Some(track) = track {
+                        let spans: Vec<(f64, f64)> = t.segments.iter().map(|s| (s.start, s.end)).collect();
+                        let levels = crate::audio::segment_levels(&rt.ffmpeg, &path, track, &spans).await;
+                        let flags = crate::audio::off_mic_flags(&levels, crate::audio::OFF_MIC_MARGIN_DB);
+                        let rows: Vec<(f64, Option<bool>)> = spans.iter().map(|(a, _)| *a).zip(flags).collect();
+                        let _ = db.set_off_mic(video_id, &rows);
+                    }
+                }
                 on_event(Event::JobDone { video_id, stage: STAGE.into() });
                 done += 1;
             }

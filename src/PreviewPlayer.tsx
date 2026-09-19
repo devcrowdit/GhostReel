@@ -26,6 +26,7 @@ export default function PreviewPlayer({
 }: PreviewPlayerProps) {
   const [burnTitles, setBurnTitles] = useState(false);
   const [burnNarration, setBurnNarration] = useState(false);
+  const [normalizeAudio, setNormalizeAudio] = useState(false);
   const [previewTaskId, setPreviewTaskId] = useState<number | null>(null);
   const [exportTaskId, setExportTaskId] = useState<number | null>(null);
   const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
@@ -85,7 +86,7 @@ export default function PreviewPlayer({
     }
 
     try {
-      const taskId = await enqueuePreview(targetScriptId, burnTitles, burnNarration);
+      const taskId = await enqueuePreview(targetScriptId, burnTitles, burnNarration, normalizeAudio);
       setPreviewTaskId(taskId);
       previewPlan(targetScriptId).then(setPlan).catch(() => {});
     } catch (err) {
@@ -109,7 +110,7 @@ export default function PreviewPlayer({
         filters: [{ name: "MP4 video", extensions: ["mp4"] }],
       });
       if (typeof path === "string") {
-        const taskId = await enqueuePreview(targetScriptId, burnTitles, burnNarration, path);
+        const taskId = await enqueuePreview(targetScriptId, burnTitles, burnNarration, normalizeAudio, path);
         setExportTaskId(taskId);
       }
     } catch (err) {
@@ -205,6 +206,17 @@ export default function PreviewPlayer({
             onChange={(e) => setBurnNarration(e.target.checked)}
           />
           Burn narration
+        </label>
+        <label
+          className="checkbox-label small"
+          title="Bring every clip to the same loudness — a lav and a room mic are far apart"
+        >
+          <input
+            type="checkbox"
+            checked={normalizeAudio}
+            onChange={(e) => setNormalizeAudio(e.target.checked)}
+          />
+          Even out audio
         </label>
         <button
           type="button"

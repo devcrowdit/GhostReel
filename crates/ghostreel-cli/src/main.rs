@@ -196,6 +196,9 @@ enum ScriptAction {
         burn_titles: bool,
         #[arg(long)]
         burn_narration: bool,
+        /// Bring every clip to the same loudness.
+        #[arg(long)]
+        normalize_audio: bool,
     },
     /// Chat with the editing agent to draft or refine a script.
     Chat {
@@ -805,9 +808,15 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
                 }
             }
         }
-        ScriptAction::Preview { id, out, burn_titles, burn_narration } => {
+        ScriptAction::Preview { id, out, burn_titles, burn_narration, normalize_audio } => {
             let ffmpeg = doctor::locate("ffmpeg").context("ffmpeg not found")?;
-            let opts = ghostreel_core::preview::PreviewOptions { burn_titles, burn_narration, out, cancel: None };
+            let opts = ghostreel_core::preview::PreviewOptions {
+                burn_titles,
+                burn_narration,
+                normalize_audio,
+                out,
+                cancel: None,
+            };
             let t0 = std::time::Instant::now();
             let is_tty = std::io::stderr().is_terminal();
             let res = ghostreel_core::preview::render_preview(&db, &paths.data_dir, &ffmpeg, id, &opts, |pct, msg| {
