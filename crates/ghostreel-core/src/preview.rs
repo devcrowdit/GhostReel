@@ -409,9 +409,29 @@ pub fn render_preview(
             // to measure, and the point is that clips match each other.
             // Fade each clip in and out: segments are joined end to end, and a cut taken in the
             // middle of a breath stops dead without one.
+            //
+            // The fade out starts where the speaking stops, not where the clip does. A clip runs
+            // a little past the last word so its decay survives, and in continuous speech that
+            // overrun reaches into the next sentence — audible as a stray "And" after the point
+            // has been made. Fading from the sentence end keeps the decay and loses the word.
             let fade = opts.audio_fade_s.max(0.0).min(seg_dur / 3.0);
+            let speech_end_rel: Option<f64> = db
+                .conn
+                .query_row(
+                    "SELECT MAX(end_s) FROM transcript_segments WHERE video_id = ?1 AND end_s > ?2 AND end_s <= ?3",
+                    rusqlite::params![seg.video_id, seg.in_s, seg.out_s + 0.01],
+                    |r| r.get::<_, Option<f64>>(0),
+                )
+                .ok()
+                .flatten()
+                .map(|e| (e - seg.in_s).max(0.0));
+            let fade_out_at = match speech_end_rel {
+                // Start at the last word's end, but never so early that the fade outlasts the clip.
+                Some(end) if end < seg_dur => end.min((seg_dur - fade).max(0.0)),
+                _ => (seg_dur - fade).max(0.0),
+            };
             let fades = if fade > 0.005 {
-                format!("afade=t=in:st=0:d={fade:.3},afade=t=out:st={:.3}:d={fade:.3},", (seg_dur - fade).max(0.0))
+                format!("afade=t=in:st=0:d={fade:.3},afade=t=out:st={fade_out_at:.3}:d={fade:.3},")
             } else {
                 String::new()
             };
