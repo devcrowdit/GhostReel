@@ -687,6 +687,95 @@ pub fn local_final_action_schema() -> Value {
     })
 }
 
+/// Everything anyone says in the project, with timestamps, laid out for the editor to read
+/// before it cuts anything.
+///
+/// A model that has to *ask* for each transcript only reads the tapes it already suspects: one run
+/// looked at two videos, found a good speaker and built the whole teaser out of him, while three
+/// other people said better things on tapes it never opened. An editor does not work that way —
+/// they read the interviews first, decide what the story is, and then go looking for pictures.
+///
+/// It is affordable: every word of a 96-video project is about 34 000 characters. When that will
+/// not fit, the videos with the most speech go in first and the rest are named with a pointer to
+/// `get_transcript`, so nothing is hidden, only deferred.
+pub fn speech_digest(db: &Db, project_id: i64, max_chars: usize) -> String {
+    let Ok(mut st) = db.conn.prepare(
+        "SELECT ts.video_id, MIN(vf.path), SUM(LENGTH(ts.text))
+           FROM transcript_segments ts
+           JOIN video_files vf ON vf.video_id = ts.video_id
+           JOIN folders f ON f.id = vf.folder_id
+           JOIN project_folders pf ON pf.folder_id = f.id
+          WHERE pf.project_id = ?1
+            AND NOT EXISTS (SELECT 1 FROM project_exclusions x
+                             WHERE x.project_id = pf.project_id AND x.video_id = ts.video_id)
+          GROUP BY ts.video_id
+          ORDER BY SUM(LENGTH(ts.text)) DESC",
+    ) else {
+        return String::new();
+    };
+    let videos: Vec<(i64, String, i64)> = st
+        .query_map([project_id], |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?)))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    if videos.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "\nWHAT PEOPLE SAY\nEvery word spoken in this project, with the timestamps to cut on. Read it first and \
+         decide whose words carry the story; then use search_moments and get_video to find pictures for what they \
+         describe. A line marked [off-mic] is the interviewer or someone away from the microphone: never open a clip \
+         or build a beat on one.\n",
+    );
+    let mut left_out = Vec::new();
+
+    for (video_id, path, _) in &videos {
+        let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut block = format!("\n#{video_id} {name}\n");
+        if let Ok(mut q) = db.conn.prepare(
+            "SELECT start_s, end_s, text, COALESCE(off_mic, 0) FROM transcript_segments
+              WHERE video_id = ?1 ORDER BY start_s",
+        ) {
+            let rows = q.query_map([video_id], |r| {
+                Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? != 0))
+            });
+            for (start, end, text, off) in rows.into_iter().flatten().flatten() {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                block.push_str(&format!(
+                    "  {start:.2}-{end:.2}{} {text}\n",
+                    if off { " [off-mic]" } else { "" }
+                ));
+            }
+        }
+        if out.len() + block.len() <= max_chars {
+            out.push_str(&block);
+            continue;
+        }
+        // Out of room. Keep as much of this tape as fits rather than dropping it: the list is in
+        // order of how much is said, so the one being cut is the one most worth reading.
+        let room = max_chars.saturating_sub(out.len());
+        match block[..block.len().min(room)].rfind('\n') {
+            Some(cut) if cut > 120 => {
+                out.push_str(&block[..=cut]);
+                out.push_str("  … the rest of this one with get_transcript\n");
+            }
+            _ => left_out.push(format!("#{video_id}")),
+        }
+    }
+
+    if !left_out.is_empty() {
+        out.push_str(&format!(
+            "\nAlso speech in {} more: {} — read them with get_transcript.\n",
+            left_out.len(),
+            left_out.join(", ")
+        ));
+    }
+    out
+}
+
 /// The project's reference edits (finished videos made by a person) as a study guide for the model:
 /// length, keyframe timeline and transcript. Empty when there are none.
 pub fn reference_edits_text(db: &Db, project_id: i64, max_chars: usize) -> String {
@@ -1568,7 +1657,7 @@ HOW TO EDIT
    - prefer fewer, longer clips over many quick cuts; never jump between unrelated shots every 2 s.
 5. Audio: use \"source\" when a person is speaking in the clip; use \"mute\" for scenery and b-roll so wind and handling noise don't play under the voice-over.
 6. Every search hit and video says what the camera is doing: static, tripod, stabilised or handheld, and a hit marked shaky sits on a stretch the camera shakes through - do not cut from it. list_videos and get_video report the camera work too. When two clips cover the same moment, prefer the mounted or stabilised one. get_video also lists a clip's shaky stretches as shaky_at timestamps (\"12.0-16.0\") - the parts worse than that clip's own ordinary level. A shaky shot looks wrong in a finished cut whatever it shows: cut around those stretches rather than dropping the video, since the rest of it is usually fine. Use a shaky range only when nothing else covers the moment, and keep it short when you do.
-7. When the footage has people talking on camera (interviews), build the story out of what they say: find their sentences with get_transcript, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
+7. When the footage has people talking on camera (interviews), build the story out of what they say. Everything anyone says is already in front of you under WHAT PEOPLE SAY - read it before you decide anything, and choose whose words carry the piece from all of the tapes, not from the first speaker you come across. Use get_transcript only for a tape listed as left out there. Cut the clip to whole sentences, cut the clip to whole sentences, and set that clip's audio to \"source\". A talking head is not b-roll - never mute someone mid-sentence to speak over them, and never write narration for a beat whose clips use \"source\" audio. Voice-over is for the scenery between what people say, not a replacement for it.
 8. Do not sit on a talking head for a whole beat, and do not bury them either. Show the person first - long enough for a viewer to take in their face, a few seconds - then cut to a picture of what they are describing while they keep talking, and come back to them if the point lands on them. The viewer should recognise that face when it returns later in the piece. To keep a voice running while the picture changes, give the beat a \"bed\": {video_id, in_s, out_s} naming the stretch of speech that carries the whole beat. The beat's clips are then pictures only - their own audio is not played - and you can cut between as many as you like without interrupting the speaker. Use a bed whenever an answer continues under a cutaway; the range must be one speaker talking, on the microphone, ending on a whole sentence. Without a bed the sound stops dead the moment you cut away.
 9. get_transcript marks segments spoken away from the microphone: in an interview those are the questions and the slate, not the answers. Never start a clip on one and never build a beat around one - cut to where the person answers. They sound as far away as they were.
 10. Use what people say deliberately: a statement, an explanation, a line with a point to it. Chatter, half-sentences, thinking aloud, banter between takes and answers that go nowhere do not belong in a teaser, however clearly they are recorded - unless the user asks for that kind of material.
@@ -1603,7 +1692,8 @@ pub fn build_system_prompt(project: &Project, latest_script_json: Option<&str>, 
          - list_videos(): every video with a short summary.\n\
          - search_moments(query, limit): find moments by meaning or keyword across speech, on-screen text and visuals.\n\
          - get_video(video_id, start_s, end_s): keyframe descriptions - what is actually visible and when.\n\
-         - get_transcript(video_id, start_s, end_s): what people say, with timestamps.\n\n\
+         - get_transcript(video_id, start_s, end_s): what people say, with timestamps - only needed for a tape \
+         listed as left out of WHAT PEOPLE SAY below.\n\n\
          CLIP RANGES: in_s/out_s must lie inside ranges returned by the tools; never use a video_id or range you \
          have not inspected. Search results are search windows, not clips: cut a sub-range out of them.\n",
     );
@@ -2121,6 +2211,17 @@ pub async fn run_turn(
         ChatBackend::Cli(_) => 6000,
     };
     sys_prompt.push_str(&reference_edits_text(&ctx.db, project_id, reference_chars));
+    // The tapes themselves, before any tool is called. A whole project's speech is a few thousand
+    // tokens; a model that has to ask for each transcript reads two and builds the teaser out of
+    // whoever it happened to find there.
+    let speech_chars = match &ctx.backend {
+        ChatBackend::Server { .. } | ChatBackend::Cli(_) => 60_000,
+        // Half the window at ~4 chars a token, leaving the other half for tools and the draft.
+        ChatBackend::Local { ctx_tokens, .. } => ((*ctx_tokens as usize) * 4 / 2).clamp(4_000, 60_000),
+    };
+    if ctx.script.speech_in_prompt {
+        sys_prompt.push_str(&speech_digest(&ctx.db, project_id, speech_chars));
+    }
     // A length the user states ("60 second promo", "2 minutos") wins over whatever the model sets.
     let requested_s = requested_duration_s(message);
     // Only a first draft (or an explicit length) is squeezed to its target; revisions follow feedback.
@@ -3093,6 +3194,70 @@ mod tests {
             script.beats[0].clips.iter().all(|c| (c.out_s - c.in_s - 25.0).abs() < 1e-9),
             "every clip is the length its sentences are"
         );
+    }
+
+    /// The editor reads the tapes before it cuts. Everything spoken goes in the prompt, marked
+    /// where it is off the microphone, and when it will not all fit the tapes with the most
+    /// speech go first and the rest are named rather than hidden.
+    #[test]
+    fn every_word_spoken_goes_in_the_prompt() {
+        let mut db = Db::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = db.create_project(&NewProject::named("P")).unwrap();
+        let folder = db.add_folder(p.id, tmp.path(), true).unwrap();
+        for (id, name) in [(1, "talky.mp4"), (2, "quiet.mp4")] {
+            db.conn
+                .execute("INSERT INTO videos(id, content_hash, size, duration_s) VALUES (?1, ?2, 1, 60.0)", params![
+                    id,
+                    format!("h{id}")
+                ])
+                .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO video_files(video_id, folder_id, path, size, mtime, last_seen)
+                     VALUES (?1, ?2, ?3, 1, 0, 0)",
+                    params![id, folder.id, tmp.path().join(name).to_str().unwrap()],
+                )
+                .unwrap();
+        }
+        // The talkative tape, and one question asked from across the room.
+        for i in 0..8 {
+            db.conn
+                .execute(
+                    "INSERT INTO transcript_segments(video_id, start_s, end_s, text, off_mic)
+                     VALUES (1, ?1, ?2, 'I grew up in Northwest Hills and stayed', 0)",
+                    params![i as f64 * 3.0, i as f64 * 3.0 + 3.0],
+                )
+                .unwrap();
+        }
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text, off_mic)
+                 VALUES (1, 30.0, 32.0, 'So where did you grow up?', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcript_segments(video_id, start_s, end_s, text, off_mic)
+                 VALUES (2, 0.0, 2.0, 'a word from the quiet tape', 0)",
+                [],
+            )
+            .unwrap();
+
+        let all = speech_digest(&db, p.id, 60_000);
+        assert!(all.contains("#1 talky.mp4"), "{all}");
+        assert!(all.contains("#2 quiet.mp4"));
+        assert!(all.contains("I grew up in Northwest Hills"));
+        assert!(all.contains("[off-mic] So where did you grow up?"), "the questions are marked: {all}");
+        assert!(all.contains("0.00-3.00"), "timestamps to cut on");
+
+        // Squeezed: the tape with the most speech is kept and cut short, not dropped for a
+        // shorter one that happens to fit.
+        let tight = speech_digest(&db, p.id, 700);
+        assert!(tight.contains("#1 talky.mp4"), "{tight}");
+        assert!(tight.contains("the rest of this one with get_transcript"), "{tight}");
+        assert!(tight.len() <= 800, "stays near its budget: {}", tight.len());
     }
 
     /// The model never hears about a repair in the turn that caused it, so the note rides on the

@@ -223,6 +223,11 @@ pub struct ScriptConfig {
     /// stopping when we cut away. The editor can name a bed itself; this decides whether the
     /// pipeline lays one where it sees a beat that would otherwise fall silent.
     pub infer_audio_beds: bool,
+    /// Put every word spoken in the project in the prompt, before any tool is called. A model
+    /// that has to ask for each transcript reads a couple of tapes and builds the story out of
+    /// whoever it found there; an editor reads the interviews first. Off for a brain with a small
+    /// context that needs the room for tool results.
+    pub speech_in_prompt: bool,
     /// How far a laid bed may run past the clip it came from (s). Long enough for a cutaway or
     /// two, short enough that a beat does not swallow a whole answer nobody asked for.
     pub max_bed_extend_s: f64,
@@ -281,6 +286,7 @@ impl Default for ScriptConfig {
             audio_fade_s: 0.12,
             speech_lead_s: 0.5,
             infer_audio_beds: true,
+            speech_in_prompt: true,
             max_bed_extend_s: 20.0,
             max_speech_extend_s: 12.0,
             local_tool_rounds: 10,
@@ -543,6 +549,7 @@ impl Config {
                 "audio_fade_s" => f.audio_fade_s = num(key, value)?,
                 "speech_lead_s" => f.speech_lead_s = num(key, value)?,
                 "infer_audio_beds" => f.infer_audio_beds = flag(value),
+                "speech_in_prompt" => f.speech_in_prompt = flag(value),
                 "max_bed_extend_s" => f.max_bed_extend_s = num(key, value)?,
                 "max_speech_extend_s" => f.max_speech_extend_s = num(key, value)?,
                 "local_tool_rounds" => f.local_tool_rounds = num(key, value)?,
