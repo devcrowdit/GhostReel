@@ -1,0 +1,174 @@
+<?xml version="1.0" ?>
+<xmeml version="4">
+    <project>
+        <name>Golden Timeline</name>
+        <children>
+            <sequence id="sequence-1">
+                <name>Golden Timeline</name>
+                <duration>225</duration>
+                <rate>
+                    <timebase>25</timebase>
+                    <ntsc>FALSE</ntsc>
+                </rate>
+                <media>
+                    <video>
+                        <format/>
+                        <track>
+                            <clipitem frameBlend="FALSE" id="clipitem-1">
+                                <file id="file-1">
+                                    <pathurl>file:///media/intro.mp4</pathurl>
+                                    <name>intro.mp4</name>
+                                    <rate>
+                                        <timebase>25</timebase>
+                                        <ntsc>FALSE</ntsc>
+                                    </rate>
+                                    <duration>250</duration>
+                                    <timecode>
+                                        <rate>
+                                            <timebase>25</timebase>
+                                            <ntsc>FALSE</ntsc>
+                                        </rate>
+                                        <string>00:00:00:00</string>
+                                        <frame>0</frame>
+                                        <displayformat>NDF</displayformat>
+                                    </timecode>
+                                    <media>
+                                        <video/>
+                                        <audio/>
+                                    </media>
+                                </file>
+                                <name>intro.mp4</name>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <marker>
+                                    <name>b1: intro</name>
+                                    <in>25</in>
+                                    <out>175</out>
+                                </marker>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <duration>75</duration>
+                                <start>0</start>
+                                <end>75</end>
+                                <in>25</in>
+                                <out>100</out>
+                            </clipitem>
+                            <clipitem frameBlend="FALSE" id="clipitem-2">
+                                <file id="file-2">
+                                    <pathurl>file:///media/broll.mp4</pathurl>
+                                    <name>broll.mp4</name>
+                                    <rate>
+                                        <timebase>30</timebase>
+                                        <ntsc>TRUE</ntsc>
+                                    </rate>
+                                    <duration>150</duration>
+                                    <timecode>
+                                        <rate>
+                                            <timebase>30</timebase>
+                                            <ntsc>TRUE</ntsc>
+                                        </rate>
+                                        <string>00:00:00:00</string>
+                                        <frame>0</frame>
+                                        <displayformat>NDF</displayformat>
+                                    </timecode>
+                                    <media>
+                                        <video/>
+                                        <audio/>
+                                    </media>
+                                </file>
+                                <name>broll.mp4</name>
+                                <rate>
+                                    <timebase>30</timebase>
+                                    <ntsc>TRUE</ntsc>
+                                </rate>
+                                <rate>
+                                    <timebase>30</timebase>
+                                    <ntsc>TRUE</ntsc>
+                                </rate>
+                                <duration>90</duration>
+                                <start>75</start>
+                                <end>150</end>
+                                <in>0</in>
+                                <out>90</out>
+                            </clipitem>
+                            <clipitem frameBlend="FALSE" id="clipitem-3">
+                                <file id="file-1"/>
+                                <name>intro.mp4</name>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <marker>
+                                    <name>b2: outro</name>
+                                    <in>125</in>
+                                    <out>200</out>
+                                </marker>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <duration>75</duration>
+                                <start>150</start>
+                                <end>225</end>
+                                <in>125</in>
+                                <out>200</out>
+                            </clipitem>
+                        </track>
+                        <track/>
+                    </video>
+                    <audio>
+                        <track>
+                            <clipitem frameBlend="FALSE" id="clipitem-4">
+                                <file id="file-1"/>
+                                <name>intro.mp4</name>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <duration>75</duration>
+                                <start>0</start>
+                                <end>75</end>
+                                <in>25</in>
+                                <out>100</out>
+                            </clipitem>
+                            <clipitem frameBlend="FALSE" id="clipitem-5">
+                                <file id="file-1"/>
+                                <name>intro.mp4</name>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <rate>
+                                    <timebase>25</timebase>
+                                    <ntsc>FALSE</ntsc>
+                                </rate>
+                                <duration>75</duration>
+                                <start>150</start>
+                                <end>225</end>
+                                <in>125</in>
+                                <out>200</out>
+                            </clipitem>
+                        </track>
+                    </audio>
+                </media>
+                <timecode>
+                    <rate>
+                        <timebase>25</timebase>
+                        <ntsc>FALSE</ntsc>
+                    </rate>
+                    <string>00:00:00:00</string>
+                    <frame>0</frame>
+                    <displayformat>NDF</displayformat>
+                </timecode>
+            </sequence>
+        </children>
+    </project>
+</xmeml>

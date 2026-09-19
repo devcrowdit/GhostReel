@@ -518,7 +518,7 @@ async fn call_tool(paths: &Paths, name: &str, args: &Value) -> anyhow::Result<Va
             let format = args.get("format").and_then(|v| v.as_str()).unwrap_or("fcp_xml");
             let fmt = ghostreel_core::export::ExportFormat::from_str(format)?;
             let out = PathBuf::from(arg_str(args, "out")?);
-            let res = ghostreel_core::export::export_script(&db, &paths.data_dir, script_id, fmt, &out)?;
+            let res = ghostreel_core::export::export_script(&db, script_id, fmt, &out)?;
             Ok(json!({ "path": res.path, "format": format }))
         }
         "preview_script" => {

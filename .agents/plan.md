@@ -35,7 +35,7 @@ captions module, GPU feature flags, `scripts/tauri.mjs`).
 | D10 | ggml link conflict — **CONFIRMED in S0** | `whisper-rs` and `llama-cpp-2` each statically vendor ggml → `ld.lld: error: duplicate symbol: gguf_type_size(gguf_type)`. **Decision:** transcription runs in **`ghostreel-asr(.exe)`**, a small Rust helper binary (whisper-rs only, ~56 MB with CUDA) that the app/CLI spawns per video and reads JSON-lines segments from stdout. Main binary links only `llama-cpp-2`. | A shared-ggml single binary would need patching whisper-rs-sys to build against llama.cpp's newer ggml — fragile across upgrades. A process boundary also frees whisper's VRAM for sure before the VLM loads. |
 | D12 | Transcription backends | Mirror of D11 for speech: **`LocalWhisper`** (spawns bundled `ghostreel-asr`, whisper-rs CUDA) or **`GhostPenServer`** (`POST http://127.0.0.1:8771/v1/audio/transcriptions`, GhostPen's resident whisper). `stt.backend = auto | local | server`; `auto` probes `GET /health` + a capability check (see §2b). | On the dev box GhostPen already holds a whisper model in VRAM (~0.6 GB); GhostReel must not load a second copy. |
 | D13 | Projects | **One database, many projects.** `projects` own folders (`project_folders`); a video is indexed once (by content hash) and can belong to several projects via its folders. Search, chat and exports are scoped to a project. | Re-using an indexed clip in a second project costs nothing; per-project DB files would duplicate transcripts, frames and vectors. |
-| D14 | Timeline export | GhostReel builds an **OpenTimelineIO** timeline (native `.otio` JSON written from Rust) and converts it with the official **`otio-fcp-adapter`** (`fcp_xml` = Final Cut Pro 7 XML / xmeml, which Premiere Pro imports via *File → Import*) running in a bundled **`ghostreel-otio` sidecar** (Python + `opentimelineio` + `otio-fcp-adapter`, frozen per OS with PyInstaller). A native Rust xmeml writer is the fallback if the sidecar proves problematic. | There is no usable Rust OTIO (crates.io `opentimelineio` is a 2020 placeholder) and OTIO adapters are Python. The sidecar keeps the standalone promise (no Python on the user's PC). Note: Premiere imports **FCP7 XML**, not FCP X `.fcpxml`. |
+| D14 | Timeline export | GhostReel builds an **OpenTimelineIO** timeline (native `.otio` JSON written from Rust) and writes **Final Cut Pro 7 XML** (xmeml, which Premiere Pro imports via *File → Import*) from Rust as well (`fcpxml.rs`). No Python, no sidecar. | There is no usable Rust OTIO (crates.io `opentimelineio` is a 2020 placeholder), so the format is implemented here: xmeml is a small, stable XML dialect, and the writer is locked to a fixture produced by the official `otio-fcp-adapter`. The Python sidecar this replaced cost 11.9 MB per bundle and a Python toolchain in CI. Note: Premiere imports **FCP7 XML**, not FCP X `.fcpxml`. |
 
 ### Rust options for running local models in-process
 
@@ -329,14 +329,17 @@ preview), so what you watch is exactly what Premiere will import.
 - Gaps (`Gap` items, muted clips) render as black/silence of the right length so timing matches
   the export.
 
-### `ghostreel-otio` sidecar (D14)
-- Tiny Python CLI: `ghostreel-otio convert in.otio out.xml --adapter fcp_xml` and
-  `ghostreel-otio validate in.xml` (reads it back to catch adapter errors).
-- Pinned `opentimelineio` + `otio-fcp-adapter`; frozen with PyInstaller in CI for windows-x64 and
-  linux-x64 (~30–40 MB); shipped next to `ffmpeg` in the installers. Dev box may use a venv.
+### Timeline export (D14)
 - Rust writes `.otio` JSON via serde (OTIO schema `Timeline.1`, `Stack.1`, `Track.1`, `Clip.2`,
-  `ExternalReference.1`, `Gap.1`, `Marker.2`, `TimeRange.1`, `RationalTime.1`) — covered by golden
-  tests and by round-tripping through `otio.adapters.read_from_file` in CI.
+  `ExternalReference.1`, `Gap.1`, `Marker.2`, `TimeRange.1`, `RationalTime.1`) — `otio.rs`.
+- Rust writes FCP7 XML (`xmeml` version 4) from that document — `fcpxml.rs`. `start`/`end` count in
+  the sequence rate, `in`/`out`/`duration` in the source's; rates are an integer timebase plus an
+  NTSC flag; gaps are positions rather than elements; a `<file>` is spelled out once and
+  referenced by id after that.
+- Both formats read back through `export::validate_export`, which reports clips per track, length
+  and any media that is not on disk.
+- A golden fixture written by the official `otio-fcp-adapter` keeps the writer honest
+  (`tests/fixtures/golden.xml`, compared byte for byte).
 
 ### Acceptance
 - Golden tests: Script fixtures → `.otio` JSON snapshots; `.otio` → `fcp_xml` → read back → same
@@ -471,7 +474,7 @@ licenses (Bonsai, embeddinggemma = Gemma terms) shown in the download step.
 | M5 | Chunking, embeddings, FTS5 + sqlite-vec, hybrid search in CLI | `ghostreel search` returns right moments on eval queries |
 | M6 | Tauri UI: library, search, player w/ seek, settings, progress | Usable end-to-end in the app |
 | M7 | First-run wizard, watcher, summaries, `ask`, packaging: NSIS (Windows) + AppImage/deb/rpm/CLI tarball (Linux) + CI | Fresh Windows PC **and** fresh Linux install (no CUDA toolkit, no highllama/GhostPen): install → wizard → search works |
-| M8 | **Script chat + OTIO/FCP XML export** (§4a): project-scoped tools, constrained agent loop (local) / OpenAI tools (server), versioned scripts, script editor + mini timeline, Script→`.otio` writer, **timeline preview** (cached segment proxies, in-app playback, rendered `preview.mp4`), `ghostreel-otio` sidecar (`fcp_xml`), packaging of the sidecar | Chat produces a grounded 60–90 s script from real project footage; in-app preview plays the cut with titles/narration overlays and `preview.mp4` renders in seconds from cache; exported XML imports into **Premiere Pro** on the Windows PC with correct clips, in/out and markers |
+| M8 | **Script chat + OTIO/FCP XML export** (§4a): project-scoped tools, constrained agent loop (local) / OpenAI tools (server), versioned scripts, script editor + mini timeline, Script→`.otio` writer, **timeline preview** (cached segment proxies, in-app playback, rendered `preview.mp4`), FCP7 XML writer | Chat produces a grounded 60–90 s script from real project footage; in-app preview plays the cut with titles/narration overlays and `preview.mp4` renders in seconds from cache; exported XML imports into **Premiere Pro** on the Windows PC with correct clips, in/out and markers |
 | Backlog | MCP server, CLIP image similarity, video-clip input to the VLM, macOS Metal, voice-over TTS track | — |
 
 Keep a small **eval set** (10 videos, ~30 queries with expected video+timestamp) from M5 to

@@ -12,6 +12,7 @@ pub mod db;
 pub mod doctor;
 pub mod embed;
 pub mod export;
+pub mod fcpxml;
 pub mod frames;
 pub mod index;
 pub mod media;

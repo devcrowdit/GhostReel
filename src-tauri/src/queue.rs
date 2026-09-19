@@ -482,7 +482,7 @@ async fn run_export(
         .await;
 
     let res = tokio::task::spawn_blocking(move || {
-        ghostreel_core::export::export_script(&db, &p.data_dir, script_id, format, &out_path)
+        ghostreel_core::export::export_script(&db, script_id, format, &out_path)
     })
     .await
     .map_err(|e| e.to_string())?

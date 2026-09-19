@@ -16,9 +16,8 @@ S0 findings §11). Progress: [`.agents/TODO.md`](.agents/TODO.md).
 
 | path | what |
 |---|---|
-| `crates/ghostreel-core` | config, paths, SQLite+FTS5+sqlite-vec DB, server probing, doctor, projects, media (hash/ffprobe), index (scan + jobs), watch, models, script, otio, export, preview |
+| `crates/ghostreel-core` | config, paths, SQLite+FTS5+sqlite-vec DB, server probing, doctor, projects, media (hash/ffprobe), index (scan + jobs), watch, models, script, otio, fcpxml, export, preview |
 | `crates/ghostreel-cli` | `ghostreel` binary (`doctor`, `config`, `project`, `folder`, `index [--watch]`, `status`, `models [list|download|remove|dir|use]`, `script [import|list|show|export|preview|chat]`, `mcp` = MCP stdio server in `mcp.rs`) |
-| `tools/ghostreel-otio` | OpenTimelineIO + otio-fcp-adapter sidecar (convert to FCP7 XML, validate timeline) |
 | `src-tauri` | desktop app (package `ghostreel-app` → `target/*/ghostreel-app`, bundled as `GhostReel`; lib `ghostreel_lib`). Never name it `ghostreel`: it would overwrite the CLI binary in `target/` |
 | `src/` | React + TS frontend (Vite) |
 | `scripts/` | helper build, sidecar fetch/stage, CLI tarball (see Packaging) |

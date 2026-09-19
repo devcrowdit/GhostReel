@@ -43,11 +43,6 @@ mkdir -p "$STAGE_DIR"
 cp "$GHOSTREEL_BIN" "$STAGE_DIR/ghostreel"
 cp "$BIN_DIR/ghostreel-asr-$TRIPLE" "$STAGE_DIR/ghostreel-asr"
 cp "$BIN_DIR/ghostreel-llm-$TRIPLE" "$STAGE_DIR/ghostreel-llm"
-if [ -f "$BIN_DIR/ghostreel-otio-$TRIPLE" ]; then
-  cp "$BIN_DIR/ghostreel-otio-$TRIPLE" "$STAGE_DIR/ghostreel-otio"
-else
-  echo "Warning: ghostreel-otio not staged; this tarball cannot export timelines." >&2
-fi
 cp "$BIN_DIR/ffmpeg-$TRIPLE" "$STAGE_DIR/ffmpeg"
 cp "$BIN_DIR/ffprobe-$TRIPLE" "$STAGE_DIR/ffprobe"
 

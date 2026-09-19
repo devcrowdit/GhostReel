@@ -799,13 +799,11 @@ async fn script_cmd(paths: &Paths, action: ScriptAction) -> anyhow::Result<ExitC
         }
         ScriptAction::Export { id, format, out } => {
             let export_fmt = ExportFormat::from_str(&format)?;
-            let res = ghostreel_core::export::export_script(&db, &paths.data_dir, id, export_fmt, &out)?;
+            let res = ghostreel_core::export::export_script(&db, id, export_fmt, &out)?;
             println!("{}", res.path.display());
-            if ghostreel_core::export::locate_sidecar().is_some() {
-                match ghostreel_core::export::validate_export(&res.path) {
-                    Ok(v) => println!("{}", serde_json::to_string(&v)?),
-                    Err(e) => eprintln!("warning: validation failed: {e}"),
-                }
+            match ghostreel_core::export::validate_export(&res.path) {
+                Ok(v) => println!("{}", serde_json::to_string(&v)?),
+                Err(e) => eprintln!("warning: validation failed: {e}"),
             }
         }
         ScriptAction::Preview { id, out, burn_titles, burn_narration, normalize_audio } => {

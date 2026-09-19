@@ -288,7 +288,6 @@ crates/ghostreel-asr    whisper helper process (CUDA)
 crates/ghostreel-llm    vision / chat / embeddings helper process (CUDA)
 src-tauri/              desktop app: commands, task queue, local media server
 src/                    React + TypeScript frontend
-tools/ghostreel-otio    OpenTimelineIO → FCP XML sidecar
 scripts/                helper builds, sidecar fetch/staging, packaging
 .agents/                plan and TODO
 ```

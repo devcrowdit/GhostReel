@@ -23,11 +23,18 @@ always redrafting.
 - **Even out audio** — a checkbox beside Burn titles that levels loudness across clips
   (`loudnorm`), for cuts that mix a lav with a room mic.
 - **Task cards open**, showing what the turn is working on and a live log of each tool call.
-- **Timeline export ships in the bundle.** The OpenTimelineIO sidecar was wired through staging and
-  packaging but nothing ever built it, so every release quietly shipped without it and Export
-  failed with "ghostreel-otio sidecar not found". `scripts/build-otio.mjs` freezes it with
-  PyInstaller on Linux and Windows (cached in CI by the sidecar's own sources), `npm run sidecars`
-  builds it, and staging now refuses to package a release without it (`--require-otio`).
+- **Timeline export works again, and carries nothing with it.** Export failed with "ghostreel-otio
+  sidecar not found": staging and packaging both knew about the OpenTimelineIO sidecar, but nothing
+  ever built it, so every release shipped without it. Rather than freeze 11.9 MB of Python into
+  each bundle, Final Cut Pro 7 XML is now written here (`fcpxml.rs`) — frame counts on the right
+  clock, NTSC rates, gaps as positions, files declared once and referenced by id — and read back
+  for validation. `.otio` was always written in Rust; both formats now are, and the sidecar,
+  its build script, its CI steps and the Python toolchain are gone.
+
+  On the reference footage the Rust writer's XML is byte for byte what the official
+  `otio-fcp-adapter` produced, save one filename it left percent-encoded, and OpenTimelineIO reads
+  the two files back identically. A fixture from that adapter is checked in and compared byte for
+  byte on every test run.
 
 ### Changed
 - **Length is a target, not a quota.** Speech clips are never scaled; pictures are the only thing

@@ -24,14 +24,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
 function printUsage() {
-  console.log(`Usage: node scripts/stage-helpers.mjs [--target <triple>] [--target-dir <dir>] [--profile <profile>] [--cuda] [--require-otio]
+  console.log(`Usage: node scripts/stage-helpers.mjs [--target <triple>] [--target-dir <dir>] [--profile <profile>] [--cuda]
 
 Options:
   --target <triple>       Target rust triple (default: host triple)
   --target-dir <dir>      Cargo target directory (default: CARGO_TARGET_DIR or target/)
   --profile <profile>     Cargo build profile (default: release)
   --cuda                  Require CUDA runtime libraries to be staged (errors if none found)
-  --require-otio          Require the ghostreel-otio sidecar (errors if it has not been built)
   --help, -h              Print usage information
 `);
 }
@@ -64,7 +63,6 @@ function main() {
   let targetDirArg = null;
   let profile = 'release';
   let cuda = false;
-  let requireOtio = false;
 
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -74,8 +72,6 @@ function main() {
       process.exit(0);
     } else if (arg === '--cuda') {
       cuda = true;
-    } else if (arg === '--require-otio') {
-      requireOtio = true;
     } else if (arg === '--profile') {
       i++;
       if (i >= args.length) {
@@ -141,23 +137,6 @@ function main() {
     process.exit(1);
   }
 
-  // Optional: ghostreel-otio, looked up in <target-dir>/sidecars/ghostreel-otio[.exe] then the profile dir
-  const otioSidecarPath = join(targetDir, 'sidecars', `ghostreel-otio${exeExt}`);
-  const otioBinDirPath = join(binDir, `ghostreel-otio${exeExt}`);
-  let otioPath = null;
-  if (existsSync(otioSidecarPath)) {
-    otioPath = otioSidecarPath;
-  } else if (existsSync(otioBinDirPath)) {
-    otioPath = otioBinDirPath;
-  } else if (requireOtio) {
-    console.error(`Error: ghostreel-otio not found in ${join(targetDir, 'sidecars')} or ${binDir}.`);
-    console.error('Run `node scripts/build-otio.mjs` first — without it the bundle cannot export');
-    console.error('a script to Premiere or Resolve.');
-    process.exit(1);
-  } else {
-    console.log('Note: ghostreel-otio not found, skipping optional helper (no timeline export).');
-  }
-
   // Destination directories
   const binariesDir = join(repoRoot, 'src-tauri', 'binaries');
   mkdirSync(binariesDir, { recursive: true });
@@ -166,10 +145,6 @@ function main() {
     { name: 'ghostreel-asr', src: asrPath },
     { name: 'ghostreel-llm', src: llmPath },
   ];
-  if (otioPath) {
-    helpersToStage.push({ name: 'ghostreel-otio', src: otioPath });
-  }
-
   // Copy helpers
   const stagedHelpers = [];
   for (const helper of helpersToStage) {
@@ -315,9 +290,9 @@ function main() {
 
   // Tauri config overlay for `tauri build --config src-tauri/tauri.bundle.json`. externalBin and
   // resources are kept out of tauri.conf.json because tauri-build fails when a listed sidecar is
-  // missing (would break `tauri dev`/clippy), and ghostreel-otio is optional until M8 lands.
+  // missing, which would break `tauri dev` and clippy.
   const externalBin = [];
-  for (const name of ['ffmpeg', 'ffprobe', 'ghostreel-asr', 'ghostreel-llm', 'ghostreel-otio']) {
+  for (const name of ['ffmpeg', 'ffprobe', 'ghostreel-asr', 'ghostreel-llm']) {
     if (existsSync(join(binariesDir, `${name}-${target}${exeExt}`))) {
       externalBin.push(`binaries/${name}`);
     } else if (name === 'ffmpeg' || name === 'ffprobe') {

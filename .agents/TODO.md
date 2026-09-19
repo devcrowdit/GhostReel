@@ -36,7 +36,7 @@
 - [x] M8a: schema v3 (`chat_sessions`, `chat_messages`, `scripts`, `exports`), `script` module (schema v1,
       validation against project footage, transcript segment boundary snapping, versioned drafts), `otio`
       module (OpenTimelineIO .otio timeline builder with V1/A1/V2 tracks, markers, rational timebases),
-      `ghostreel-otio` sidecar (OpenTimelineIO + otio-fcp-adapter FCP7 XML converter and validator), `export`
+      `fcpxml` module (Final Cut Pro 7 XML writer and reader, no sidecar), `export`
       module, and CLI `ghostreel script import|list|show|export`
 - [x] M8b: timeline preview — `preview` module (sequence-fps frame snapping, proxy caching per clip with
       content-hash/in/out/fps/dimensions keys, nvenc hardware acceleration with libx264 fallback, concat

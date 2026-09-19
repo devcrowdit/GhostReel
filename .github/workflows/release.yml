@@ -183,33 +183,8 @@ jobs:
       - name: Fetch sidecars
         run: node scripts/fetch-sidecars.mjs
 
-      # The timeline export (FCP7 XML / .otio) runs through OpenTimelineIO, which is Python;
-      # the bundle carries a frozen copy so the installed app needs no Python of its own.
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Restore otio sidecar
-        id: otio
-        uses: actions/cache/restore@v4
-        with:
-          path: target/sidecars
-          key: otio-linux-x64-${{ hashFiles('tools/ghostreel-otio/*.py', 'tools/ghostreel-otio/requirements*.txt', 'scripts/build-otio.mjs') }}
-
-      - name: Build otio sidecar
-        if: steps.otio.outputs.cache-hit != 'true'
-        run: node scripts/build-otio.mjs
-
-      - name: Save otio sidecar
-        if: steps.otio.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/sidecars
-          key: ${{ steps.otio.outputs.cache-primary-key }}
-
       - name: Stage helpers
-        run: node scripts/stage-helpers.mjs --cuda --require-otio
+        run: node scripts/stage-helpers.mjs --cuda
 
       - name: Helper diagnostics
         run: |
@@ -401,33 +376,8 @@ jobs:
       - name: Fetch sidecars
         run: node scripts/fetch-sidecars.mjs
 
-      # The timeline export (FCP7 XML / .otio) runs through OpenTimelineIO, which is Python;
-      # the bundle carries a frozen copy so the installed app needs no Python of its own.
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Restore otio sidecar
-        id: otio
-        uses: actions/cache/restore@v4
-        with:
-          path: target/sidecars
-          key: otio-windows-x64-${{ hashFiles('tools/ghostreel-otio/*.py', 'tools/ghostreel-otio/requirements*.txt', 'scripts/build-otio.mjs') }}
-
-      - name: Build otio sidecar
-        if: steps.otio.outputs.cache-hit != 'true'
-        run: node scripts/build-otio.mjs
-
-      - name: Save otio sidecar
-        if: steps.otio.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/sidecars
-          key: ${{ steps.otio.outputs.cache-primary-key }}
-
       - name: Stage helpers
-        run: node scripts/stage-helpers.mjs --cuda --require-otio
+        run: node scripts/stage-helpers.mjs --cuda
 
       - name: Build Tauri NSIS bundle
         run: npx tauri build --config src-tauri/tauri.bundle.json --bundles nsis
